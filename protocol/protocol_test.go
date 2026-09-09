@@ -194,3 +194,61 @@ func TestMissingReportIntervalReportsMoreNotLess(t *testing.T) {
 		})
 	}
 }
+
+// The scheduled refresh has to fail in the direction that denies rather than
+// grants. A missed refresh locks a paying client out until PSP returns — loud,
+// complained about, recoverable. A wrongly-granted one hands out a period of
+// quota silently and cannot be taken back.
+//
+// It also must not become amnesty-on-silence by the back door: with no schedule
+// present, nothing happens at all, whatever the clock says.
+func TestScheduledRefreshDeniesRatherThanGrants(t *testing.T) {
+	full := int64(100 << 30)
+	cases := []struct {
+		name string
+		in   QuotaEntry
+		when int64
+		want bool // does a refresh fire?
+	}{
+		{"no schedule at all", QuotaEntry{}, 1 << 62, false},
+		{"deadline set but no grant", QuotaEntry{PeriodEndsAtMS: 100}, 1 << 62, false},
+		{"grant set but no deadline", QuotaEntry{NextPeriodHeadroomBytes: &full}, 1 << 62, false},
+		{"both set, not yet due", QuotaEntry{PeriodEndsAtMS: 100, NextPeriodHeadroomBytes: &full}, 99, false},
+		{"both set, due", QuotaEntry{PeriodEndsAtMS: 100, NextPeriodHeadroomBytes: &full}, 100, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.in.RefreshDue(tc.when); got != tc.want {
+				t.Fatalf("RefreshDue(%d) = %v, want %v", tc.when, got, tc.want)
+			}
+		})
+	}
+
+	// A SCHEDULED ZERO is a real instruction — "the next period starts already
+	// exhausted" — and must survive a round trip as something other than "no
+	// schedule". This is what the pointer buys; as a plain int64 the two cases
+	// would be one value.
+	zero := int64(0)
+	for _, tc := range []struct {
+		name string
+		in   *int64
+		due  bool
+	}{
+		{"no schedule", nil, false},
+		{"scheduled and already exhausted", &zero, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(QuotaEntry{Client: NewClientKey(1), PeriodEndsAtMS: 100, NextPeriodHeadroomBytes: tc.in})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var back QuotaEntry
+			if err := json.Unmarshal(b, &back); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := back.RefreshDue(100); got != tc.due {
+				t.Fatalf("after round trip %s: RefreshDue = %v, want %v", b, got, tc.due)
+			}
+		})
+	}
+}

@@ -113,14 +113,60 @@ type QuotaEntry struct {
 	//	  0 → limit configured and exhausted. The gate is closed.
 	//	  N → N bytes remain from BaselineBytes.
 	//
-	// No omitempty, deliberately: with it, 0 would serialise as absent and
-	// "exhausted" would arrive as "never configured" — the exact collision
-	// traffic_cap.go already has, where headroom <= 0 returns 0 and the panel
-	// reads 0 as unlimited. That defect does not get carried into a new format.
+	// THE POINTER is what carries the tri-state, and dropping it is the
+	// dangerous edit: as a plain int64, 0 would mean both "exhausted" and "not
+	// configured" — the exact collision traffic_cap.go already has, where
+	// headroom <= 0 returns 0 and the panel reads 0 as unlimited. The compiler
+	// catches that one for us, since the nil assignments stop compiling.
+	//
+	// No omitempty is a smaller, separate claim, and worth stating accurately
+	// because an inaccurate version of it was here first: on a POINTER field
+	// omitempty elides nil only — a pointer to 0 still marshals as 0 (verified).
+	// So it would not collapse the tri-state; it would turn `"headroom_bytes":
+	// null` into an absent key, and both still decode to nil. What it costs is
+	// wire explicitness: null visibly says "PSP decided there is no limit",
+	// where a missing key reads like a gap. On a field this load-bearing that is
+	// worth keeping, but it is a debuggability property, not a correctness one.
 	//
 	// It must also NOT be computed via TrafficFloorBytes: that returns 1 both
 	// for "exhausted" and for "one byte left", so it cannot express this at all.
 	HeadroomBytes *int64 `json:"headroom_bytes"`
+
+	// PeriodEndsAtMS and NextPeriodHeadroomBytes are a grant PSP authorises IN
+	// ADVANCE, so a calendar rollover does not depend on PSP being reachable at
+	// the instant it happens.
+	//
+	// The case they exist for: a client exhausts its quota on the 28th, PSP goes
+	// down for end-of-month maintenance, and the 1st arrives with the gate still
+	// closed. Absence-keeps-the-last-known is what protects the quota, and here
+	// that same rule keeps a paying client locked out of a period they are
+	// entitled to. Only a node backend we build ourselves can hold a future
+	// grant; that is one of the things this rewrite buys.
+	//
+	// THIS IS NOT AMNESTY ON SILENCE, and the difference is the whole point.
+	// "PSP has gone quiet, so I will assume unlimited" stays forbidden. "PSP
+	// told me on the 20th that on the 1st this row gets N bytes" is delivery in
+	// advance of something PSP actually decided.
+	//
+	// At PeriodEndsAtMS the agent sets BaselineBytes to its current counter,
+	// HeadroomBytes to NextPeriodHeadroomBytes, and clears both fields — ONE
+	// period ahead, never a schedule. PSP re-anchors precisely on next contact;
+	// its own period accounting is authoritative and does not depend on this.
+	//
+	// Zero PeriodEndsAtMS means no scheduled change. A nil
+	// NextPeriodHeadroomBytes means the same, and that direction is deliberate:
+	// a missed refresh denies a paying client until PSP returns, which is loud
+	// and recoverable; a wrongly-granted one is silent and is not.
+	//
+	// The pointer earns its keep here for the same reason as above and one more:
+	// a SCHEDULED ZERO is a real instruction — "the next period starts already
+	// exhausted" — and must not arrive as "no schedule".
+	//
+	// Clock skew on the node turns directly into quota, so the agent reports its
+	// own wall clock and PSP raises an Issue on drift. The leak is bounded
+	// anyway by whatever ceiling sized NextPeriodHeadroomBytes.
+	PeriodEndsAtMS          int64  `json:"period_ends_at_ms"`
+	NextPeriodHeadroomBytes *int64 `json:"next_period_headroom_bytes"`
 }
 
 // IPShadowEntry is per SUBJECT — concurrency is a property of the person, not
@@ -151,4 +197,14 @@ type RawConfig []byte
 type Credential struct {
 	UUID     string `json:"uuid,omitempty"`
 	Password string `json:"password,omitempty"`
+}
+
+// RefreshDue reports whether the pre-authorised next-period grant takes effect
+// at nowMS. Both halves must be present: a deadline with no grant, or a grant
+// with no deadline, is not a schedule and does nothing.
+func (q QuotaEntry) RefreshDue(nowMS int64) bool {
+	if q.PeriodEndsAtMS <= 0 || q.NextPeriodHeadroomBytes == nil {
+		return false
+	}
+	return nowMS >= q.PeriodEndsAtMS
 }
