@@ -161,3 +161,36 @@ func TestPartialReportFailsSafe(t *testing.T) {
 		t.Fatalf("partial must serialize explicitly, got %s", b)
 	}
 }
+
+// A missing or nonsense report interval must make the agent report MORE, never
+// less. Over-reporting costs bandwidth — measurable, loud, and nobody's data is
+// wrong. Under-reporting stops traffic accounting with nothing on screen to say
+// so, which is the same silent-stop shape §7.3 records upstream and the same one
+// `partial` is named against.
+//
+// This also pins that the rule lives in ONE place. PSP has to predict exactly
+// what the agent will do here; a second copy of the decision on the panel side
+// is the two-sources-of-truth problem the repo split exists to avoid.
+func TestMissingReportIntervalReportsMoreNotLess(t *testing.T) {
+	cases := []struct {
+		name     string
+		env      Envelope
+		since    int
+		wantFull bool
+	}{
+		{"interval absent", Envelope{}, 0, true},
+		{"interval zero, just reported", Envelope{FullReportSeconds: 0}, 1, true},
+		{"interval negative", Envelope{FullReportSeconds: -60}, 1, true},
+		{"asked outright, interval not yet up", Envelope{FullReportSeconds: 60, WantFullReport: true}, 1, true},
+		{"interval up", Envelope{FullReportSeconds: 60}, 60, true},
+		{"interval passed", Envelope{FullReportSeconds: 60}, 61, true},
+		{"interval not up", Envelope{FullReportSeconds: 60}, 59, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ShouldSendFull(tc.env, tc.since); got != tc.wantFull {
+				t.Fatalf("ShouldSendFull(%+v, %d) = %v, want %v", tc.env, tc.since, got, tc.wantFull)
+			}
+		})
+	}
+}

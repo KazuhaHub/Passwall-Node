@@ -49,6 +49,49 @@ type Envelope struct {
 	OverburnHeadroomBytes int64 `json:"overburn_headroom_bytes"`
 	// NextPollSeconds lets PSP pull the next round trip in when work is queued.
 	NextPollSeconds int `json:"next_poll_seconds"`
+
+	// FullReportSeconds is how often PSP wants the enumerations — the interval
+	// between reports with Partial=false. It is separate from NextPollSeconds
+	// because the two cadences answer different questions: how fast config
+	// reaches the node, and how stale the fleet-wide counter mosaic may be.
+	//
+	// It is a real operational knob, not a tunable for its own sake: this
+	// interval BOUNDS OverburnHeadroomBytes above. The aggregate is only ever as
+	// fresh as the oldest report in it, so halving this halves how far a client
+	// can collectively overshoot its quota before anyone can see it. A
+	// deployment that wants tighter enforcement lowers it and pays bandwidth; a
+	// deployment on metered backhaul raises it and accepts a looser bound.
+	//
+	// ZERO OR ABSENT MEANS EVERY REPORT IS FULL — see ShouldSendFull. Over-
+	// reporting costs bandwidth, which is measurable and loud; under-reporting
+	// stops traffic accounting, which is silent. A missing number must not be
+	// able to make the counters go quiet.
+	FullReportSeconds int `json:"full_report_seconds"`
+
+	// WantFullReport asks for the enumerations on the very next report,
+	// regardless of the interval — PSP restarted and lost its cache, an
+	// operator hit refresh, a previous report did not add up.
+	WantFullReport bool `json:"want_full_report"`
+}
+
+// ShouldSendFull decides whether the next NodeReport must carry the
+// enumerations. It lives here, in the shared package, because PSP has to be
+// able to predict exactly what the agent will do — a second copy of this rule
+// on the panel side is the two-sources-of-truth problem this split exists to
+// avoid.
+//
+// sinceLastFullSeconds is measured from the agent's last full report. On the
+// first report of a session there is no such instant, and the agent must pass a
+// value that exceeds any interval (a fresh agent reports fully).
+func ShouldSendFull(env Envelope, sinceLastFullSeconds int) bool {
+	if env.WantFullReport {
+		return true
+	}
+	// Fail safe: an unset, zero or nonsense interval means full every time.
+	if env.FullReportSeconds <= 0 {
+		return true
+	}
+	return sinceLastFullSeconds >= env.FullReportSeconds
 }
 
 // Task is a call turned into state.
