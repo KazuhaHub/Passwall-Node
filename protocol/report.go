@@ -17,6 +17,31 @@ package protocol
 type NodeReport struct {
 	AgentID string `json:"agent_id"`
 
+	// Partial says this report OMITTED the enumerations — Objects, Clients and
+	// Subjects — and carries only Have (plus any Issues). It exists so the poll
+	// cadence and the report cadence can differ: a fleet polling every few
+	// seconds for low delivery latency must not ship a full per-client counter
+	// enumeration every few seconds.
+	//
+	// FALSE IS THE SAFE DEFAULT, AND THAT IS WHY THE FLAG IS NAMED FOR THE
+	// EXCEPTION. An agent that does not know this field sends false, and false
+	// means "full", which means the strict rule below applies. The two possible
+	// mistakes are not symmetric:
+	//
+	//   - a light report misread as full  -> every client is missing -> a loud,
+	//     visible, self-correcting false alarm.
+	//   - a full report misread as light  -> a genuinely missing client is
+	//     silently swallowed, and the check stops checking with nothing on
+	//     screen to say so.
+	//
+	// The second is the failure this whole protocol is written against, so the
+	// zero value must land on the first.
+	//
+	// On a partial report PSP updates NOTHING from the absent fields: it must
+	// not read empty Objects as "everything converged", and it must not read
+	// empty Clients as zero traffic.
+	Partial bool `json:"partial"`
+
 	// Have is what the agent currently holds per stream. The validators live in
 	// the BODY, in one place — not in HTTP conditional headers. §8.3: those
 	// headers are defined on GET, this is a POST that never returns 304, so
@@ -30,8 +55,10 @@ type NodeReport struct {
 	// status are separate fields and are ALLOWED to disagree.
 	Objects []ObjectStatus `json:"objects"`
 
-	// Clients is a FULL enumeration INCLUDING ZERO VALUES. Absence from this
-	// list is a protocol issue, never idleness.
+	// Clients is a FULL enumeration INCLUDING ZERO VALUES. On a report with
+	// Partial=false, absence from this list is a protocol issue, never idleness.
+	// (On a partial report the field is absent wholesale and says nothing; see
+	// Partial above for why the flag defaults to the strict reading.)
 	//
 	// §7.3 records the upstream implementation this guards against: V2bX skips
 	// the whole report when no traffic moved and drops users below a threshold,

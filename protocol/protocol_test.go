@@ -129,3 +129,35 @@ func TestKeysRoundTripAndRejectNonCanonical(t *testing.T) {
 		}
 	}
 }
+
+// The light/full distinction has to fail SAFE. A report that omits the
+// enumerations is licensed to do so only by an explicit flag; anything that
+// does not set it — an older agent, a hand-built request, a decoder that
+// dropped an unknown field — must be read under the strict rule, where a
+// missing client is an issue rather than idleness.
+//
+// This test exists to catch the refactor that inverts the field. `Full bool`
+// reads better at the call site and is WRONG: its zero value would license
+// every silent omission, which is the exact failure §7.3 records upstream.
+func TestPartialReportFailsSafe(t *testing.T) {
+	// A report from before the field existed.
+	var old NodeReport
+	if err := json.Unmarshal([]byte(`{"agent_id":"a1","have":{},"objects":[],"clients":[]}`), &old); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if old.Partial {
+		t.Fatal("a report that does not mention the flag must be read as FULL — " +
+			"the strict reading is the one that stays loud when something is missing")
+	}
+
+	// And the flag must be on the wire even when false: a reader cannot
+	// distinguish "said full" from "said nothing" if it is elided, and both
+	// must resolve to full for the same reason.
+	b, err := json.Marshal(NodeReport{AgentID: "a1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"partial":false`) {
+		t.Fatalf("partial must serialize explicitly, got %s", b)
+	}
+}
