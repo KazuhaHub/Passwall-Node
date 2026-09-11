@@ -17,7 +17,7 @@ import (
 func TestReportUsesLiveCoreStatus(t *testing.T) {
 	store := openAgentTestStore(t)
 	built, err := (ReportBuilder{
-		AgentID: "agent-1", Store: store, CoreVersion: "stale", CoreState: "stale",
+		AgentID: "agent-1", Store: store, CoreEngine: "stale", CoreVersion: "stale", CoreState: "stale",
 		CoreStatus: func() agentcore.Status {
 			return agentcore.Status{Engine: "xray", Version: "26.6.27", State: agentcore.ProcessRunning}
 		},
