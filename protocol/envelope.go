@@ -1,5 +1,7 @@
 package protocol
 
+import "fmt"
+
 // SyncResponse is PSP's half of the round trip.
 //
 // One endpoint, one round trip, both directions (§8.3). The response must be
@@ -72,6 +74,24 @@ type Envelope struct {
 	// regardless of the interval — PSP restarted and lost its cache, an
 	// operator hit refresh, a previous report did not add up.
 	WantFullReport bool `json:"want_full_report"`
+}
+
+// ValidateEnvelope validates the response values that affect scheduling and
+// safety bounds. It is intentionally separate from per-segment validation:
+// one malformed segment is isolated and reported as an Issue, while an invalid
+// scheduling envelope invalidates the round trip before outbox acknowledgement.
+func ValidateEnvelope(envelope Envelope) error {
+	if envelope.ComputedAtMS < 0 || envelope.NumeratorAsOfMS < 0 ||
+		envelope.NumeratorOldestReportAgeMS < 0 || envelope.OverburnHeadroomBytes < 0 {
+		return fmt.Errorf("envelope timestamps, ages, and headroom must be non-negative")
+	}
+	if envelope.NextPollSeconds < 0 || envelope.NextPollSeconds > MaxNextPollSeconds {
+		return fmt.Errorf("next_poll_seconds must be between 0 and %d", MaxNextPollSeconds)
+	}
+	if envelope.FullReportSeconds < 0 || envelope.FullReportSeconds > MaxFullReportSeconds {
+		return fmt.Errorf("full_report_seconds must be between 0 and %d", MaxFullReportSeconds)
+	}
+	return nil
 }
 
 // ShouldSendFull decides whether the next NodeReport must carry the

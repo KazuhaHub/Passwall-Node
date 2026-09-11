@@ -38,6 +38,20 @@ type Segment[T any] struct {
 type ConfigBody struct {
 	Listeners []Listener    `json:"listeners"`
 	Coverage  SegmentCounts `json:"coverage"`
+	// Core is declarative desired state, not an exactly-once upgrade task. It
+	// therefore participates in the config ETag and is replayed until the
+	// agent reports the resulting CoreVersion. The zero value is accepted for
+	// protocol-v1 peers and resolves to the catalog's recommended release.
+	Core CoreSelection `json:"core"`
+}
+
+type CoreSelection struct {
+	Engine  string `json:"engine"`
+	Version string `json:"version"`
+	// AllowRestrictedReality records the operator's explicit acceptance that
+	// this release narrows REALITY client compatibility. The Node still checks
+	// the catalog; this flag cannot make an unlisted version installable.
+	AllowRestrictedReality bool `json:"allow_restricted_reality,omitempty"`
 }
 
 // Listener is one inbound PSP wants served.
@@ -95,7 +109,10 @@ type DirectivesBody struct {
 	// IPShadow is observe-only in v1. The agent computes who it WOULD have
 	// denied and reports it; it denies nobody.
 	IPShadow []IPShadowEntry `json:"ip_shadow"`
-	Coverage SegmentCounts   `json:"coverage"`
+	// Coverage is the fleet-wide denominator and freshness of the aggregate,
+	// not len(Quota) for this one agent. It may therefore be larger than both
+	// the local quota and IPShadow enumerations.
+	Coverage SegmentCounts `json:"coverage"`
 }
 
 // QuotaEntry ships an ABSOLUTE ORIGIN, not a pointer (§8.4, ADR 0025 Q3b).
@@ -195,8 +212,14 @@ type RawConfig []byte
 // Credential carries whatever the protocol in use needs. Modelled loosely for
 // the same reason as RawConfig.
 type Credential struct {
+	Username string `json:"username,omitempty"`
 	UUID     string `json:"uuid,omitempty"`
 	Password string `json:"password,omitempty"`
+	// Flow is the VLESS flow shared by this planned client row's attachments.
+	// It is carried with the credential rather than reconstructed from listener
+	// order: the planner may re-pair password and flow classes as membership
+	// changes, while Client.Key remains the stable row identity.
+	Flow string `json:"flow,omitempty"`
 }
 
 // RefreshDue reports whether the pre-authorised next-period grant takes effect

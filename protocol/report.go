@@ -1,5 +1,9 @@
 package protocol
 
+import "encoding/json"
+
+const ProtocolVersion1 = 1
+
 // NodeReport is the agent's half of the round trip: everything it observes,
 // and nothing it desires.
 //
@@ -16,9 +20,24 @@ package protocol
 // there is nowhere in this message to put them.
 type NodeReport struct {
 	AgentID string `json:"agent_id"`
+	// ProtocolVersion is the additive wire-contract generation understood by
+	// the sender. Version 1 is the first public contract. Zero is accepted as
+	// v1 for pre-version-field peers; future breaking generations require a new
+	// endpoint or an explicit compatibility decision rather than guessing.
+	ProtocolVersion int `json:"protocol_version,omitempty"`
+	// ReportedAtMS is the agent wall clock. PSP compares it with receipt time so
+	// a clock skew that would move a scheduled quota grant becomes observable.
+	ReportedAtMS int64 `json:"reported_at_ms,omitempty"`
+	// Version identity and core state are observation, not desired config. They
+	// preserve PanelClient.GetServerStatus for the native adapter and keep a
+	// dead core distinguishable from a live sync process.
+	AgentVersion string `json:"agent_version,omitempty"`
+	CoreVersion  string `json:"core_version,omitempty"`
+	CoreState    string `json:"core_state,omitempty"`
 
-	// Partial says this report OMITTED the enumerations — Objects, Clients and
-	// Subjects — and carries only Have (plus any Issues). It exists so the poll
+	// Partial says this report OMITTED the enumerations — Objects,
+	// ListenerCounters, Clients and Subjects — and carries only Have (plus any
+	// Issues). It exists so the poll
 	// cadence and the report cadence can differ: a fleet polling every few
 	// seconds for low delivery latency must not ship a full per-client counter
 	// enumeration every few seconds.
@@ -55,6 +74,11 @@ type NodeReport struct {
 	// status are separate fields and are ALLOWED to disagree.
 	Objects []ObjectStatus `json:"objects"`
 
+	// ListenerCounters is the FULL cumulative listener-counter enumeration. PSP's node
+	// traffic charts are sourced from listener counters, never by summing shared
+	// clients (which would double-count a client attached to several listeners).
+	ListenerCounters []ListenerCounters `json:"listener_counters"`
+
 	// Clients is a FULL enumeration INCLUDING ZERO VALUES. On a report with
 	// Partial=false, absence from this list is a protocol issue, never idleness.
 	// (On a partial report the field is absent wholesale and says nothing; see
@@ -75,6 +99,50 @@ type NodeReport struct {
 	// CONTESTED's outlet (§5, hole 4): the terminal action is not to fix it,
 	// but to record a stable code and hand it to a person.
 	Issues []Issue `json:"issues,omitempty"`
+
+	// TaskResults completes tasks received on an earlier SyncResponse. Results
+	// are replayed until a sync round trip succeeds, so a lost response cannot
+	// turn an executed side effect into an endlessly repeated task.
+	TaskResults []TaskResult `json:"task_results,omitempty"`
+}
+
+// MarshalJSON gives partial and full reports deliberately different shapes.
+// A tag cannot express both requirements: partial reports omit enumerations
+// wholesale, while full reports must encode an empty enumeration as [] rather
+// than silently omit it.
+func (r NodeReport) MarshalJSON() ([]byte, error) {
+	type reportAlias NodeReport
+	if !r.Partial {
+		if r.Objects == nil {
+			r.Objects = []ObjectStatus{}
+		}
+		if r.Clients == nil {
+			r.Clients = []ClientCounters{}
+		}
+		if r.ListenerCounters == nil {
+			r.ListenerCounters = []ListenerCounters{}
+		}
+		return json.Marshal(reportAlias(r))
+	}
+	type partialReport struct {
+		AgentID         string                 `json:"agent_id"`
+		ProtocolVersion int                    `json:"protocol_version,omitempty"`
+		ReportedAtMS    int64                  `json:"reported_at_ms,omitempty"`
+		AgentVersion    string                 `json:"agent_version,omitempty"`
+		CoreVersion     string                 `json:"core_version,omitempty"`
+		CoreState       string                 `json:"core_state,omitempty"`
+		Partial         bool                   `json:"partial"`
+		Have            map[string]StreamState `json:"have"`
+		Issues          []Issue                `json:"issues,omitempty"`
+		TaskResults     []TaskResult           `json:"task_results,omitempty"`
+	}
+	return json.Marshal(partialReport{
+		AgentID: r.AgentID, ProtocolVersion: r.ProtocolVersion,
+		ReportedAtMS: r.ReportedAtMS, AgentVersion: r.AgentVersion,
+		CoreVersion: r.CoreVersion, CoreState: r.CoreState,
+		Partial: true, Have: r.Have,
+		Issues: r.Issues, TaskResults: r.TaskResults,
+	})
 }
 
 // StreamState is what the agent holds for one stream.
@@ -151,6 +219,21 @@ type ClientCounters struct {
 	// check cannot make.
 	CounterEpoch uint64    `json:"counter_epoch"`
 	Gate         GateState `json:"gate"`
+	// LiveIPs is the current source-IP set for this credential row. Counts alone
+	// cannot be unioned across agents, so PSP needs the identities to preserve
+	// its existing per-user distinct-IP and geo-anomaly aggregation.
+	LiveIPs []string `json:"live_ips,omitempty"`
+}
+
+// ListenerCounters is one listener's cumulative traffic observation. Present
+// distinguishes an idle listener from a missing one, and CounterEpoch makes a
+// local core reset explicit rather than relying on a counter decrease guess.
+type ListenerCounters struct {
+	Key          ListenerKey `json:"key"`
+	Present      bool        `json:"present"`
+	UpBytes      int64       `json:"up_bytes"`
+	DownBytes    int64       `json:"down_bytes"`
+	CounterEpoch uint64      `json:"counter_epoch"`
 }
 
 // SubjectObservation is the shadow concurrency evaluation (v1 observe-only).
@@ -178,6 +261,16 @@ type Issue struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// Untrusted report bounds are part of the v1 contract. The HTTP endpoint also
+// caps the whole body, while these limits stop one field class from consuming
+// that entire allowance or creating unbounded database index values.
+const (
+	MaxIssuesPerReport  = 256
+	MaxIssueCodeBytes   = 128
+	MaxIssueKeyBytes    = 512
+	MaxIssueDetailBytes = 4096
+)
+
 // Issue codes with a ruling attached (§8.3, §8.4).
 const (
 	// IssueRosterAheadOfConfig — the roster references a config version the
@@ -192,4 +285,14 @@ const (
 	// IssueDirectiveUnknownClient — a directive names a client not in the
 	// roster. PSP's defect.
 	IssueDirectiveUnknownClient = "directive_unknown_client"
+	// IssueObjectPendingTimeout means accepted content failed to converge
+	// within the operator-visible deadline. Retrying may still help.
+	IssueObjectPendingTimeout = "object_pending_timeout"
+	// IssueObjectRejectedTimeout means permanently rejected content remained
+	// unchanged long enough to require human action.
+	IssueObjectRejectedTimeout = "object_rejected_timeout"
+	// IssueReportMissingObject means a full report omitted an object from the
+	// mandatory convergence enumeration. PSP produces this issue because only
+	// PSP knows the expected closure.
+	IssueReportMissingObject = "report_missing_object"
 )

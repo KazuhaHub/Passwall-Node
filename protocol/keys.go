@@ -98,10 +98,11 @@ func rowID(s, prefix, kind string) (int64, error) {
 	// Rejecting a leading "+"/"-"/zero-pad keeps the mapping one-to-one: two
 	// spellings of one row id would let the same object hold two identities in
 	// a membership set, and membership is what deletion is expressed with.
-	if rest == "" || rest != strconv.FormatInt(parseOrZero(rest), 10) {
+	n := parseOrZero(rest)
+	if n <= 0 || rest != strconv.FormatInt(n, 10) {
 		return 0, fmt.Errorf("%s key %q: %q is not a canonical row id", kind, s, rest)
 	}
-	return parseOrZero(rest), nil
+	return n, nil
 }
 
 func parseOrZero(s string) int64 {
