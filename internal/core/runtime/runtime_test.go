@@ -62,7 +62,8 @@ func (s *supervisorStub) Deploy(_ context.Context, deployment agentcore.Deployme
 	s.deployment = deployment
 	if s.err == nil {
 		s.status = agentcore.Status{
-			State: agentcore.ProcessRunning, Version: deployment.Version, ConfigDigest: deployment.Artifact.Digest,
+			State: agentcore.ProcessRunning, Engine: deployment.Engine,
+			Version: deployment.Version, ConfigDigest: deployment.Artifact.Digest,
 		}
 	}
 	return s.err

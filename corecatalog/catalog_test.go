@@ -8,8 +8,26 @@ func TestEmbeddedCatalogIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog.Releases) != 3 {
-		t.Fatalf("release count = %d, want 3", len(catalog.Releases))
+	if len(catalog.Releases) != 4 {
+		t.Fatalf("release count = %d, want 4", len(catalog.Releases))
+	}
+}
+
+func TestRecommendedSingBoxCarriesExecutableMatrixAndOfficialAssets(t *testing.T) {
+	t.Parallel()
+	release, err := Recommended("sing-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.Version != "1.14.0" || !release.Evidence.ConfigTested || !release.Evidence.HandshakeTested || len(release.Evidence.Handshakes) != 3 {
+		t.Fatalf("unexpected recommended sing-box release: %#v", release)
+	}
+	asset, err := release.AssetFor("linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asset.Archive != "tar.gz" || asset.Binary != "sing-box-1.14.0-linux-amd64/sing-box" {
+		t.Fatalf("unexpected sing-box asset: %#v", asset)
 	}
 }
 

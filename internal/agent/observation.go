@@ -92,9 +92,9 @@ func (s *ObservationService) fail(ctx context.Context, failure error) (Observati
 	}
 	episode := s.episode
 	s.mu.Unlock()
-	identity := fmt.Sprintf("%s:%s:%d:%d", status.Version, status.ConfigDigest, status.RestartCount, status.LastChangedAt.UnixNano())
+	identity := fmt.Sprintf("%s:%s:%s:%d:%d", status.Engine, status.Version, status.ConfigDigest, status.RestartCount, status.LastChangedAt.UnixNano())
 	_, err := s.Issues.Record(ctx, LocalIssue{
-		Kind: LocalIssueCoreTelemetryFailed, Stream: "core", Key: status.Version,
+		Kind: LocalIssueCoreTelemetryFailed, Stream: "core", Key: status.Engine + "/" + status.Version,
 		DedupeKey: fmt.Sprintf("core-telemetry:%s:%d", identity, episode), Detail: failure.Error(),
 	})
 	if err != nil {

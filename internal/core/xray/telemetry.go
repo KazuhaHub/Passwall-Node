@@ -72,6 +72,9 @@ func (t *Telemetry) Collect(ctx context.Context) (agentcore.Counters, error) {
 	if status.State != agentcore.ProcessRunning {
 		return agentcore.Counters{}, fmt.Errorf("xray process is %s", status.State)
 	}
+	if status.Engine != "xray" {
+		return agentcore.Counters{}, fmt.Errorf("running core engine is %q, not xray", status.Engine)
+	}
 	if status.Version == "" || status.BinaryPath == "" || status.ConfigDigest == "" || status.LastChangedAt.IsZero() {
 		return agentcore.Counters{}, errors.New("running Xray status is incomplete")
 	}

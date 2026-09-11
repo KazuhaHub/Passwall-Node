@@ -16,6 +16,7 @@ func TestValidateCoreSelectionUsesAuditedCatalogAndExplicitRestriction(t *testin
 		{name: "legacy zero value"},
 		{name: "recommended", selection: protocol.CoreSelection{Engine: "xray", Version: "26.6.27"}},
 		{name: "config verified", selection: protocol.CoreSelection{Engine: "xray", Version: "26.7.28"}},
+		{name: "recommended sing-box", selection: protocol.CoreSelection{Engine: "sing-box", Version: "1.14.0"}},
 		{name: "restricted confirmed", selection: protocol.CoreSelection{Engine: "xray", Version: "26.9.9", AllowRestrictedReality: true}},
 		{name: "restricted unconfirmed", selection: protocol.CoreSelection{Engine: "xray", Version: "26.9.9"}, wantError: true},
 		{name: "unrestricted with bypass", selection: protocol.CoreSelection{Engine: "xray", Version: "26.6.27", AllowRestrictedReality: true}, wantError: true},

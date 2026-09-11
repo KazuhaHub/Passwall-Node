@@ -19,14 +19,14 @@ func TestReportUsesLiveCoreStatus(t *testing.T) {
 	built, err := (ReportBuilder{
 		AgentID: "agent-1", Store: store, CoreVersion: "stale", CoreState: "stale",
 		CoreStatus: func() agentcore.Status {
-			return agentcore.Status{Version: "26.6.27", State: agentcore.ProcessRunning}
+			return agentcore.Status{Engine: "xray", Version: "26.6.27", State: agentcore.ProcessRunning}
 		},
 	}).Build(t.Context(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if built.Report.CoreVersion != "26.6.27" || built.Report.CoreState != "running" {
-		t.Fatalf("core status = %q/%q", built.Report.CoreVersion, built.Report.CoreState)
+	if built.Report.CoreEngine != "xray" || built.Report.CoreVersion != "26.6.27" || built.Report.CoreState != "running" {
+		t.Fatalf("core status = %q/%q/%q", built.Report.CoreEngine, built.Report.CoreVersion, built.Report.CoreState)
 	}
 }
 

@@ -4,6 +4,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +23,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/internal/core/install"
 	"github.com/KazuhaHub/passwall-node/internal/core/process"
 	coreruntime "github.com/KazuhaHub/passwall-node/internal/core/runtime"
+	"github.com/KazuhaHub/passwall-node/internal/core/singbox"
 	"github.com/KazuhaHub/passwall-node/internal/core/xray"
 	"github.com/KazuhaHub/passwall-node/internal/lifecycle"
 	"github.com/KazuhaHub/passwall-node/internal/state"
@@ -30,6 +33,7 @@ import (
 )
 
 const defaultXrayAPIListen = "127.0.0.1:10085"
+const defaultSingBoxAPIListen = "127.0.0.1:10086"
 
 type options struct {
 	Endpoint          string
@@ -37,6 +41,7 @@ type options struct {
 	CredentialFile    string
 	DataDir           string
 	XrayAPIListen     string
+	SingBoxAPIListen  string
 	AllowInsecureHTTP bool
 	ShowVersion       bool
 }
@@ -75,6 +80,10 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err := os.MkdirAll(parsed.DataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+	singBoxAPISecret, err := loadOrCreateSecret(filepath.Join(parsed.DataDir, "secrets", "sing-box-api"))
+	if err != nil {
+		return err
+	}
 	store, err := statesqlite.Open(ctx, filepath.Join(parsed.DataDir, "state.db"))
 	if err != nil {
 		return err
@@ -91,15 +100,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	supervisor, err := process.NewSupervisor(process.Options{
-		Binary: initial.BinaryPath, Version: initial.Version,
+		Engine: initial.Engine, Binary: initial.BinaryPath, Version: initial.Version,
+		// Preserve the v1 on-disk location across the multi-core upgrade. The
+		// directory name is legacy-only; its contents are core-neutral artifacts.
 		StateDir: filepath.Join(parsed.DataDir, "runtime", "xray"),
-		RunArgs: func(configPath string) []string {
-			return []string{"run", "-config", configPath}
-		},
-		ValidateArgs: func(configPath string) []string {
-			return []string{"run", "-test", "-config", configPath}
-		},
-		Stdout: stdout, Stderr: stderr,
+		Commands: coreCommand,
+		Stdout:   stdout, Stderr: stderr,
 		RequireInitialConfigDigest: true,
 		InitialConfigDigest:        initial.ConfigDigest,
 	})
@@ -109,23 +115,42 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	coreRuntime, err := coreruntime.New(coreruntime.Options{
 		Store: store, Installer: installer, Supervisor: supervisor,
 		CompilerFactory: func(selection protocol.CoreSelection) (agentcore.Compiler, error) {
-			if selection.Engine != "xray" {
+			switch selection.Engine {
+			case "xray":
+				return xray.Compiler{
+					APIListen: parsed.XrayAPIListen, CoreVersion: selection.Version,
+					AllowRestrictedReality: selection.AllowRestrictedReality,
+				}, nil
+			case "sing-box":
+				return singbox.Compiler{
+					APIListen: parsed.SingBoxAPIListen, APISecret: singBoxAPISecret,
+				}, nil
+			default:
 				return nil, fmt.Errorf("core engine %q is unsupported", selection.Engine)
 			}
-			return xray.Compiler{
-				APIListen: parsed.XrayAPIListen, CoreVersion: selection.Version,
-				AllowRestrictedReality: selection.AllowRestrictedReality,
-			}, nil
 		},
 	})
 	if err != nil {
 		return err
 	}
-	telemetry, err := xray.NewTelemetry(xray.TelemetryOptions{
+	xrayTelemetry, err := xray.NewTelemetry(xray.TelemetryOptions{
 		Store: store, Status: supervisor.Status, APIListen: parsed.XrayAPIListen,
 	})
 	if err != nil {
 		return err
+	}
+	singBoxTelemetry, err := singbox.NewTelemetry(singbox.TelemetryOptions{
+		Store: store, Status: supervisor.Status, APIListen: parsed.SingBoxAPIListen,
+		APISecret: singBoxAPISecret, OnError: func(err error) { logger.Printf("%v", err) },
+	})
+	if err != nil {
+		return err
+	}
+	telemetry := agentcore.TelemetryRouter{
+		Status: supervisor.Status,
+		Adapters: map[string]agentcore.Telemetry{
+			"xray": xrayTelemetry, "sing-box": singBoxTelemetry,
+		},
 	}
 	now := time.Now
 	issues := agent.OutboxIssueSink{
@@ -166,6 +191,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	logger.Printf("starting agent_id=%s version=%s endpoint=%s", parsed.AgentID, buildversion.String(), parsed.Endpoint)
 	err = lifecycle.Run(ctx,
 		lifecycle.Service{Name: "core supervisor", Run: supervisor.Run},
+		lifecycle.Service{Name: "sing-box telemetry", Run: singBoxTelemetry.Run},
 		lifecycle.Service{Name: "local expiry", Run: func(ctx context.Context) error {
 			return coreRuntime.RunExpiryLoop(ctx, func(err error) { logger.Printf("%v", err) })
 		}},
@@ -186,6 +212,7 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	flags.StringVar(&parsed.CredentialFile, "credential-file", "", "absolute path to the private node credential")
 	flags.StringVar(&parsed.DataDir, "data-dir", "", "absolute private state directory")
 	flags.StringVar(&parsed.XrayAPIListen, "xray-api-listen", defaultXrayAPIListen, "loopback Xray statistics endpoint")
+	flags.StringVar(&parsed.SingBoxAPIListen, "sing-box-api-listen", defaultSingBoxAPIListen, "loopback sing-box telemetry endpoint")
 	flags.BoolVar(&parsed.AllowInsecureHTTP, "allow-insecure-http", false, "allow plain HTTP (development only)")
 	flags.BoolVar(&parsed.ShowVersion, "version", false, "print build version and exit")
 	if err := flags.Parse(arguments); err != nil {
@@ -207,8 +234,9 @@ func validateOptions(options options) error {
 	if len(options.AgentID) > 64 || !validAgentID(options.AgentID) {
 		return errors.New("agent-id must be 1..64 canonical ASCII characters")
 	}
-	if strings.TrimSpace(options.Endpoint) != options.Endpoint || strings.TrimSpace(options.XrayAPIListen) != options.XrayAPIListen {
-		return errors.New("endpoint and xray-api-listen must be canonical")
+	if strings.TrimSpace(options.Endpoint) != options.Endpoint || strings.TrimSpace(options.XrayAPIListen) != options.XrayAPIListen ||
+		strings.TrimSpace(options.SingBoxAPIListen) != options.SingBoxAPIListen {
+		return errors.New("endpoint and core API listen addresses must be canonical")
 	}
 	return nil
 }
@@ -250,7 +278,71 @@ func readCredential(path string) (string, error) {
 	return string(contents), nil
 }
 
+func loadOrCreateSecret(secretPath string) (string, error) {
+	if !filepath.IsAbs(secretPath) {
+		return "", errors.New("secret path must be absolute")
+	}
+	if err := os.MkdirAll(filepath.Dir(secretPath), 0o700); err != nil {
+		return "", fmt.Errorf("create secrets directory: %w", err)
+	}
+	if secret, err := readPrivateSecret(secretPath); err == nil {
+		return secret, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate local API secret: %w", err)
+	}
+	secret := hex.EncodeToString(random)
+	file, err := os.OpenFile(secretPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return readPrivateSecret(secretPath)
+	}
+	if err != nil {
+		return "", fmt.Errorf("create local API secret: %w", err)
+	}
+	if _, err := file.WriteString(secret + "\n"); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("write local API secret: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("sync local API secret: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close local API secret: %w", err)
+	}
+	return secret, nil
+}
+
+func readPrivateSecret(secretPath string) (string, error) {
+	info, err := os.Lstat(secretPath)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("local API secret must be a regular file, not a symlink")
+	}
+	if goruntime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("local API secret must not be accessible by group or others")
+	}
+	if info.Size() > 256 {
+		return "", errors.New("local API secret is too large")
+	}
+	content, err := os.ReadFile(secretPath)
+	if err != nil {
+		return "", fmt.Errorf("read local API secret: %w", err)
+	}
+	secret := strings.TrimSpace(string(content))
+	if len(secret) < 32 || strings.ContainsAny(secret, " \t\r\n") {
+		return "", errors.New("local API secret is invalid")
+	}
+	return secret, nil
+}
+
 type initialCore struct {
+	Engine       string
 	Version      string
 	BinaryPath   string
 	ConfigDigest string
@@ -268,6 +360,7 @@ func prepareInitialCore(ctx context.Context, store state.Store, installer *insta
 			return initialCore{}, assetErr
 		}
 		return initialCore{
+			Engine:     release.Engine,
 			Version:    release.Version,
 			BinaryPath: filepath.Join(root, release.Engine, "versions", release.Version, asset.Binary),
 		}, nil
@@ -288,6 +381,24 @@ func prepareInitialCore(ctx context.Context, store state.Store, installer *insta
 		return initialCore{}, fmt.Errorf("verify last confirmed core installation: %w", err)
 	}
 	return initialCore{
-		Version: installed.Version, BinaryPath: installed.BinaryPath, ConfigDigest: deployment.ConfigDigest,
+		Engine: installed.Engine, Version: installed.Version,
+		BinaryPath: installed.BinaryPath, ConfigDigest: deployment.ConfigDigest,
 	}, nil
+}
+
+func coreCommand(engine string) (process.Command, error) {
+	switch engine {
+	case "xray":
+		return process.Command{
+			RunArgs:      func(configPath string) []string { return []string{"run", "-config", configPath} },
+			ValidateArgs: func(configPath string) []string { return []string{"run", "-test", "-config", configPath} },
+		}, nil
+	case "sing-box":
+		return process.Command{
+			RunArgs:      func(configPath string) []string { return []string{"run", "-c", configPath} },
+			ValidateArgs: func(configPath string) []string { return []string{"check", "-c", configPath} },
+		}, nil
+	default:
+		return process.Command{}, fmt.Errorf("core engine %q is unsupported", engine)
+	}
 }

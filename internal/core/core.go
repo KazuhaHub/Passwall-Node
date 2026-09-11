@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/protocol"
@@ -43,6 +44,7 @@ const (
 
 type Status struct {
 	State         ProcessState
+	Engine        string
 	Version       string
 	BinaryPath    string
 	ConfigDigest  string
@@ -56,9 +58,28 @@ type Status struct {
 // from validating with one binary and starting another.
 type Deployment struct {
 	Artifact   Artifact
+	Engine     string
 	BinaryPath string
 	Version    string
 }
+
+// ObjectError identifies one desired object that a core compiler cannot
+// represent. Code is stable protocol data; Err remains the diagnostic cause.
+type ObjectError struct {
+	Stream string
+	Key    string
+	Code   string
+	Err    error
+}
+
+func (e *ObjectError) Error() string {
+	if e == nil {
+		return "core object error"
+	}
+	return fmt.Sprintf("core compile %s %s: %v", e.Stream, e.Key, e.Err)
+}
+
+func (e *ObjectError) Unwrap() error { return e.Err }
 
 // Supervisor validates, installs, starts, monitors and rolls back one core
 // process. Apply must be content-idempotent: applying an already-running digest

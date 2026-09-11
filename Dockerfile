@@ -33,6 +33,7 @@ ENV TZ=UTC \
     PSP_NODE_DATA_DIR=/var/lib/passwall-node \
     PSP_NODE_CREDENTIAL_FILE=/run/secrets/node_credential \
     PSP_NODE_XRAY_API_LISTEN=127.0.0.1:10085 \
+    PSP_NODE_SING_BOX_API_LISTEN=127.0.0.1:10086 \
     PUID=10001 \
     PGID=10001
 

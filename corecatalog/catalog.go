@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"path/filepath"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -231,6 +231,10 @@ func validateRelease(release Release) error {
 	if release.Engine == "" || release.Engine != strings.ToLower(release.Engine) {
 		return errors.New("engine must be lowercase")
 	}
+	repository, knownEngine := officialRepository(release.Engine)
+	if !knownEngine {
+		return fmt.Errorf("unknown core engine %q", release.Engine)
+	}
 	version, err := NormalizeVersion(release.Version)
 	if err != nil || version != release.Version {
 		return errors.New("version must be canonical")
@@ -250,9 +254,9 @@ func validateRelease(release Release) error {
 		return errors.New("published_at and localized summary are required")
 	}
 	source, err := url.Parse(release.SourceURL)
-	wantSourcePath := "/XTLS/Xray-core/releases/tag/v" + release.Version
+	wantSourcePath := "/" + repository + "/releases/tag/v" + release.Version
 	if err != nil || source.Scheme != "https" || source.Host != "github.com" || source.Path != wantSourcePath || source.RawQuery != "" || source.Fragment != "" || source.User != nil {
-		return errors.New("source_url must be an official Xray GitHub release")
+		return errors.New("source_url must be the matching official GitHub release")
 	}
 	if !release.Evidence.SourceAudited || release.Evidence.VerifiedAt == nil {
 		return errors.New("source audit evidence and verified_at are required")
@@ -350,8 +354,8 @@ func validateAsset(release Release, asset Asset) error {
 		(asset.Arch != "amd64" && asset.Arch != "arm64") {
 		return fmt.Errorf("unsupported asset target %s/%s", asset.OS, asset.Arch)
 	}
-	if asset.Archive != "zip" || asset.Binary == "" || asset.Binary != filepath.Base(asset.Binary) || strings.ContainsAny(asset.Binary, `/\\`) {
-		return errors.New("asset must be a zip with a binary path")
+	if (asset.Archive != "zip" && asset.Archive != "tar.gz") || !validArchiveMember(asset.Binary) {
+		return errors.New("asset must use a supported archive and a safe binary path")
 	}
 	decoded, err := hex.DecodeString(asset.SHA256)
 	if err != nil || len(decoded) != sha256Size {
@@ -361,11 +365,40 @@ func validateAsset(release Release, asset Asset) error {
 		return errors.New("asset sha256 must be lowercase")
 	}
 	location, err := url.Parse(asset.URL)
-	wantPrefix := "/XTLS/Xray-core/releases/download/v" + release.Version + "/"
-	if err != nil || location.Scheme != "https" || location.Host != "github.com" || !strings.HasPrefix(location.Path, wantPrefix) || location.RawQuery != "" || location.Fragment != "" || location.User != nil {
-		return errors.New("asset URL must belong to the matching official Xray release")
+	if err != nil {
+		return errors.New("asset URL must belong to the matching official release")
+	}
+	repository, knownEngine := officialRepository(release.Engine)
+	wantPrefix := "/" + repository + "/releases/download/v" + release.Version + "/"
+	assetName := strings.TrimPrefix(location.Path, wantPrefix)
+	if location.Scheme != "https" || location.Host != "github.com" || !strings.HasPrefix(location.Path, wantPrefix) ||
+		assetName == "" || strings.Contains(assetName, "/") || location.RawQuery != "" || location.Fragment != "" || location.User != nil {
+		return errors.New("asset URL must belong to the matching official release")
+	}
+	if !knownEngine {
+		return fmt.Errorf("unknown core engine %q", release.Engine)
+	}
+	if asset.Archive == "zip" && !strings.HasSuffix(assetName, ".zip") ||
+		asset.Archive == "tar.gz" && !strings.HasSuffix(assetName, ".tar.gz") {
+		return errors.New("asset URL suffix does not match its archive type")
 	}
 	return nil
+}
+
+func validArchiveMember(member string) bool {
+	return member != "" && !strings.Contains(member, "\\") && !path.IsAbs(member) &&
+		path.Clean(member) == member && member != "." && member != ".." && !strings.HasPrefix(member, "../")
+}
+
+func officialRepository(engine string) (string, bool) {
+	switch engine {
+	case "xray":
+		return "XTLS/Xray-core", true
+	case "sing-box":
+		return "SagerNet/sing-box", true
+	default:
+		return "", false
+	}
 }
 
 const sha256Size = 32

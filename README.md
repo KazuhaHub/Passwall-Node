@@ -1,16 +1,17 @@
 # Passwall-Node
 
-A node backend driven by an external control plane. The current production
-daemon runs an audited Xray version, applies only PSP-owned desired state, and
-reports what the core actually applied and counted. A sing-box core adapter is
-a future extension, not a current runtime promise.
+A node backend driven by an external control plane. The production daemon runs
+an audited Xray or sing-box version, applies only PSP-owned desired state, and
+reports what the selected core actually applied and counted.
 
-**Status: the Xray production path is implemented.** `cmd/node` wires outbound
-HTTPS synchronization, SQLite schema v6, exact checksum-pinned core install,
+**Status: the Xray and sing-box production paths are implemented.** `cmd/node`
+wires outbound HTTPS synchronization, SQLite schema v7, exact checksum-pinned core install,
 full-config compilation, atomic process/config replacement with rollback,
-offline expiry/quota enforcement, Xray telemetry, durable issue delivery and
-graceful shutdown. `cmd/contract-agent` remains the deterministic coreless
-cross-repository contract harness.
+offline expiry/quota enforcement, core-specific telemetry, durable issue
+delivery and graceful shutdown. sing-box accounting uses its authenticated
+loopback daemon API and a crash-safe connection journal; a stream gap is
+reported instead of silently under-counting. `cmd/contract-agent` remains the
+deterministic coreless cross-repository contract harness.
 
 ## What this is
 
@@ -95,8 +96,8 @@ passwall-node \
 
 Plain HTTP is rejected by default. `--allow-insecure-http` exists only for an
 explicit local-development deployment. The data directory holds the SQLite
-state, downloaded core versions and last confirmed runtime configuration; back
-it up and keep it private.
+state, downloaded core versions, last confirmed runtime configuration, and a
+generated private sing-box API secret; back it up and keep it private.
 
 The daemon refuses symlink credentials and, on Unix, any credential readable
 by group or others. On restart it launches a prior configuration only when its

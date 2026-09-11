@@ -57,23 +57,9 @@ type listenerSpec struct {
 	ExpiryTime     int64  `json:"expiry_time"`
 }
 
-// CompileError identifies the desired object that cannot be represented by
-// Xray. The stable Code is suitable for a rejected object status and Issue.
-type CompileError struct {
-	Stream string
-	Key    string
-	Code   string
-	Err    error
-}
-
-func (e *CompileError) Error() string {
-	if e == nil {
-		return "xray compile error"
-	}
-	return fmt.Sprintf("xray compile %s %s: %v", e.Stream, e.Key, e.Err)
-}
-
-func (e *CompileError) Unwrap() error { return e.Err }
+// CompileError is retained as a source-compatible name for Xray callers.
+// Runtime classification uses the core-neutral ObjectError contract.
+type CompileError = agentcore.ObjectError
 
 type xrayConfig struct {
 	Log       map[string]any   `json:"log"`

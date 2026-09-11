@@ -6,10 +6,10 @@
 > **设计记录不在这个仓库**,在 PSP 的 `docs/psp-node-agent.md`（为什么这样定）
 > 和 `docs/psp-node-plan.md`（做什么、什么顺序）。本文档只讲**这个仓库**的事。
 
-## 1. 现在有什么（B1 / B2 / C2 / B3-Xray 已完成，2026-09-11）
+## 1. 现在有什么（B1 / B2 / C2 / B3-Xray / B3-sing-box 已完成，2026-09-11）
 
 ```
-protocol/     线上契约，本地实现已定稿（本轮变更待先发布）
+protocol/     线上契约，本地实现已定稿
   keys.go       ClientKey / SubjectKey —— 两个不能互换的类型
   version.go    Version{Epoch, Version} —— 成对，不是裸 int64
   segments.go   Segment[T] + 三段的 body
@@ -19,18 +19,25 @@ protocol/     线上契约，本地实现已定稿（本轮变更待先发布）
   protocol_test.go
 internal/agent/       HTTP 拨出、三段接收、可重入应用、报告与调度
 internal/state/       持久化端口
-internal/state/sqlite SQLite schema v6：流、对象、计数、配额闸、幂等 outbox、最后确认 core 部署
+internal/state/sqlite SQLite schema v7：流、对象、计数、配额闸、幂等 outbox、core 部署与 sing-box 事件账本
 cmd/contract-agent/   C2 真 agent 契约执行器（仅 core 为确定性替身）
 cmd/node/             生产 daemon：同步、安装、编译、运行、观测、离线执法、优雅退出
-internal/core/        Compiler / Supervisor / Telemetry + Xray 实现
-corecatalog/          精确、校验和固定、跨平台的 Xray 版本目录
+internal/core/        Compiler / Supervisor / Telemetry + Xray / sing-box 实现
+corecatalog/          精确、校验和固定、跨平台的 Xray / sing-box 版本目录
 .github/workflows/    test/race/vet、六平台编译、Release + GHCR 多架构镜像
 ```
 
-**Xray 生产路径已经接通。** 一轮同步把本地观测、期望文档接收和至多一次 core 收敛串成一个提交边界；
+**Xray 与 sing-box 生产路径均已接通。** 一轮同步把本地观测、期望文档接收和至多一次 core 收敛串成一个提交边界；
 精确 core 安装、配置校验、原子替换、失败回滚、重启前 digest 核验、Xray 计数读取与断网时到期/配额
 停用都在生产 composition root 中。三类长期服务由统一 supervisor 管理，任何一项异常都会取消并排空
 其余服务，goroutine panic 不会悄悄留下半活进程。
+
+sing-box 固定核验 `1.14.0`，原生编译 VLESS、VMess、Trojan 和 Shadowsocks-2022。其官方 API
+仅绑定回环地址并使用本机持久随机 Bearer secret；长期 gRPC 连接事件先进入 SQLite 幂等账本，再汇成
+用户/监听累计计数。重连 reset 以绝对计数去重，core 重启结转已落盘累计值；如果断线超过 sing-box
+保留的 1000 条关闭连接而形成不可恢复缺口，agent 明确上报 Issue，绝不把不完整快照伪装成精确计量。
+`TestRealityHandshakeMatrix` 用本地 TLS 伪装端与 HTTP 目标实际跑通 Xray 26.6.27、Mihomo 1.19.30、
+sing-box 1.14.0 三客户端，目录中的 handshake evidence 对应这条可重复测试。
 
 HTTP/SQLite/apply/report 已由
 PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验收。跨仓发布顺序固定为：
@@ -86,7 +93,7 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 
 ### B2 — agent 骨架
 
-**状态：已完成。** 真实 HTTP client、SQLite schema v6、三段独立接收、可重入 join、
+**状态：已完成。** 真实 HTTP client、SQLite schema v7、三段独立接收、可重入 join、
 config add/update → roster → config delete 顺序、epoch 恢复、全量/轻量报告、配额周期推进、
 对象超时升级与幂等 outbox 均已落地。outbox 成功投递后保留 dedupe tombstone：持续存在的
 同一问题不会在每轮重新触发即时上报、把未来生产同步循环拖进无间隔自旋。
@@ -125,7 +132,7 @@ config add/update → roster → config delete 顺序、epoch 恢复、全量/�
 **明确排最后。** 前面的价值全部依赖对着真 PSP 的契约测试能跑起来；
 先写 core 会得到一堆没有验收标准的代码。
 
-**状态：Xray 路径已完成（2026-09-11）。** 发布矩阵与 PSP 一致（六平台二进制 + Linux
+**状态：Xray 与 sing-box 路径已完成（2026-09-11）。** 发布矩阵与 PSP 一致（六平台二进制 + Linux
 amd64/arm64 Docker）、core
 采用 `Compiler / Supervisor / Telemetry` 三端口且先实现 Xray、TLS 证书由 PSP 管理并由 agent
 原子安装。`corecatalog/` 是 Node 安装/编译与 PSP 选择器共用的唯一目录：只接受精确列出的版本，
@@ -137,8 +144,12 @@ Xray 与 `chrome + support-x25519mlkem768` 的 Mihomo，sing-box 的失败也已
 一次性凭据轮换。`Client.ExpiresAtMS` 已由 PSP 的单一有效到期链铸造，runtime 在 PSP 断线时仍按
 绝对截止时间本地停用。断线后才发生的人工/策略撤销若要更短窗口，仍需租约或第二通道。
 
-后续不属于 B3-Xray 完成条件的增量：sing-box core adapter、agent 自升级与带 exactly-once 状态的
-任务协议、RealityProbe。不要为了实现这些能力复用或放宽当前 `tasks[]` 的明确拒绝语义。
+sing-box `1.14.0` 的六平台官方资产同样固定 SHA-256，安装器支持安全的嵌套 tar.gz/ZIP 解包；切换
+engine/version/binary/命令参数是一个原子部署身份，启动失败会整体回滚。当前 sing-box 编译范围刻意
+限制为 VLESS、VMess、Trojan、Shadowsocks-2022；没有证据的协议不进入“推荐”承诺。
+
+后续增量：agent 自升级、带 exactly-once 状态的任务协议、RealityProbe。不要为了实现这些能力复用
+或放宽当前 `tasks[]` 的明确拒绝语义。
 
 ## 4. 十条不要
 

@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 // Store serialises access through one SQLite connection. The agent has one
 // writer and modest data volume; this makes transaction behaviour predictable
@@ -132,11 +132,60 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if current < 7 {
+		if err := migrateV7(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("record state schema version: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit state migration: %w", err)
+	}
+	return nil
+}
+
+func migrateV7(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE core_traffic_stream (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			process_identity TEXT NOT NULL,
+			ready INTEGER NOT NULL CHECK (ready IN (0, 1))
+		) STRICT`,
+		`CREATE TABLE core_connection_traffic (
+			process_identity TEXT NOT NULL,
+			connection_id TEXT NOT NULL,
+			client_key TEXT NOT NULL,
+			listener_key TEXT NOT NULL,
+			source_ip TEXT NOT NULL,
+			up_bytes INTEGER NOT NULL CHECK (up_bytes >= 0),
+			down_bytes INTEGER NOT NULL CHECK (down_bytes >= 0),
+			closed INTEGER NOT NULL CHECK (closed IN (0, 1)),
+			closed_at_ms INTEGER NOT NULL CHECK (closed_at_ms >= 0),
+			PRIMARY KEY (process_identity, connection_id)
+		) STRICT`,
+		`CREATE INDEX idx_core_connection_traffic_closed
+			ON core_connection_traffic(process_identity, closed, closed_at_ms DESC)`,
+		`CREATE TABLE core_client_traffic (
+			process_identity TEXT NOT NULL,
+			client_key TEXT NOT NULL,
+			up_bytes INTEGER NOT NULL CHECK (up_bytes >= 0),
+			down_bytes INTEGER NOT NULL CHECK (down_bytes >= 0),
+			PRIMARY KEY (process_identity, client_key)
+		) STRICT`,
+		`CREATE TABLE core_listener_traffic (
+			process_identity TEXT NOT NULL,
+			listener_key TEXT NOT NULL,
+			up_bytes INTEGER NOT NULL CHECK (up_bytes >= 0),
+			down_bytes INTEGER NOT NULL CHECK (down_bytes >= 0),
+			PRIMARY KEY (process_identity, listener_key)
+		) STRICT`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply state schema v7: %w", err)
+		}
 	}
 	return nil
 }
