@@ -18,6 +18,7 @@ const defaultOutboxBatch = 256
 type ReportBuilder struct {
 	AgentID      string
 	AgentVersion string
+	CoreEngine   string
 	CoreVersion  string
 	CoreState    string
 	CoreStatus   func() agentcore.Status
@@ -47,7 +48,7 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool) (BuiltReport, er
 	report := protocol.NodeReport{
 		AgentID: b.AgentID, ProtocolVersion: protocol.ProtocolVersion1,
 		ReportedAtMS: now.UnixMilli(), AgentVersion: b.AgentVersion,
-		CoreVersion: b.CoreVersion, CoreState: b.CoreState,
+		CoreEngine: b.CoreEngine, CoreVersion: b.CoreVersion, CoreState: b.CoreState,
 		Partial: partial, Have: make(map[string]protocol.StreamState, 3),
 	}
 	if b.CoreStatus != nil {

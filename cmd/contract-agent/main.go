@@ -79,7 +79,7 @@ func main() {
 	}
 	synchronizer := agent.Synchronizer{
 		Reports: agent.ReportBuilder{
-			AgentID: agentID, AgentVersion: "contract", CoreVersion: "coreless", CoreState: "running",
+			AgentID: agentID, AgentVersion: "contract", CoreEngine: "xray", CoreVersion: "coreless", CoreState: "running",
 			Store: store, Now: now,
 		},
 		Syncer: httpSyncer, Store: store, Processor: processor,

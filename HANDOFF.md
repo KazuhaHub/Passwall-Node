@@ -34,8 +34,10 @@ corecatalog/          精确、校验和固定、跨平台的 Xray / sing-box �
 
 sing-box 固定核验 `1.14.0`，原生编译 VLESS、VMess、Trojan 和 Shadowsocks-2022。其官方 API
 仅绑定回环地址并使用本机持久随机 Bearer secret；长期 gRPC 连接事件先进入 SQLite 幂等账本，再汇成
-用户/监听累计计数。重连 reset 以绝对计数去重，core 重启结转已落盘累计值；如果断线超过 sing-box
-保留的 1000 条关闭连接而形成不可恢复缺口，agent 明确上报 Issue，绝不把不完整快照伪装成精确计量。
+用户/监听累计计数。重连 reset 以绝对计数去重，core 重启结转已落盘累计值。reset 中缺失先前已知的
+活跃连接会明确报 `core_telemetry_gap`；但 sing-box 上游只保留最近 1000 条关闭连接，且 reset 没有单调
+cursor/完整性标记，
+因此断线期间“完全新建又关闭、且已被历史淘汰”的连接目前无法被证明或归户。不得声称任意长断线下精确计量。
 `TestRealityHandshakeMatrix` 用本地 TLS 伪装端与 HTTP 目标实际跑通 Xray 26.6.27、Mihomo 1.19.30、
 sing-box 1.14.0 三客户端，目录中的 handshake evidence 对应这条可重复测试。
 
@@ -147,6 +149,8 @@ Xray 与 `chrome + support-x25519mlkem768` 的 Mihomo，sing-box 的失败也已
 sing-box `1.14.0` 的六平台官方资产同样固定 SHA-256，安装器支持安全的嵌套 tar.gz/ZIP 解包；切换
 engine/version/binary/命令参数是一个原子部署身份，启动失败会整体回滚。当前 sing-box 编译范围刻意
 限制为 VLESS、VMess、Trojan、Shadowsocks-2022；没有证据的协议不进入“推荐”承诺。
+遥测重连能对已知活跃连接去重和查缺，但上述 1000 条历史边界是未解决的运营风险；在上游提供单调 cursor，
+或我们加入可独立核对的全局累计边界前，长时间 telemetry 中断后的计数必须视为有条件，不能视为数学上完整。
 
 后续增量：agent 自升级、带 exactly-once 状态的任务协议、RealityProbe。不要为了实现这些能力复用
 或放宽当前 `tasks[]` 的明确拒绝语义。
