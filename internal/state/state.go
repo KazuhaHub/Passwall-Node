@@ -18,6 +18,7 @@ var (
 	ErrStaleVersion    = errors.New("stale stream version")
 	ErrVersionConflict = errors.New("stream version has different content")
 	ErrCounterRollback = errors.New("counter moved backwards without a new epoch")
+	ErrCoreTrafficGap  = errors.New("core traffic stream has an unrecoverable event gap")
 	ErrInvalidState    = errors.New("invalid durable state")
 )
 
@@ -111,6 +112,33 @@ type CounterBatch struct {
 
 type CounterBatchResult struct {
 	GateChanged bool
+}
+
+// CoreTrafficEvent is one connection-ledger mutation emitted by a streaming
+// core telemetry API. Absolute events are idempotent snapshots; delta events
+// are accepted only after the connection identity has been observed.
+type CoreTrafficEvent struct {
+	ConnectionID string
+	ClientKey    protocol.ClientKey
+	ListenerKey  protocol.ListenerKey
+	SourceIP     string
+	Absolute     bool
+	UpBytes      int64
+	DownBytes    int64
+	Closed       bool
+	ClosedAtMS   int64
+}
+
+type CoreTrafficValue struct {
+	UpBytes   int64
+	DownBytes int64
+	LiveIPs   []string
+}
+
+type CoreTrafficSnapshot struct {
+	Ready     bool
+	Clients   map[protocol.ClientKey]CoreTrafficValue
+	Listeners map[protocol.ListenerKey]CoreTrafficValue
 }
 
 // CoreDeployment is the exact desired snapshot last confirmed running. It is

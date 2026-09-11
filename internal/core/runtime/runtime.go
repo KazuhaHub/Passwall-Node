@@ -263,7 +263,7 @@ func (r *round) objectResult(ctx context.Context, stream, key string) error {
 	if err == nil {
 		return nil
 	}
-	var compileErr *xray.CompileError
+	var compileErr *agentcore.ObjectError
 	if errors.As(err, &compileErr) && compileErr.Stream == stream && compileErr.Key == key {
 		code := strings.TrimSpace(compileErr.Code)
 		if code == "" {
@@ -328,7 +328,8 @@ func (r *Runtime) converge(ctx context.Context) error {
 		return fmt.Errorf("compiler returned invalid artifact: %w", err)
 	}
 	status := r.supervisor.Status()
-	if status.State == agentcore.ProcessRunning && status.Version == selection.Version && status.ConfigDigest == artifact.Digest {
+	if status.State == agentcore.ProcessRunning && status.Engine == selection.Engine &&
+		status.Version == selection.Version && status.ConfigDigest == artifact.Digest {
 		return r.saveDeployment(ctx, selection, artifact, config, roster)
 	}
 	installed, err := r.installer.Install(ctx, install.Request{
@@ -342,7 +343,8 @@ func (r *Runtime) converge(ctx context.Context) error {
 		return errors.New("core installer returned a mismatched installation")
 	}
 	if err := r.supervisor.Deploy(ctx, agentcore.Deployment{
-		Artifact: artifact, BinaryPath: installed.BinaryPath, Version: installed.Version,
+		Artifact: artifact, Engine: installed.Engine,
+		BinaryPath: installed.BinaryPath, Version: installed.Version,
 	}); err != nil {
 		return fmt.Errorf("deploy %s %s: %w", selection.Engine, selection.Version, err)
 	}

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-10T00:00:00Z",
+  "updated_at": "2026-09-11T00:00:00Z",
   "releases": [
     {
       "engine": "xray",
@@ -121,6 +121,45 @@
         {"os":"darwin","arch":"arm64","url":"https://github.com/XTLS/Xray-core/releases/download/v26.9.9/Xray-macos-arm64-v8a.zip","sha256":"b7cf765d60ccc703853d4218c49a1eacc5bca764543b9540bdeaf45c951afc7d","archive":"zip","binary":"xray"},
         {"os":"windows","arch":"amd64","url":"https://github.com/XTLS/Xray-core/releases/download/v26.9.9/Xray-windows-64.zip","sha256":"244deaba2098c2964e49bba90df3707777e5f5f428a82d2f29604015f24beec2","archive":"zip","binary":"xray.exe"},
         {"os":"windows","arch":"arm64","url":"https://github.com/XTLS/Xray-core/releases/download/v26.9.9/Xray-windows-arm64-v8a.zip","sha256":"f4c066569af598d7f044866e5e89e4d08858325e696508f9a054264d7a0fb620","archive":"zip","binary":"xray.exe"}
+      ]
+    },
+    {
+      "engine": "sing-box",
+      "version": "1.14.0",
+      "tier": "recommended",
+      "prerelease": false,
+      "selectable": true,
+      "requires_confirmation": false,
+      "published_at": "2026-08-31T04:05:01Z",
+      "source_url": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.0",
+      "summary": {
+        "en": "Recommended sing-box baseline with native VLESS, VMess, Trojan and Shadowsocks-2022 compilation plus authenticated streaming traffic accounting.",
+        "zh_cn": "推荐的 sing-box 基线：原生编译 VLESS、VMess、Trojan 与 Shadowsocks-2022，并使用带认证的流式流量计量。"
+      },
+      "reality": {
+        "xray": "supported",
+        "mihomo": "supported",
+        "sing_box": "supported",
+        "uri_list": "unverified"
+      },
+      "evidence": {
+        "source_audited": true,
+        "config_tested": true,
+        "handshake_tested": true,
+        "verified_at": "2026-09-11T00:00:00Z",
+        "handshakes": [
+          {"client":"xray","version":"26.6.27","platform":"darwin/arm64","profile":"Passwall-Node sing-box 1.14.0 VLESS/TCP/REALITY/XTLS Vision; hermetic HTTP transfer","result":"pass"},
+          {"client":"mihomo","version":"1.19.30","platform":"darwin/arm64","profile":"Passwall-Node sing-box 1.14.0 VLESS/TCP/REALITY/XTLS Vision; chrome; hermetic HTTP transfer","result":"pass"},
+          {"client":"sing_box","version":"1.14.0","platform":"darwin/arm64","profile":"Passwall-Node sing-box 1.14.0 VLESS/TCP/REALITY/XTLS Vision; uTLS chrome; hermetic HTTP transfer","result":"pass"}
+        ]
+      },
+      "assets": [
+        {"os":"linux","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz","sha256":"2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63","archive":"tar.gz","binary":"sing-box-1.14.0-linux-amd64/sing-box"},
+        {"os":"linux","arch":"arm64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-arm64.tar.gz","sha256":"04d9b40bc98dc55b6f509ce3292145c65478f65866bea64826ebb2f382385088","archive":"tar.gz","binary":"sing-box-1.14.0-linux-arm64/sing-box"},
+        {"os":"darwin","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-darwin-amd64.tar.gz","sha256":"6cf26fc3501f3117cf781e9405cf5338f60add6da5affae39421af6800ebbcb4","archive":"tar.gz","binary":"sing-box-1.14.0-darwin-amd64/sing-box"},
+        {"os":"darwin","arch":"arm64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-darwin-arm64.tar.gz","sha256":"a150c94012ff768b7261939cd236b9c8554127f45137230295d23a5660225cc9","archive":"tar.gz","binary":"sing-box-1.14.0-darwin-arm64/sing-box"},
+        {"os":"windows","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-windows-amd64.zip","sha256":"3ffb56267da14e287be48bd10cf7e6505260125bad940b75101fbb4d5d58e5d6","archive":"zip","binary":"sing-box-1.14.0-windows-amd64/sing-box.exe"},
+        {"os":"windows","arch":"arm64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-windows-arm64.zip","sha256":"f58dff882b2feb022da8de41943804b38681ecab5e1f490f23602fc37e9d5dd4","archive":"zip","binary":"sing-box-1.14.0-windows-arm64/sing-box.exe"}
       ]
     }
   ]

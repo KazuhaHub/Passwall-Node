@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"os/signal"
@@ -40,14 +41,17 @@ func TestSupervisorHelperProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(91)
 	}
+	if strings.Contains(string(config), "requires-next") && action != "check-next" && action != "run-next" {
+		os.Exit(93)
+	}
 	switch action {
-	case "check":
+	case "check", "check-next":
 		if strings.Contains(string(config), "invalid") {
 			_, _ = os.Stderr.WriteString("synthetic validation failure")
 			os.Exit(2)
 		}
 		os.Exit(0)
-	case "run":
+	case "run", "run-next":
 		if strings.Contains(string(config), "crash") {
 			os.Exit(3)
 		}
@@ -136,7 +140,7 @@ func TestSupervisorSwitchesVersionAndRollsBackBinaryIdentity(t *testing.T) {
 	}
 	second := testArtifact("good-two")
 	if err := supervisor.Deploy(t.Context(), agentcore.Deployment{
-		Artifact: second, BinaryPath: mustAbs(t, os.Args[0]), Version: "test-2",
+		Artifact: second, Engine: "test", BinaryPath: mustAbs(t, os.Args[0]), Version: "test-2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +156,7 @@ func TestSupervisorSwitchesVersionAndRollsBackBinaryIdentity(t *testing.T) {
 	}
 
 	err := supervisor.Deploy(t.Context(), agentcore.Deployment{
-		Artifact: testArtifact("crash"), BinaryPath: mustAbs(t, os.Args[0]), Version: "test-3",
+		Artifact: testArtifact("crash"), Engine: "test", BinaryPath: mustAbs(t, os.Args[0]), Version: "test-3",
 	})
 	if err == nil || !strings.Contains(err.Error(), "exited during startup") {
 		t.Fatalf("failed switch error = %v", err)
@@ -162,6 +166,36 @@ func TestSupervisorSwitchesVersionAndRollsBackBinaryIdentity(t *testing.T) {
 		t.Fatalf("failed switch did not restore prior identity: %#v", status)
 	}
 	assertCurrentConfig(t, supervisor.options.StateDir, third.Config)
+	shutdownSupervisor(t, cancel, runDone)
+}
+
+func TestSupervisorSwitchesEngineAndRollsBackDeploymentIdentity(t *testing.T) {
+	supervisor, cancel, runDone := startTestSupervisor(t)
+	first := testArtifact("good-one")
+	if err := supervisor.Apply(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := testArtifact("requires-next")
+	if err := supervisor.Deploy(t.Context(), agentcore.Deployment{
+		Artifact: second, Engine: "test-next", BinaryPath: mustAbs(t, os.Args[0]), Version: "next-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status := supervisor.Status(); status.Engine != "test-next" || status.Version != "next-1" ||
+		status.State != agentcore.ProcessRunning || status.ConfigDigest != second.Digest {
+		t.Fatalf("switched status = %#v", status)
+	}
+
+	err := supervisor.Deploy(t.Context(), agentcore.Deployment{
+		Artifact: testArtifact("crash"), Engine: "test", BinaryPath: mustAbs(t, os.Args[0]), Version: "test-2",
+	})
+	if err == nil || !strings.Contains(err.Error(), "exited during startup") {
+		t.Fatalf("failed switch error = %v", err)
+	}
+	if status := supervisor.Status(); status.Engine != "test-next" || status.Version != "next-1" ||
+		status.State != agentcore.ProcessDegraded || status.ConfigDigest != second.Digest {
+		t.Fatalf("failed switch did not restore prior identity: %#v", status)
+	}
 	shutdownSupervisor(t, cancel, runDone)
 }
 
@@ -257,14 +291,26 @@ func newTestSupervisorWithOptions(t *testing.T, customize func(*Options)) *Super
 	t.Helper()
 	t.Setenv("PSP_NODE_PROCESS_HELPER", "1")
 	options := Options{
+		Engine:   "test",
 		Binary:   mustAbs(t, os.Args[0]),
 		Version:  "test",
 		StateDir: t.TempDir(),
-		RunArgs: func(configPath string) []string {
-			return []string{"-test.run=^TestSupervisorHelperProcess$", "--", "run", configPath}
-		},
-		ValidateArgs: func(configPath string) []string {
-			return []string{"-test.run=^TestSupervisorHelperProcess$", "--", "check", configPath}
+		Commands: func(engine string) (Command, error) {
+			if engine != "test" && engine != "test-next" {
+				return Command{}, errors.New("unsupported test engine")
+			}
+			actionSuffix := ""
+			if engine == "test-next" {
+				actionSuffix = "-next"
+			}
+			return Command{
+				RunArgs: func(configPath string) []string {
+					return []string{"-test.run=^TestSupervisorHelperProcess$", "--", "run" + actionSuffix, configPath}
+				},
+				ValidateArgs: func(configPath string) []string {
+					return []string{"-test.run=^TestSupervisorHelperProcess$", "--", "check" + actionSuffix, configPath}
+				},
+			}, nil
 		},
 		Stdout: io.Discard, Stderr: io.Discard,
 		CheckTimeout: testProcessTimeout, StartGrace: 40 * time.Millisecond,

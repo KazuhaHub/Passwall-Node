@@ -44,7 +44,7 @@ func TestTelemetryReportsCompleteAppliedEnumerationsAndDurableEpoch(t *testing.T
 		t.Fatal(err)
 	}
 	status := agentcore.Status{
-		State: agentcore.ProcessRunning, Version: "26.6.27", BinaryPath: "/xray",
+		State: agentcore.ProcessRunning, Engine: "xray", Version: "26.6.27", BinaryPath: "/xray",
 		ConfigDigest: digest, LastChangedAt: time.Unix(10, 0),
 	}
 	runs := 0
@@ -116,7 +116,7 @@ func TestTelemetryRejectsUnconfirmedProcessBeforeQuery(t *testing.T) {
 	telemetry, err := NewTelemetry(TelemetryOptions{
 		Store: store,
 		Status: func() agentcore.Status {
-			return agentcore.Status{State: agentcore.ProcessRunning, Version: "26.9.9", BinaryPath: "/xray", ConfigDigest: strings.Repeat("b", 64), LastChangedAt: time.Unix(1, 0)}
+			return agentcore.Status{State: agentcore.ProcessRunning, Engine: "xray", Version: "26.9.9", BinaryPath: "/xray", ConfigDigest: strings.Repeat("b", 64), LastChangedAt: time.Unix(1, 0)}
 		},
 		RunCommand: func(context.Context, string, ...string) ([]byte, error) {
 			return nil, errors.New("must not run")

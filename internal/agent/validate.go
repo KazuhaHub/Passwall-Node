@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/KazuhaHub/passwall-node/corecatalog"
 	"github.com/KazuhaHub/passwall-node/protocol"
@@ -46,8 +47,8 @@ func validateCoreSelection(selection protocol.CoreSelection) error {
 	if selection.Engine == "" && selection.Version == "" && !selection.AllowRestrictedReality {
 		return nil
 	}
-	if selection.Engine != "xray" || selection.Version == "" {
-		return fmt.Errorf("engine xray and an exact version are required")
+	if selection.Engine == "" || selection.Version == "" || strings.TrimSpace(selection.Engine) != selection.Engine || strings.ToLower(selection.Engine) != selection.Engine {
+		return fmt.Errorf("a canonical engine and exact version are required")
 	}
 	release, err := corecatalog.Resolve(selection.Engine, selection.Version)
 	if err != nil {

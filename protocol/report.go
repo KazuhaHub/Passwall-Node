@@ -32,6 +32,7 @@ type NodeReport struct {
 	// preserve PanelClient.GetServerStatus for the native adapter and keep a
 	// dead core distinguishable from a live sync process.
 	AgentVersion string `json:"agent_version,omitempty"`
+	CoreEngine   string `json:"core_engine,omitempty"`
 	CoreVersion  string `json:"core_version,omitempty"`
 	CoreState    string `json:"core_state,omitempty"`
 
@@ -129,6 +130,7 @@ func (r NodeReport) MarshalJSON() ([]byte, error) {
 		ProtocolVersion int                    `json:"protocol_version,omitempty"`
 		ReportedAtMS    int64                  `json:"reported_at_ms,omitempty"`
 		AgentVersion    string                 `json:"agent_version,omitempty"`
+		CoreEngine      string                 `json:"core_engine,omitempty"`
 		CoreVersion     string                 `json:"core_version,omitempty"`
 		CoreState       string                 `json:"core_state,omitempty"`
 		Partial         bool                   `json:"partial"`
@@ -139,7 +141,7 @@ func (r NodeReport) MarshalJSON() ([]byte, error) {
 	return json.Marshal(partialReport{
 		AgentID: r.AgentID, ProtocolVersion: r.ProtocolVersion,
 		ReportedAtMS: r.ReportedAtMS, AgentVersion: r.AgentVersion,
-		CoreVersion: r.CoreVersion, CoreState: r.CoreState,
+		CoreEngine: r.CoreEngine, CoreVersion: r.CoreVersion, CoreState: r.CoreState,
 		Partial: true, Have: r.Have,
 		Issues: r.Issues, TaskResults: r.TaskResults,
 	})

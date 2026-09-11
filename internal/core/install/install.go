@@ -4,8 +4,10 @@
 package install
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -51,7 +54,7 @@ type Installation struct {
 type Resolver func(engine, version string) (corecatalog.Release, error)
 
 type BinaryVerifier interface {
-	Verify(context.Context, string, string, []byte) error
+	Verify(context.Context, string, string, string, []byte) error
 }
 
 type Options struct {
@@ -130,8 +133,8 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 		return Installation{}, err
 	}
 	engine := strings.ToLower(strings.TrimSpace(request.Engine))
-	if engine != "xray" {
-		return Installation{}, fmt.Errorf("core engine %q is unsupported", request.Engine)
+	if engine == "" || engine != request.Engine {
+		return Installation{}, errors.New("core engine is required and must be canonical")
 	}
 	release, err := i.resolve(engine, request.Version)
 	if err != nil {
@@ -176,16 +179,19 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 		return Installation{}, fmt.Errorf("create core staging directory: %w", err)
 	}
 	defer os.RemoveAll(stagingDir)
-	archivePath := filepath.Join(stagingDir, "release.zip")
+	archivePath := filepath.Join(stagingDir, "release.archive")
 	if err := i.download(ctx, asset.URL, asset.SHA256, archivePath); err != nil {
 		return Installation{}, err
 	}
 	binaryPath := filepath.Join(stagingDir, asset.Binary)
-	binaryDigest, err := extractBinary(archivePath, asset.Binary, binaryPath, i.maxBinaryBytes)
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+		return Installation{}, fmt.Errorf("create staged core binary directory: %w", err)
+	}
+	binaryDigest, err := extractBinary(archivePath, asset.Archive, asset.Binary, binaryPath, i.maxBinaryBytes)
 	if err != nil {
 		return Installation{}, err
 	}
-	if err := i.verifier.Verify(ctx, binaryPath, release.Version, request.CurrentConfiguration); err != nil {
+	if err := i.verifier.Verify(ctx, engine, binaryPath, release.Version, request.CurrentConfiguration); err != nil {
 		return Installation{}, fmt.Errorf("verify downloaded %s %s: %w", engine, release.Version, err)
 	}
 	if err := os.Remove(archivePath); err != nil {
@@ -228,7 +234,7 @@ func (i *Installer) verifyExisting(ctx context.Context, installation Installatio
 	if digest != installed.BinarySHA256 {
 		return errors.New("existing core binary digest does not match its installation metadata")
 	}
-	if err := i.verifier.Verify(ctx, installation.BinaryPath, installation.Version, config); err != nil {
+	if err := i.verifier.Verify(ctx, installation.Engine, installation.BinaryPath, installation.Version, config); err != nil {
 		return fmt.Errorf("verify existing %s %s: %w", installation.Engine, installation.Version, err)
 	}
 	return nil
@@ -278,7 +284,18 @@ func (i *Installer) download(ctx context.Context, sourceURL, wantDigest, target 
 	return nil
 }
 
-func extractBinary(archivePath, member, target string, maxBytes int64) (string, error) {
+func extractBinary(archivePath, archiveType, member, target string, maxBytes int64) (string, error) {
+	switch archiveType {
+	case "zip":
+		return extractZIPBinary(archivePath, member, target, maxBytes)
+	case "tar.gz":
+		return extractTarGzBinary(archivePath, member, target, maxBytes)
+	default:
+		return "", fmt.Errorf("unsupported core archive type %q", archiveType)
+	}
+}
+
+func extractZIPBinary(archivePath, member, target string, maxBytes int64) (string, error) {
 	archive, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return "", fmt.Errorf("open core archive: %w", err)
@@ -302,6 +319,40 @@ func extractBinary(archivePath, member, target string, maxBytes int64) (string, 
 		return "", fmt.Errorf("open core archive binary: %w", err)
 	}
 	defer source.Close()
+	return writeExtractedBinary(source, target, maxBytes)
+}
+
+func extractTarGzBinary(archivePath, member, target string, maxBytes int64) (string, error) {
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open core archive: %w", err)
+	}
+	defer archive.Close()
+	compressed, err := gzip.NewReader(archive)
+	if err != nil {
+		return "", fmt.Errorf("open compressed core archive: %w", err)
+	}
+	defer compressed.Close()
+	reader := tar.NewReader(compressed)
+	for {
+		header, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			return "", fmt.Errorf("core archive does not contain %q", member)
+		}
+		if nextErr != nil {
+			return "", fmt.Errorf("read core archive: %w", nextErr)
+		}
+		if header.Name != member {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg || header.Size < 0 || header.Size > maxBytes {
+			return "", errors.New("core archive binary is not a bounded regular file")
+		}
+		return writeExtractedBinary(io.LimitReader(reader, header.Size), target, maxBytes)
+	}
+}
+
+func writeExtractedBinary(source io.Reader, target string, maxBytes int64) (string, error) {
 	targetFile, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
 	if err != nil {
 		return "", fmt.Errorf("create staged core binary: %w", err)
@@ -390,14 +441,23 @@ func digestRegularFile(path string, maxBytes int64) (string, error) {
 }
 
 func validateAssetSource(release corecatalog.Release, asset corecatalog.Asset) error {
-	if asset.Archive != "zip" || asset.Binary == "" || asset.Binary != filepath.Base(asset.Binary) || strings.ContainsAny(asset.Binary, `/\\`) {
-		return errors.New("core asset must name one root-level binary in a zip archive")
+	if (asset.Archive != "zip" && asset.Archive != "tar.gz") || !validArchiveMember(asset.Binary) {
+		return errors.New("core asset must name one safe binary path in a supported archive")
 	}
 	location, err := url.Parse(asset.URL)
-	wantPrefix := "/XTLS/Xray-core/releases/download/v" + release.Version + "/"
-	if err != nil || location.Scheme != "https" || location.Host != "github.com" ||
-		!strings.HasPrefix(location.Path, wantPrefix) || location.RawQuery != "" || location.Fragment != "" || location.User != nil {
-		return errors.New("core asset is not an official matching Xray release URL")
+	if err != nil {
+		return errors.New("core asset is not an official matching release URL")
+	}
+	wantPrefix, knownEngine := officialDownloadPrefix(release.Engine, release.Version)
+	assetName := strings.TrimPrefix(location.Path, wantPrefix)
+	if location.Scheme != "https" || location.Host != "github.com" ||
+		!knownEngine || !strings.HasPrefix(location.Path, wantPrefix) || assetName == "" || strings.Contains(assetName, "/") ||
+		location.RawQuery != "" || location.Fragment != "" || location.User != nil {
+		return errors.New("core asset is not an official matching release URL")
+	}
+	if asset.Archive == "zip" && !strings.HasSuffix(assetName, ".zip") ||
+		asset.Archive == "tar.gz" && !strings.HasSuffix(assetName, ".tar.gz") {
+		return errors.New("core asset URL suffix does not match its archive type")
 	}
 	digest, err := hex.DecodeString(asset.SHA256)
 	if err != nil || len(digest) != sha256.Size || asset.SHA256 != strings.ToLower(asset.SHA256) {
@@ -442,14 +502,14 @@ func secureHTTPClient(base *http.Client) *http.Client {
 
 type execVerifier struct{ timeout time.Duration }
 
-func (v execVerifier) Verify(ctx context.Context, binaryPath, wantVersion string, config []byte) error {
+func (v execVerifier) Verify(ctx context.Context, engine, binaryPath, wantVersion string, config []byte) error {
 	versionCtx, cancel := context.WithTimeout(ctx, v.timeout)
 	defer cancel()
 	output, err := boundedCommand(versionCtx, binaryPath, "version")
 	if err != nil {
 		return fmt.Errorf("read core version: %w: %s", err, output)
 	}
-	if got := versionFromOutput(output); got != wantVersion {
+	if got := versionFromOutput(engine, output); got != wantVersion {
 		return fmt.Errorf("core reported version %q, want %q", got, wantVersion)
 	}
 	if len(config) == 0 {
@@ -474,7 +534,11 @@ func (v execVerifier) Verify(ctx context.Context, binaryPath, wantVersion string
 	}
 	checkCtx, checkCancel := context.WithTimeout(ctx, v.timeout)
 	defer checkCancel()
-	output, err = boundedCommand(checkCtx, binaryPath, "run", "-test", "-config", configPath)
+	checkArgs, err := validationArgs(engine, configPath)
+	if err != nil {
+		return err
+	}
+	output, err = boundedCommand(checkCtx, binaryPath, checkArgs...)
 	if err != nil {
 		return fmt.Errorf("validate current core config: %w: %s", err, output)
 	}
@@ -493,17 +557,51 @@ func boundedCommand(ctx context.Context, path string, arguments ...string) (stri
 	return strings.TrimSpace(buffer.String()), err
 }
 
-func versionFromOutput(output string) string {
+func versionFromOutput(engine, output string) string {
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "Xray" {
-			version, err := corecatalog.NormalizeVersion(fields[1])
+		versionField := ""
+		switch {
+		case engine == "xray" && len(fields) >= 2 && fields[0] == "Xray":
+			versionField = fields[1]
+		case engine == "sing-box" && len(fields) >= 3 && fields[0] == "sing-box" && fields[1] == "version":
+			versionField = fields[2]
+		}
+		if versionField != "" {
+			version, err := corecatalog.NormalizeVersion(versionField)
 			if err == nil {
 				return version
 			}
 		}
 	}
 	return ""
+}
+
+func validationArgs(engine, configPath string) ([]string, error) {
+	switch engine {
+	case "xray":
+		return []string{"run", "-test", "-config", configPath}, nil
+	case "sing-box":
+		return []string{"check", "-c", configPath}, nil
+	default:
+		return nil, fmt.Errorf("core engine %q is unsupported", engine)
+	}
+}
+
+func validArchiveMember(member string) bool {
+	return member != "" && !strings.Contains(member, "\\") && !path.IsAbs(member) &&
+		path.Clean(member) == member && member != "." && member != ".." && !strings.HasPrefix(member, "../")
+}
+
+func officialDownloadPrefix(engine, version string) (string, bool) {
+	switch engine {
+	case "xray":
+		return "/XTLS/Xray-core/releases/download/v" + version + "/", true
+	case "sing-box":
+		return "/SagerNet/sing-box/releases/download/v" + version + "/", true
+	default:
+		return "", false
+	}
 }
 
 type boundedBuffer struct {

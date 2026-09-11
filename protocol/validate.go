@@ -20,6 +20,9 @@ func ValidateNodeReport(report NodeReport) error {
 	if report.ReportedAtMS < 0 {
 		return fmt.Errorf("reported_at_ms must be non-negative")
 	}
+	if report.CoreEngine != "" && report.CoreEngine != "xray" && report.CoreEngine != "sing-box" {
+		return fmt.Errorf("core_engine %q is unsupported", report.CoreEngine)
+	}
 	for _, stream := range []string{StreamConfig, StreamRoster, StreamDirectives} {
 		state, ok := report.Have[stream]
 		if !ok {

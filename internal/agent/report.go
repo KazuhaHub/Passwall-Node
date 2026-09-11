@@ -52,6 +52,7 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool) (BuiltReport, er
 	}
 	if b.CoreStatus != nil {
 		status := b.CoreStatus()
+		report.CoreEngine = status.Engine
 		report.CoreVersion = status.Version
 		report.CoreState = string(status.State)
 	}

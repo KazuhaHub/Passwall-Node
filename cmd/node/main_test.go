@@ -15,7 +15,7 @@ func TestValidateOptionsRequiresCanonicalIdentityAndAbsolutePrivatePaths(t *test
 	valid := options{
 		Endpoint: "https://panel.example/v1/node/sync", AgentID: "agt_01",
 		CredentialFile: filepath.Join(t.TempDir(), "credential"), DataDir: t.TempDir(),
-		XrayAPIListen: defaultXrayAPIListen,
+		XrayAPIListen: defaultXrayAPIListen, SingBoxAPIListen: defaultSingBoxAPIListen,
 	}
 	if err := validateOptions(valid); err != nil {
 		t.Fatal(err)
@@ -29,6 +29,30 @@ func TestValidateOptionsRequiresCanonicalIdentityAndAbsolutePrivatePaths(t *test
 	invalid.DataDir = "relative"
 	if err := validateOptions(invalid); err == nil {
 		t.Fatal("relative data directory was accepted")
+	}
+}
+
+func TestLoadOrCreateSecretIsPrivateAndStable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets", "sing-box-api")
+	first, err := loadOrCreateSecret(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := loadOrCreateSecret(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || len(first) != 64 {
+		t.Fatalf("secrets differ or have wrong length: %q %q", first, second)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("secret mode = %o", info.Mode().Perm())
+		}
 	}
 }
 

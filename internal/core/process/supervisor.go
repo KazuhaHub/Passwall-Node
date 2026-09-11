@@ -29,10 +29,10 @@ const (
 
 type Options struct {
 	Binary       string
+	Engine       string
 	Version      string
 	StateDir     string
-	RunArgs      func(configPath string) []string
-	ValidateArgs func(configPath string) []string
+	Commands     CommandResolver
 	Stdout       io.Writer
 	Stderr       io.Writer
 	CheckTimeout time.Duration
@@ -48,6 +48,16 @@ type Options struct {
 	InitialConfigDigest        string
 	Now                        func() time.Time
 }
+
+// Command describes one engine's stable CLI contract. Keeping it behind a
+// resolver makes an engine switch change the binary and its invocation as one
+// deployment identity; process.Supervisor itself remains core-neutral.
+type Command struct {
+	RunArgs      func(configPath string) []string
+	ValidateArgs func(configPath string) []string
+}
+
+type CommandResolver func(engine string) (Command, error)
 
 type applyRequest struct {
 	ctx        context.Context
@@ -76,6 +86,7 @@ type Supervisor struct {
 	done         chan struct{}
 	runErr       error
 	apply        chan applyRequest
+	activeEngine string
 	activeBinary string
 }
 
@@ -86,8 +97,14 @@ func NewSupervisor(options Options) (*Supervisor, error) {
 	if options.StateDir == "" || !filepath.IsAbs(options.StateDir) {
 		return nil, errors.New("core state directory must be absolute")
 	}
-	if options.RunArgs == nil || options.ValidateArgs == nil {
-		return nil, errors.New("run and validation argument builders are required")
+	if strings.TrimSpace(options.Engine) == "" || strings.TrimSpace(options.Engine) != options.Engine {
+		return nil, errors.New("initial core engine is required and must be canonical")
+	}
+	if options.Commands == nil {
+		return nil, errors.New("core command resolver is required")
+	}
+	if _, err := resolveCommand(options.Commands, options.Engine); err != nil {
+		return nil, fmt.Errorf("resolve initial core command: %w", err)
 	}
 	if options.CheckTimeout <= 0 {
 		options.CheckTimeout = 15 * time.Second
@@ -125,12 +142,13 @@ func NewSupervisor(options Options) (*Supervisor, error) {
 	return &Supervisor{
 		options: options,
 		status: agentcore.Status{
-			State: agentcore.ProcessStopped, Version: options.Version, BinaryPath: options.Binary,
+			State: agentcore.ProcessStopped, Engine: options.Engine, Version: options.Version, BinaryPath: options.Binary,
 			LastChangedAt: options.Now().UTC(),
 		},
 		ready:        make(chan struct{}),
 		done:         make(chan struct{}),
 		apply:        make(chan applyRequest),
+		activeEngine: options.Engine,
 		activeBinary: options.Binary,
 	}, nil
 }
@@ -146,7 +164,7 @@ func (s *Supervisor) Apply(ctx context.Context, artifact agentcore.Artifact) err
 	defer s.applyMu.Unlock()
 	s.mu.RLock()
 	deployment := agentcore.Deployment{
-		Artifact: artifact, BinaryPath: s.activeBinary, Version: s.status.Version,
+		Artifact: artifact, Engine: s.activeEngine, BinaryPath: s.activeBinary, Version: s.status.Version,
 	}
 	s.mu.RUnlock()
 	return s.deployLocked(ctx, deployment)
@@ -170,7 +188,7 @@ func (s *Supervisor) deployLocked(ctx context.Context, deployment agentcore.Depl
 		return err
 	}
 	defer os.Remove(candidate)
-	if err := s.validateCandidate(ctx, deployment.BinaryPath, candidate); err != nil {
+	if err := s.validateCandidate(ctx, deployment.Engine, deployment.BinaryPath, candidate); err != nil {
 		return err
 	}
 	request := applyRequest{ctx: ctx, deployment: deployment, candidate: candidate, done: make(chan error, 1)}
@@ -223,6 +241,7 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("read current core config: %w", err)
 	}
 	current := artifactFromConfig(config)
+	currentEngine := s.options.Engine
 	currentBinary := s.options.Binary
 	currentVersion := s.options.Version
 	if s.options.RequireInitialConfigDigest && current.Digest != s.options.InitialConfigDigest {
@@ -238,7 +257,7 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 	retryDelay := s.options.RetryMin
 	for {
 		if child == nil && len(current.Config) != 0 {
-			started, startErr := s.start(ctx, ctx, currentBinary, configPath)
+			started, startErr := s.start(ctx, ctx, currentEngine, currentBinary, configPath)
 			if startErr == nil {
 				child = started
 				retryDelay = s.options.RetryMin
@@ -273,7 +292,7 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 				if timer != nil {
 					timer.Stop()
 				}
-				current, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentBinary, currentVersion, child, configPath)
+				current, currentEngine, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentEngine, currentBinary, currentVersion, child, configPath)
 			case <-retry:
 				retryDelay = nextBackoff(retryDelay, s.options.RetryMax)
 			}
@@ -284,7 +303,7 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 		case <-ctx.Done():
 			continue
 		case request := <-s.apply:
-			current, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentBinary, currentVersion, child, configPath)
+			current, currentEngine, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentEngine, currentBinary, currentVersion, child, configPath)
 		case exitErr := <-child.done:
 			child = nil
 			s.setDegraded("core exited: " + processExitDetail(exitErr))
@@ -298,7 +317,7 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 				if !timer.Stop() {
 					<-timer.C
 				}
-				current, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentBinary, currentVersion, child, configPath)
+				current, currentEngine, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentEngine, currentBinary, currentVersion, child, configPath)
 				if child != nil {
 					retryDelay = s.options.RetryMin
 				}
@@ -313,22 +332,24 @@ func (s *Supervisor) handleApply(
 	runCtx context.Context,
 	request applyRequest,
 	current agentcore.Artifact,
+	currentEngine string,
 	currentBinary string,
 	currentVersion string,
 	child *managedProcess,
 	configPath string,
-) (agentcore.Artifact, string, string, *managedProcess) {
-	finish := func(err error) (agentcore.Artifact, string, string, *managedProcess) {
+) (agentcore.Artifact, string, string, string, *managedProcess) {
+	finish := func(err error) (agentcore.Artifact, string, string, string, *managedProcess) {
 		request.done <- err
-		return current, currentBinary, currentVersion, child
+		return current, currentEngine, currentBinary, currentVersion, child
 	}
 	deployment := request.deployment
-	if deployment.Artifact.Digest == current.Digest && deployment.BinaryPath == currentBinary &&
+	if deployment.Artifact.Digest == current.Digest && deployment.Engine == currentEngine && deployment.BinaryPath == currentBinary &&
 		deployment.Version == currentVersion && child != nil {
 		return finish(nil)
 	}
 	oldConfig := append([]byte(nil), current.Config...)
 	oldDigest := current.Digest
+	oldEngine := currentEngine
 	oldBinary := currentBinary
 	oldVersion := currentVersion
 	if err := installCandidate(s.options.StateDir, request.candidate, oldConfig); err != nil {
@@ -342,6 +363,7 @@ func (s *Supervisor) handleApply(
 				err = errors.Join(err, fmt.Errorf("restore previous config: %w", rollbackErr))
 			}
 			current = agentcore.Artifact{Config: oldConfig, Digest: oldDigest}
+			currentEngine = oldEngine
 			currentBinary = oldBinary
 			currentVersion = oldVersion
 			s.setDigest(oldDigest)
@@ -350,12 +372,13 @@ func (s *Supervisor) handleApply(
 		}
 		child = nil
 	}
-	started, err := s.start(runCtx, request.ctx, deployment.BinaryPath, configPath)
+	started, err := s.start(runCtx, request.ctx, deployment.Engine, deployment.BinaryPath, configPath)
 	if err == nil {
 		child = started
+		currentEngine = deployment.Engine
 		currentBinary = deployment.BinaryPath
 		currentVersion = deployment.Version
-		s.setDeployment(currentBinary, currentVersion, current.Digest)
+		s.setDeployment(currentEngine, currentBinary, currentVersion, current.Digest)
 		s.setRunning("")
 		return finish(nil)
 	}
@@ -369,11 +392,12 @@ func (s *Supervisor) handleApply(
 		return finish(applyErr)
 	}
 	current = agentcore.Artifact{Config: oldConfig, Digest: oldDigest}
+	currentEngine = oldEngine
 	currentBinary = oldBinary
 	currentVersion = oldVersion
 	s.setDigest(oldDigest)
 	if len(oldConfig) != 0 {
-		rolledBack, rollbackErr := s.start(runCtx, runCtx, oldBinary, configPath)
+		rolledBack, rollbackErr := s.start(runCtx, runCtx, oldEngine, oldBinary, configPath)
 		if rollbackErr != nil {
 			applyErr = errors.Join(applyErr, fmt.Errorf("start rollback core config: %w", rollbackErr))
 		} else {
@@ -384,10 +408,14 @@ func (s *Supervisor) handleApply(
 	return finish(applyErr)
 }
 
-func (s *Supervisor) validateCandidate(ctx context.Context, binary, path string) error {
+func (s *Supervisor) validateCandidate(ctx context.Context, engine, binary, path string) error {
+	commandSpec, err := resolveCommand(s.options.Commands, engine)
+	if err != nil {
+		return err
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, s.options.CheckTimeout)
 	defer cancel()
-	command := exec.CommandContext(checkCtx, binary, s.options.ValidateArgs(path)...)
+	command := exec.CommandContext(checkCtx, binary, commandSpec.ValidateArgs(path)...)
 	configureCommand(command)
 	output := &limitBuffer{remaining: maxCommandOutput}
 	command.Stdout = output
@@ -401,9 +429,13 @@ func (s *Supervisor) validateCandidate(ctx context.Context, binary, path string)
 	return nil
 }
 
-func (s *Supervisor) start(runCtx, waitCtx context.Context, binary, configPath string) (*managedProcess, error) {
+func (s *Supervisor) start(runCtx, waitCtx context.Context, engine, binary, configPath string) (*managedProcess, error) {
+	commandSpec, err := resolveCommand(s.options.Commands, engine)
+	if err != nil {
+		return nil, err
+	}
 	s.setStarting()
-	command := exec.CommandContext(runCtx, binary, s.options.RunArgs(configPath)...)
+	command := exec.CommandContext(runCtx, binary, commandSpec.RunArgs(configPath)...)
 	configureCommand(command)
 	command.Stdout = s.options.Stdout
 	command.Stderr = s.options.Stderr
@@ -488,9 +520,11 @@ func (s *Supervisor) setDigest(digest string) {
 	s.updateStatus(func(status *agentcore.Status) { status.ConfigDigest = digest })
 }
 
-func (s *Supervisor) setDeployment(binary, version, digest string) {
+func (s *Supervisor) setDeployment(engine, binary, version, digest string) {
 	s.mu.Lock()
+	s.activeEngine = engine
 	s.activeBinary = binary
+	s.status.Engine = engine
 	s.status.Version = version
 	s.status.BinaryPath = binary
 	s.status.ConfigDigest = digest
@@ -550,6 +584,9 @@ func validateDeployment(deployment agentcore.Deployment) error {
 	if !filepath.IsAbs(deployment.BinaryPath) {
 		return errors.New("deployment core binary path must be absolute")
 	}
+	if strings.TrimSpace(deployment.Engine) == "" || strings.TrimSpace(deployment.Engine) != deployment.Engine {
+		return errors.New("deployment core engine is required and must be canonical")
+	}
 	info, err := os.Stat(deployment.BinaryPath)
 	if err != nil {
 		return fmt.Errorf("inspect deployment core binary: %w", err)
@@ -564,6 +601,17 @@ func validateDeployment(deployment agentcore.Deployment) error {
 		return errors.New("deployment core version is required")
 	}
 	return nil
+}
+
+func resolveCommand(resolve CommandResolver, engine string) (Command, error) {
+	command, err := resolve(engine)
+	if err != nil {
+		return Command{}, err
+	}
+	if command.RunArgs == nil || command.ValidateArgs == nil {
+		return Command{}, fmt.Errorf("core engine %q has incomplete command builders", engine)
+	}
+	return command, nil
 }
 
 func artifactFromConfig(config []byte) agentcore.Artifact {
