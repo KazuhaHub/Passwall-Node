@@ -1,0 +1,25 @@
+# Runtime-only image used by the release workflow. The six-platform build job
+# produces the binaries once; buildx selects the matching Linux artifact here,
+# so the image contains the same bytes published in the GitHub release archive.
+FROM alpine:3.20
+ARG TARGETARCH
+
+RUN apk add --no-cache ca-certificates tzdata su-exec \
+ && addgroup -g 10001 passwall-node \
+ && adduser -D -H -u 10001 -G passwall-node passwall-node
+
+ENV TZ=UTC \
+    PSP_NODE_DATA_DIR=/var/lib/passwall-node \
+    PSP_NODE_CREDENTIAL_FILE=/run/secrets/node_credential \
+    PSP_NODE_XRAY_API_LISTEN=127.0.0.1:10085 \
+    PUID=10001 \
+    PGID=10001
+
+WORKDIR /var/lib/passwall-node
+COPY bin/linux-${TARGETARCH}/passwall-node /usr/local/bin/passwall-node
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/passwall-node /usr/local/bin/docker-entrypoint.sh \
+ && mkdir -p /var/lib/passwall-node /run/passwall-node \
+ && chown -R 10001:10001 /var/lib/passwall-node /run/passwall-node
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

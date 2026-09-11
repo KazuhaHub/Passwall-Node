@@ -6,6 +6,80 @@ import (
 	"testing"
 )
 
+func emptyHave() map[string]StreamState {
+	return map[string]StreamState{
+		StreamConfig: {}, StreamRoster: {}, StreamDirectives: {},
+	}
+}
+
+func TestValidateNodeReportRejectsUnsafeWireStates(t *testing.T) {
+	valid := NodeReport{AgentID: "a1", ProtocolVersion: ProtocolVersion1, Have: emptyHave()}
+	if err := ValidateNodeReport(valid); err != nil {
+		t.Fatalf("valid empty full report: %v", err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*NodeReport)
+	}{
+		{"missing stream state", func(r *NodeReport) { delete(r.Have, StreamRoster) }},
+		{"unknown stream state", func(r *NodeReport) { r.Have["future"] = StreamState{} }},
+		{"partial enumeration", func(r *NodeReport) { r.Partial = true; r.Clients = []ClientCounters{{Key: NewClientKey(1)}} }},
+		{"negative listener counter", func(r *NodeReport) { r.ListenerCounters = []ListenerCounters{{Key: NewListenerKey(1), UpBytes: -1}} }},
+		{"duplicate client counter", func(r *NodeReport) {
+			r.Clients = []ClientCounters{
+				{Key: NewClientKey(1), Gate: GateUnconfigured},
+				{Key: NewClientKey(1), Gate: GateUnconfigured},
+			}
+		}},
+		{"noncanonical live ip", func(r *NodeReport) {
+			r.Clients = []ClientCounters{{Key: NewClientKey(1), Gate: GateUnconfigured, LiveIPs: []string{"2001:0db8::1"}}}
+		}},
+		{"noncanonical subject", func(r *NodeReport) { r.Subjects = []SubjectObservation{{Subject: "usr_01"}} }},
+		{"invalid object state", func(r *NodeReport) {
+			r.Objects = []ObjectStatus{{
+				Stream: StreamRoster, Key: string(NewClientKey(1)), State: ObjectApplied,
+				SinceVersion: Version{Epoch: 1, Version: 1}, FirstFailedAtMS: 1,
+			}}
+		}},
+		{"oversized object issue code", func(r *NodeReport) {
+			r.Objects = []ObjectStatus{{
+				Stream: StreamRoster, Key: string(NewClientKey(1)), State: ObjectRejected,
+				SinceVersion: Version{Epoch: 1, Version: 1}, FirstFailedAtMS: 1,
+				IssueCode: strings.Repeat("x", MaxIssueCodeBytes+1),
+			}}
+		}},
+		{"noncanonical blocked dependency", func(r *NodeReport) {
+			r.Objects = []ObjectStatus{{
+				Stream: StreamRoster, Key: string(NewClientKey(1)), State: ObjectBlocked,
+				SinceVersion: Version{Epoch: 1, Version: 1}, FirstFailedAtMS: 1,
+				BlockedOn: "listener-1",
+			}}
+		}},
+		{"invalid utf8 issue", func(r *NodeReport) {
+			r.Issues = []Issue{{Code: "x", Detail: string([]byte{0xff})}}
+		}},
+		{"duplicate issue", func(r *NodeReport) {
+			r.Issues = []Issue{{Code: "x", Key: "a"}, {Code: "x", Key: "a"}}
+		}},
+		{"oversized issue detail", func(r *NodeReport) {
+			r.Issues = []Issue{{Code: "x", Detail: strings.Repeat("a", MaxIssueDetailBytes+1)}}
+		}},
+		{"ambiguous task result", func(r *NodeReport) {
+			r.TaskResults = []TaskResult{{ID: "task-1", OK: true, Error: "failed"}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			report := valid
+			report.Have = emptyHave()
+			tc.mutate(&report)
+			if err := ValidateNodeReport(report); err == nil {
+				t.Fatal("unsafe report was accepted")
+			}
+		})
+	}
+}
+
 // The tri-state encoding is the one §8 calls out by name, because the repo
 // already has the collision it forbids: traffic_cap.go returns 0 for "no
 // headroom" and the panel reads 0 as unlimited, so "exhausted" and "no cap"
@@ -82,7 +156,7 @@ func TestNodeReportStatesNoDesiredConfig(t *testing.T) {
 	// Probe target fields especially: ADR 0025 debt 3(d) is exactly a column
 	// that became both desired and observed. The protocol must not offer a
 	// place to say them.
-	for _, banned := range []string{"port", "protocol", "listen", "server_address", "config", "desired"} {
+	for _, banned := range []string{`"port"`, `"protocol"`, `"listen"`, `"listeners"`, `"server_address"`, `"config"`, `"desired"`} {
 		if strings.Contains(string(b), banned) {
 			t.Errorf("NodeReport can express %q — PSP would swallow it as a new desired value and confirmation would degenerate into agreeing with itself", banned)
 		}
@@ -100,6 +174,21 @@ func TestVersionEpochRecoversFromARestore(t *testing.T) {
 	// PSP rebuilt the document row, so the epoch advanced.
 	if !(Version{Epoch: 2, Version: 1}).Newer(applied) {
 		t.Fatal("a higher epoch must be accepted even at version 1 — without this the agent rejects every future version and serves stale config until someone reinstalls it")
+	}
+}
+
+func TestVersionCommittedRejectsHalfZeroCoordinates(t *testing.T) {
+	for _, version := range []Version{
+		{},
+		{Epoch: 1},
+		{Version: 1},
+	} {
+		if version.Committed() {
+			t.Fatalf("version %s reported committed", version)
+		}
+	}
+	if !(Version{Epoch: 1, Version: 1}).Committed() {
+		t.Fatal("positive epoch/version pair did not report committed")
 	}
 }
 
@@ -123,7 +212,7 @@ func TestKeysRoundTripAndRejectNonCanonical(t *testing.T) {
 	if got, err := NewClientKey(10234).RowID(); err != nil || got != 10234 {
 		t.Fatalf("round trip = (%d, %v), want (10234, nil)", got, err)
 	}
-	for _, bad := range []ClientKey{"cli_", "cli_007", "cli_+7", "cli_x", "lst_7", "7"} {
+	for _, bad := range []ClientKey{"cli_", "cli_0", "cli_-7", "cli_007", "cli_+7", "cli_x", "lst_7", "7"} {
 		if _, err := bad.RowID(); err == nil {
 			t.Errorf("%q parsed — two spellings of one row id would let one object hold two identities in a membership set, and membership is how deletion is expressed", bad)
 		}
@@ -160,6 +249,43 @@ func TestPartialReportFailsSafe(t *testing.T) {
 	if !strings.Contains(string(b), `"partial":false`) {
 		t.Fatalf("partial must serialize explicitly, got %s", b)
 	}
+	if !strings.Contains(string(b), `"objects":[]`) || !strings.Contains(string(b), `"clients":[]`) ||
+		!strings.Contains(string(b), `"listener_counters":[]`) {
+		t.Fatalf("a full report must enumerate empty objects, clients, and listeners explicitly, got %s", b)
+	}
+
+	light, err := json.Marshal(NodeReport{AgentID: "a1", Partial: true, Have: map[string]StreamState{}})
+	if err != nil {
+		t.Fatalf("marshal partial report: %v", err)
+	}
+	for _, omitted := range []string{`"objects"`, `"clients"`, `"listener_counters"`, `"subjects"`} {
+		if strings.Contains(string(light), omitted) {
+			t.Fatalf("partial report must omit %s wholesale, got %s", omitted, light)
+		}
+	}
+}
+
+func TestTaskResultsHaveAReportPath(t *testing.T) {
+	report := NodeReport{
+		AgentID: "a1",
+		TaskResults: []TaskResult{{
+			ID:     "task-7",
+			OK:     false,
+			Error:  "install failed",
+			Result: []byte("diagnostic"),
+		}},
+	}
+	body, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	var back NodeReport
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	if len(back.TaskResults) != 1 || back.TaskResults[0].ID != "task-7" || back.TaskResults[0].Error != "install failed" {
+		t.Fatalf("task result lost on report round trip: %s", body)
+	}
 }
 
 // A missing or nonsense report interval must make the agent report MORE, never
@@ -192,6 +318,23 @@ func TestMissingReportIntervalReportsMoreNotLess(t *testing.T) {
 				t.Fatalf("ShouldSendFull(%+v, %d) = %v, want %v", tc.env, tc.since, got, tc.wantFull)
 			}
 		})
+	}
+}
+
+func TestValidateEnvelopeBoundsSchedulingInputs(t *testing.T) {
+	if err := ValidateEnvelope(Envelope{NextPollSeconds: MaxNextPollSeconds, FullReportSeconds: MaxFullReportSeconds}); err != nil {
+		t.Fatalf("valid envelope: %v", err)
+	}
+	for _, envelope := range []Envelope{
+		{NextPollSeconds: -1},
+		{NextPollSeconds: MaxNextPollSeconds + 1},
+		{FullReportSeconds: -1},
+		{FullReportSeconds: MaxFullReportSeconds + 1},
+		{OverburnHeadroomBytes: -1},
+	} {
+		if err := ValidateEnvelope(envelope); err == nil {
+			t.Fatalf("invalid envelope accepted: %+v", envelope)
+		}
 	}
 }
 

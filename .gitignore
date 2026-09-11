@@ -30,3 +30,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local agent instructions; never commit assistant-specific metadata.
+AGENT.md
+AGENTS.md
+CLAUDE.md
+CLAUDE.me

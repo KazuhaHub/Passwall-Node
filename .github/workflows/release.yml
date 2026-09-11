@@ -1,0 +1,188 @@
+name: Release
+
+# One native build matrix produces both the downloadable archives and the
+# Linux binaries embedded in the multi-architecture container image.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  setup:
+    name: Resolve release identity
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      owner_lc: ${{ steps.identity.outputs.owner_lc }}
+    steps:
+      - name: Resolve tag and owner
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: $tag" >&2
+            exit 1
+          fi
+          owner_lc=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, ext: ""     }
+          - { goos: linux,   goarch: arm64, ext: ""     }
+          - { goos: darwin,  goarch: amd64, ext: ""     }
+          - { goos: darwin,  goarch: arm64, ext: ""     }
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: windows, goarch: arm64, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build daemon
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.setup.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          short_sha="${COMMIT:0:7}"
+          build_date="$(date -u +%FT%TZ)"
+          ldflags="-s -w"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.Version=${VERSION}"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.Commit=${short_sha}"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.BuildDate=${build_date}"
+          go build -trimpath -ldflags="${ldflags}" \
+            -o "out/passwall-node${{ matrix.ext }}" ./cmd/node
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: passwall-node-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: out/passwall-node${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: passwall-node-*
+      - name: Package archives and checksums
+        shell: bash
+        env:
+          VERSION: ${{ needs.setup.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p build dist
+          for dir in artifacts/passwall-node-*; do
+            platform="${dir#artifacts/passwall-node-}"
+            goos="${platform%-*}"
+            goarch="${platform##*-}"
+            package="passwall-node_${VERSION}_${goos}_${goarch}"
+            package_dir="build/${package}"
+            mkdir -p "$package_dir"
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+            cp "${dir}/passwall-node${ext}" "${package_dir}/passwall-node${ext}"
+            chmod +x "${package_dir}/passwall-node${ext}" || true
+            cp README.md HANDOFF.md compose.example.yaml "${package_dir}/"
+            if [ "$goos" = "windows" ]; then
+              (cd build && zip -qr "../dist/${package}.zip" "$package")
+            else
+              tar -C build -czf "dist/${package}.tar.gz" "$package"
+            fi
+          done
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.setup.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.setup.outputs.tag }}
+          prerelease: ${{ contains(needs.setup.outputs.tag, '-') }}
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: Publish container image
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: passwall-node-linux-amd64
+          path: bin/linux-amd64
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: passwall-node-linux-arm64
+          path: bin/linux-arm64
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ needs.setup.outputs.owner_lc }}/passwall-node
+          tags: |
+            type=raw,value=${{ needs.setup.outputs.tag }}
+            type=raw,value=latest,enable=${{ startsWith(needs.setup.outputs.tag, 'v') && !contains(needs.setup.outputs.tag, '-') }}
+            type=raw,value=beta,enable=${{ startsWith(needs.setup.outputs.tag, 'v') }}
+          labels: |
+            org.opencontainers.image.title=passwall-node
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.setup.outputs.tag }}
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false

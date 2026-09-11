@@ -1,0 +1,42 @@
+services:
+  passwall-node:
+    image: ghcr.io/kazuhahub/passwall-node:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # The listener set is controlled dynamically by PSP, so fixed bridge-mode
+    # port mappings cannot describe it. Host networking exposes exactly the
+    # ports in the PSP-owned listener configuration.
+    network_mode: host
+    environment:
+      PSP_NODE_ENDPOINT: ${PSP_NODE_ENDPOINT:?set the one-time PSP enrollment endpoint}
+      PSP_NODE_AGENT_ID: ${PSP_NODE_AGENT_ID:?set the PSP agent id}
+      # Development only, for an explicitly HTTP PSP endpoint:
+      PSP_NODE_ALLOW_INSECURE_HTTP: ${PSP_NODE_ALLOW_INSECURE_HTTP:-false}
+    secrets:
+      - node_credential
+    volumes:
+      - passwall-node-data:/var/lib/passwall-node
+    read_only: true
+    tmpfs:
+      - /run/passwall-node:size=64k,mode=0700
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    # Entrypoint-only capabilities: copy/chown the secret and state volume,
+    # then switch to the configured unprivileged UID/GID before exec.
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+secrets:
+  node_credential:
+    file: ./secrets/node-credential
+
+volumes:
+  passwall-node-data:

@@ -38,6 +38,11 @@ func (v Version) Newer(other Version) bool {
 // Zero reports whether v has never been set.
 func (v Version) Zero() bool { return v.Epoch == 0 && v.Version == 0 }
 
+// Committed reports whether v names an actual published document. Half-zero
+// coordinates are neither the unset sentinel nor a valid document and must be
+// rejected at every wire and persistence boundary.
+func (v Version) Committed() bool { return v.Epoch > 0 && v.Version > 0 }
+
 func (v Version) String() string { return fmt.Sprintf("%d:%d", v.Epoch, v.Version) }
 
 // ETag is the content digest of a segment: the hex sha256 of its canonical
