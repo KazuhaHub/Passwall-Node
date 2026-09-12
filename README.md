@@ -184,4 +184,21 @@ go run ./cmd/contract-agent \
 
 ## Licence
 
-TBD.
+Passwall-Node's own code, including `protocol` and `corecatalog`, is licensed
+under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for
+project attribution. Passwall-Sub-Panel retains its existing AGPLv3 license.
+
+Third-party dependencies and the separately installed proxy cores retain
+their own licenses; this project's Apache license does not replace them:
+
+- Xray-core: [MPL-2.0](https://github.com/XTLS/Xray-core/blob/main/LICENSE).
+- sing-box: [GPL-3.0-or-later](https://github.com/SagerNet/sing-box/blob/testing/LICENSE),
+  with its additional naming/association notice.
+
+Native release archives include `LICENSE` and `NOTICE`; container images keep
+them in `/usr/share/licenses/passwall-node/`. Those releases do not bundle
+Xray or sing-box: the daemon downloads the exact selected core at runtime.
+If you redistribute a populated data directory or an image containing those
+cores, preserve their copyright/license notices and meet their respective
+source-availability requirements. This attribution notice is not a complete
+third-party license audit.

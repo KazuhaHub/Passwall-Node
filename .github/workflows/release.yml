@@ -119,7 +119,7 @@ jobs:
             if [ "$goos" = "windows" ]; then ext=".exe"; fi
             cp "${dir}/passwall-node${ext}" "${package_dir}/passwall-node${ext}"
             chmod +x "${package_dir}/passwall-node${ext}" || true
-            cp README.md HANDOFF.md compose.example.yaml "${package_dir}/"
+            cp LICENSE NOTICE README.md HANDOFF.md compose.example.yaml "${package_dir}/"
             if [ "$goos" = "windows" ]; then
               (cd build && zip -qr "../dist/${package}.zip" "$package")
             else
@@ -176,6 +176,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.setup.outputs.tag }}
+            org.opencontainers.image.licenses=Apache-2.0
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
         with:

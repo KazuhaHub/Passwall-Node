@@ -75,5 +75,9 @@ jobs:
           tags: passwall-node:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Verify image entrypoint and build identity
-        run: docker run --rm passwall-node:test --version
+      - name: Verify image entrypoint, build identity and project license
+        run: |
+          docker run --rm passwall-node:test --version
+          docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
+          docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' passwall-node:test)" = "Apache-2.0"
