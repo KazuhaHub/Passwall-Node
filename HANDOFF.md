@@ -246,5 +246,11 @@ apply、report 与 PSP `PanelClient` 投影。B3 后仍应保留这条为跨仓�
 协议要对外文档化、保持稳定，破坏性变更要走废弃周期。
 **这是一项长期成本，接受它是这个项目的前提之一。**
 
+本仓自有代码（包括 `protocol` 与 `corecatalog`）已采用 Apache-2.0，PSP 仍保持 AGPLv3。
+原生发行档包含 `LICENSE` / `NOTICE`，两种 Docker 构建均将其放入
+`/usr/share/licenses/passwall-node/` 并声明 OCI license 标签。独立下载的 Xray / sing-box
+各自保留 MPL-2.0 / GPL-3.0-or-later，重分发包含内核的数据目录或预热镜像需另行履行其许可。
+这些说明不等于完整第三方许可审计；详情见 README 的 Licence 节。
+
 改协议之前先读 PSP 的 `docs/psp-node-agent.md` §8.5「关掉了哪些选项」——
 有些门是**永久关闭**的，重新打开需要一次破坏性协议升级。
