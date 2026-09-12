@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -236,6 +237,99 @@ func TestSyncOncePreservesOutboxOnInvalidResponseEnvelope(t *testing.T) {
 	pending, err := store.PendingOutbox(ctx, 10)
 	if err != nil || len(pending.IDs) != 1 {
 		t.Fatalf("invalid response acknowledged outbox: %+v, %v", pending, err)
+	}
+}
+
+func TestSyncOncePreservesOutboxOnInvalidResponseTask(t *testing.T) {
+	ctx := context.Background()
+	store := openAgentTestStore(t)
+	if _, err := store.EnqueueIssue(ctx, "issue", protocol.Issue{Code: "test_issue"}, 1); err != nil {
+		t.Fatal(err)
+	}
+	processorCalled := false
+	synchronizer := Synchronizer{
+		Reports: ReportBuilder{AgentID: "agent-1", Store: store}, Store: store,
+		Syncer: syncerFunc(func(context.Context, protocol.NodeReport) (protocol.SyncResponse, error) {
+			return protocol.SyncResponse{Tasks: []protocol.Task{{
+				ID: "task-invalid", Kind: "test.v1", InputSHA256: strings.Repeat("0", 64),
+			}}}, nil
+		}),
+		Processor: processorFunc(func(context.Context, protocol.SyncResponse) (ProcessResult, error) {
+			processorCalled = true
+			return ProcessResult{}, nil
+		}),
+	}
+	if _, err := synchronizer.SyncOnce(ctx, true); err == nil {
+		t.Fatal("invalid response task was accepted")
+	}
+	if processorCalled {
+		t.Fatal("processor was called for invalid response task")
+	}
+	pending, err := store.PendingOutbox(ctx, 10)
+	if err != nil || len(pending.IDs) != 1 {
+		t.Fatalf("invalid task response acknowledged outbox: %+v, %v", pending, err)
+	}
+}
+
+func TestSyncOnceReportsActualPartialFallbackShape(t *testing.T) {
+	ctx := context.Background()
+	store := openAgentTestStore(t)
+	if err := store.EnsureClient(ctx, state.ClientIdentity{
+		Key: protocol.NewClientKey(88), Subject: protocol.NewSubjectKey(9),
+	}, 1); err != nil {
+		t.Fatal(err)
+	}
+	task := protocol.Task{ID: "task-fallback-sync", Kind: "test.v1"}
+	task.InputSHA256 = protocol.ComputeTaskInputSHA256(task.Kind, nil)
+	if _, err := store.AcceptTasks(ctx, []protocol.Task{task}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNextTask(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteTask(ctx, task.ID, state.TaskSucceeded, protocol.TaskResult{
+		ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256, OK: true, Result: []byte("done"),
+	}, 4); err != nil {
+		t.Fatal(err)
+	}
+	builder := ReportBuilder{AgentID: "agent-1", Store: store}
+	baseline, err := builder.Build(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullBody, err := json.Marshal(baseline.Report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialShape := baseline.Report
+	partialShape.Partial = true
+	partialShape.Objects, partialShape.ListenerCounters, partialShape.Clients, partialShape.Subjects = nil, nil, nil, nil
+	partialBody, err := json.Marshal(partialShape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fullBody) <= len(partialBody) {
+		t.Fatalf("test fixture full/partial sizes = %d/%d", len(fullBody), len(partialBody))
+	}
+	builder.maxBodyBytes = int64((len(fullBody) + len(partialBody)) / 2)
+	synchronizer := Synchronizer{
+		Reports: builder, Store: store,
+		Syncer: syncerFunc(func(_ context.Context, report protocol.NodeReport) (protocol.SyncResponse, error) {
+			if !report.Partial || len(report.TaskResults) != 1 {
+				t.Fatalf("sent report was not partial outbox flush: %+v", report)
+			}
+			return protocol.SyncResponse{}, nil
+		}),
+		Processor: processorFunc(func(context.Context, protocol.SyncResponse) (ProcessResult, error) {
+			return ProcessResult{}, nil
+		}),
+	}
+	result, err := synchronizer.SyncOnce(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ReportWasFull {
+		t.Fatal("partial fallback was recorded as a successful full report")
 	}
 }
 

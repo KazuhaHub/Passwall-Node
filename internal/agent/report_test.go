@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -27,6 +28,63 @@ func TestReportUsesLiveCoreStatus(t *testing.T) {
 	}
 	if built.Report.CoreEngine != "xray" || built.Report.CoreVersion != "26.6.27" || built.Report.CoreState != "running" {
 		t.Fatalf("core status = %q/%q/%q", built.Report.CoreEngine, built.Report.CoreVersion, built.Report.CoreState)
+	}
+}
+
+func TestReportBuilderFlushesTaskResultAsPartialWhenFullCombinationExceedsWireBudget(t *testing.T) {
+	ctx := context.Background()
+	store := openAgentTestStore(t)
+	identity := state.ClientIdentity{Key: protocol.NewClientKey(77), Subject: protocol.NewSubjectKey(8)}
+	if err := store.EnsureClient(ctx, identity, 1); err != nil {
+		t.Fatal(err)
+	}
+	task := protocol.Task{ID: "task-wire-budget", Kind: "test.v1"}
+	task.InputSHA256 = protocol.ComputeTaskInputSHA256(task.Kind, nil)
+	if _, err := store.AcceptTasks(ctx, []protocol.Task{task}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNextTask(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	result := protocol.TaskResult{
+		ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256,
+		OK: true, Result: []byte("terminal"),
+	}
+	if err := store.CompleteTask(ctx, task.ID, state.TaskSucceeded, result, 4); err != nil {
+		t.Fatal(err)
+	}
+	builder := ReportBuilder{AgentID: "agent-1", Store: store}
+	baseline, err := builder.Build(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullBody, err := json.Marshal(baseline.Report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialShape := baseline.Report
+	partialShape.Partial = true
+	partialShape.Objects = nil
+	partialShape.ListenerCounters = nil
+	partialShape.Clients = nil
+	partialShape.Subjects = nil
+	partialBody, err := json.Marshal(partialShape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fullBody) <= len(partialBody) {
+		t.Fatalf("test fixture full/partial sizes = %d/%d", len(fullBody), len(partialBody))
+	}
+	builder.maxBodyBytes = int64((len(fullBody) + len(partialBody)) / 2)
+	built, err := builder.Build(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !built.Report.Partial || len(built.Report.TaskResults) != 1 || built.Report.Clients != nil {
+		t.Fatalf("wire-budget fallback report = %+v", built.Report)
+	}
+	if len(built.OutboxIDs) != 1 {
+		t.Fatalf("wire-budget fallback lost outbox ids: %v", built.OutboxIDs)
 	}
 }
 
@@ -54,7 +112,10 @@ func TestReportBuilderFullAndPartialShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	builder := ReportBuilder{AgentID: "agent-1", Store: store}
+	builder := ReportBuilder{
+		AgentID: "agent-1", Store: store,
+		Capabilities: []string{protocol.TaskCapability("z.v1"), protocol.TaskCapability("a.v1"), protocol.TaskCapability("z.v1")},
+	}
 	full, err := builder.Build(ctx, false)
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +129,15 @@ func TestReportBuilderFullAndPartialShapes(t *testing.T) {
 	if full.Report.Objects == nil || len(full.Report.Issues) != 1 || len(full.OutboxIDs) != 1 {
 		t.Fatalf("full report/outbox = %+v / %v", full.Report, full.OutboxIDs)
 	}
+	wantCapabilities := []string{protocol.TaskCapability("a.v1"), protocol.CapabilityTaskExecutionV1, protocol.TaskCapability("z.v1")}
+	if len(full.Report.Capabilities) != len(wantCapabilities) {
+		t.Fatalf("full capabilities = %v", full.Report.Capabilities)
+	}
+	for index := range wantCapabilities {
+		if full.Report.Capabilities[index] != wantCapabilities[index] {
+			t.Fatalf("full capabilities = %v, want %v", full.Report.Capabilities, wantCapabilities)
+		}
+	}
 
 	partial, err := builder.Build(ctx, true)
 	if err != nil {
@@ -75,6 +145,11 @@ func TestReportBuilderFullAndPartialShapes(t *testing.T) {
 	}
 	if !partial.Report.Partial || partial.Report.Objects != nil || partial.Report.Clients != nil || len(partial.Report.Issues) != 1 {
 		t.Fatalf("partial report = %+v", partial.Report)
+	}
+	for index := range wantCapabilities {
+		if partial.Report.Capabilities[index] != wantCapabilities[index] {
+			t.Fatalf("partial capabilities = %v, want %v", partial.Report.Capabilities, wantCapabilities)
+		}
 	}
 	// Merely building a report is not delivery acknowledgement.
 	stillPending, err := store.PendingOutbox(ctx, 10)

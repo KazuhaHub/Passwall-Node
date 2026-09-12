@@ -1,6 +1,18 @@
 package protocol
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+)
+
+const (
+	// CapabilityTaskExecutionV1 says the agent has the durable task execution
+	// protocol. It is necessary but not sufficient for dispatch: PSP must also
+	// observe TaskCapability(kind) in the same report.
+	CapabilityTaskExecutionV1 = "task.execution.v1"
+	taskInputDomain           = "passwall-node/task-input/v1\x00"
+)
 
 // SyncResponse is PSP's half of the round trip.
 //
@@ -12,9 +24,11 @@ type SyncResponse struct {
 	Config     Segment[ConfigBody]     `json:"config"`
 	Roster     Segment[RosterBody]     `json:"roster"`
 	Directives Segment[DirectivesBody] `json:"directives"`
-	// Tasks are the five CALLS from §2.1 — reality probes, core version list,
-	// core install, agent upgrade, TLS material — turned into task/result pairs
-	// because "when the call returns" does not exist once the node dials out.
+	// Tasks are bounded, capability-negotiated calls turned into durable
+	// task/result state because "when the call returns" does not exist once the
+	// node dials out. Core selection is declarative Config state and TLS material
+	// travels inline; the first production task kinds will be reality probing and
+	// agent upgrade after their execution contracts are specified.
 	//
 	// ADR 0025 Q0 requires this cost to be paid openly rather than assumed away:
 	// turning a call into state costs interaction latency of up to one
@@ -94,6 +108,16 @@ func ValidateEnvelope(envelope Envelope) error {
 	return nil
 }
 
+// ValidateSyncResponse validates the round-level envelope and every task
+// before the agent acknowledges the report that elicited it. Segment bodies
+// remain isolated and are validated independently by SegmentReceiver.
+func ValidateSyncResponse(response SyncResponse) error {
+	if err := ValidateEnvelope(response.Envelope); err != nil {
+		return err
+	}
+	return ValidateTasks(response.Tasks)
+}
+
 // ShouldSendFull decides whether the next NodeReport must carry the
 // enumerations. It lives here, in the shared package, because PSP has to be
 // able to predict exactly what the agent will do — a second copy of this rule
@@ -114,19 +138,49 @@ func ShouldSendFull(env Envelope, sinceLastFullSeconds int) bool {
 	return sinceLastFullSeconds >= env.FullReportSeconds
 }
 
-// Task is a call turned into state.
+// Task is a call turned into state. ID is lowercase canonical ASCII so its
+// identity is byte-equivalent across SQLite, PostgreSQL, and case-folding
+// MySQL collations.
 type Task struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Args []byte `json:"args,omitempty"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Args        []byte `json:"args,omitempty"`
+	InputSHA256 string `json:"input_sha256"`
 }
 
-// TaskResult is its other half, returned on a later report.
+// TaskResult is its other half, returned on a later report. OK and
+// Indeterminate form an explicit three-state outcome: success, known failure,
+// or an outcome that cannot be proven after a crash. Callers must not infer
+// indeterminate from ErrorCode text.
 type TaskResult struct {
-	ID     string `json:"id"`
-	OK     bool   `json:"ok"`
-	Result []byte `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
+	ID            string `json:"id"`
+	Kind          string `json:"kind"`
+	InputSHA256   string `json:"input_sha256"`
+	OK            bool   `json:"ok"`
+	Indeterminate bool   `json:"indeterminate,omitempty"`
+	Result        []byte `json:"result,omitempty"`
+	ErrorCode     string `json:"error_code,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+// TaskCapability returns the kind-specific dispatch capability. Kinds are
+// validated separately, so callers must not use this function to bless
+// untrusted input.
+func TaskCapability(kind string) string { return "task." + kind }
+
+// ComputeTaskInputSHA256 binds a task's semantic kind and exact argument bytes
+// to one stable identity. It is lowercase hex SHA-256 over
+// "passwall-node/task-input/v1" || NUL || UTF-8 kind || NUL || the exact
+// decoded args bytes. Nil and empty args therefore have the same identity.
+// Task IDs identify operations; this digest detects a control plane
+// accidentally reusing an ID for different input.
+func ComputeTaskInputSHA256(kind string, args []byte) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(taskInputDomain))
+	_, _ = h.Write([]byte(kind))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(args)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Segment evolution (§8.4): the directives segment evolves ADDITIVELY and

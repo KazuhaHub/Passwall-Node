@@ -469,8 +469,19 @@ func TestReportOutboxIsDurableDeduplicatedAndAcknowledged(t *testing.T) {
 	if inserted, err := store.EnqueueIssue(ctx, "unknown:cli_7:lst_9:v1", issue, 11); err != nil || inserted {
 		t.Fatalf("duplicate issue enqueue: inserted=%v err=%v", inserted, err)
 	}
-	result := protocol.TaskResult{ID: "task-1", OK: true, Result: []byte("done")}
-	if err := store.EnqueueTaskResult(ctx, result, 12); err != nil {
+	taskKind := "test.v1"
+	result := protocol.TaskResult{
+		ID: "task-1", Kind: taskKind, InputSHA256: protocol.ComputeTaskInputSHA256(taskKind, nil),
+		OK: true, Result: []byte("done"),
+	}
+	task := protocol.Task{ID: result.ID, Kind: result.Kind, InputSHA256: result.InputSHA256}
+	if _, err := store.AcceptTasks(ctx, []protocol.Task{task}, 12); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNextTask(ctx, 13); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteTask(ctx, task.ID, state.TaskSucceeded, result, 14); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -513,10 +524,30 @@ func TestReportOutboxIsDurableDeduplicatedAndAcknowledged(t *testing.T) {
 func TestReportOutboxRejectsAmbiguousTaskResults(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t, filepath.Join(t.TempDir(), "agent.db"))
-	if err := store.EnqueueTaskResult(ctx, protocol.TaskResult{ID: "task-1", OK: true, Error: "but failed"}, 1); err == nil {
+	first := protocol.Task{ID: "task-1", Kind: "test.v1"}
+	first.InputSHA256 = protocol.ComputeTaskInputSHA256(first.Kind, nil)
+	if _, err := store.AcceptTasks(ctx, []protocol.Task{first}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNextTask(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteTask(ctx, first.ID, state.TaskSucceeded, protocol.TaskResult{
+		ID: first.ID, Kind: first.Kind, InputSHA256: first.InputSHA256, OK: true, Error: "but failed",
+	}, 3); err == nil {
 		t.Fatal("successful result with an error was accepted")
 	}
-	if err := store.EnqueueTaskResult(ctx, protocol.TaskResult{ID: "task-2"}, 1); err == nil {
+	second := protocol.Task{ID: "task-2", Kind: "test.v1"}
+	second.InputSHA256 = protocol.ComputeTaskInputSHA256(second.Kind, nil)
+	if _, err := store.AcceptTasks(ctx, []protocol.Task{second}, 4); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNextTask(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteTask(ctx, second.ID, state.TaskFailed, protocol.TaskResult{
+		ID: second.ID, Kind: second.Kind, InputSHA256: second.InputSHA256,
+	}, 6); err == nil {
 		t.Fatal("failed result without an error was accepted")
 	}
 }

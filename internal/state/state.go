@@ -8,19 +8,73 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
 
 var (
-	ErrNotFound        = errors.New("state not found")
-	ErrStaleVersion    = errors.New("stale stream version")
-	ErrVersionConflict = errors.New("stream version has different content")
-	ErrCounterRollback = errors.New("counter moved backwards without a new epoch")
-	ErrCoreTrafficGap  = errors.New("core traffic stream has an unrecoverable event gap")
-	ErrInvalidState    = errors.New("invalid durable state")
+	ErrNotFound             = errors.New("state not found")
+	ErrStaleVersion         = errors.New("stale stream version")
+	ErrVersionConflict      = errors.New("stream version has different content")
+	ErrCounterRollback      = errors.New("counter moved backwards without a new epoch")
+	ErrCoreTrafficGap       = errors.New("core traffic stream has an unrecoverable event gap")
+	ErrInvalidState         = errors.New("invalid durable state")
+	ErrTaskIdentityConflict = errors.New("task id was reused with different input")
+	ErrTaskTerminalConflict = errors.New("task terminal result is immutable")
 )
+
+type TaskIdentityConflictError struct {
+	ID          string
+	InputSHA256 string
+}
+
+func (e *TaskIdentityConflictError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrTaskIdentityConflict, e.ID)
+}
+
+func (e *TaskIdentityConflictError) Unwrap() error { return ErrTaskIdentityConflict }
+
+// TaskState is the durable execution state. A task is claimed by committing
+// received -> running before its handler is called. A process death therefore
+// leaves explicit recovery work rather than silently executing the task again.
+type TaskState string
+
+const (
+	TaskReceived      TaskState = "received"
+	TaskRunning       TaskState = "running"
+	TaskSucceeded     TaskState = "succeeded"
+	TaskFailed        TaskState = "failed"
+	TaskIndeterminate TaskState = "indeterminate"
+)
+
+func (s TaskState) Terminal() bool {
+	return s == TaskSucceeded || s == TaskFailed || s == TaskIndeterminate
+}
+
+// TaskExecution is the local journal row. Result delivery is tracked through
+// the transactional report outbox and mirrored by ResultDelivered for audit.
+type TaskExecution struct {
+	ID              string
+	Kind            string
+	Args            []byte
+	InputSHA256     string
+	State           TaskState
+	Result          []byte
+	ErrorCode       string
+	Error           string
+	ReceivedAtMS    int64
+	StartedAtMS     int64
+	FinishedAtMS    int64
+	ResultDelivered bool
+}
+
+// TaskAcceptance summarises effects of accepting one response task batch.
+type TaskAcceptance struct {
+	WorkAvailable   bool
+	ResultAvailable bool
+}
 
 // StreamDocument is one received and durably accepted protocol segment.
 // Body is canonical JSON for the segment body, not the whole response.
@@ -212,9 +266,14 @@ type Store interface {
 	// recorded. Delivered keys remain as tombstones so a persistent condition
 	// cannot trigger a tight immediate-report loop after acknowledgement.
 	EnqueueIssue(context.Context, string, protocol.Issue, int64) (bool, error)
-	EnqueueTaskResult(context.Context, protocol.TaskResult, int64) error
 	PendingOutbox(context.Context, int) (OutboxBatch, error)
 	AckOutbox(context.Context, []int64) error
+
+	AcceptTasks(context.Context, []protocol.Task, int64) (TaskAcceptance, error)
+	Task(context.Context, string) (TaskExecution, error)
+	RunningTasks(context.Context) ([]TaskExecution, error)
+	ClaimNextTask(context.Context, int64) (TaskExecution, error)
+	CompleteTask(context.Context, string, TaskState, protocol.TaskResult, int64) error
 
 	ObserveReferenceSkew(context.Context, string, string, protocol.Version) (int, error)
 	ClearReferenceSkew(context.Context, string, string) error

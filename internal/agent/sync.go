@@ -73,8 +73,8 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial bool) (SyncResult, e
 	if err != nil {
 		return SyncResult{}, s.withOfflineConvergence(ctx, err)
 	}
-	if err := protocol.ValidateEnvelope(response.Envelope); err != nil {
-		return SyncResult{}, s.withOfflineConvergence(ctx, fmt.Errorf("validate sync response envelope: %w", err))
+	if err := protocol.ValidateSyncResponse(response); err != nil {
+		return SyncResult{}, s.withOfflineConvergence(ctx, fmt.Errorf("validate sync response: %w", err))
 	}
 	if err := s.Store.AckOutbox(ctx, built.OutboxIDs); err != nil {
 		return SyncResult{}, s.withOfflineConvergence(ctx, fmt.Errorf("acknowledge delivered report outbox: %w", err))
@@ -82,12 +82,12 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial bool) (SyncResult, e
 	processed, err := s.Processor.Process(ctx, response)
 	if err != nil {
 		return SyncResult{
-			Envelope: response.Envelope, ReportWasFull: !partial,
+			Envelope: response.Envelope, ReportWasFull: !built.Report.Partial,
 			ReportImmediately: processed.ReportImmediately,
 		}, fmt.Errorf("process sync response: %w", err)
 	}
 	return SyncResult{
-		Envelope: response.Envelope, ReportWasFull: !partial,
+		Envelope: response.Envelope, ReportWasFull: !built.Report.Partial,
 		ReportImmediately: processed.ReportImmediately,
 	}, nil
 }

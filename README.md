@@ -5,11 +5,11 @@ an audited Xray or sing-box version, applies only PSP-owned desired state, and
 reports what the selected core actually applied and counted.
 
 **Status: the Xray and sing-box production paths are implemented.** `cmd/node`
-wires outbound HTTPS synchronization, SQLite schema v7, exact checksum-pinned core install,
+wires outbound HTTPS synchronization, SQLite schema v8, exact checksum-pinned core install,
 full-config compilation, atomic process/config replacement with rollback,
 offline expiry/quota enforcement, core-specific telemetry, durable issue
-delivery and graceful shutdown. sing-box accounting uses its authenticated
-loopback daemon API and a crash-safe connection journal; a stream gap is
+delivery, a durable capability-negotiated task journal, and graceful shutdown.
+sing-box accounting uses its authenticated loopback daemon API and a crash-safe connection journal; a stream gap is
 reported instead of silently under-counting. `cmd/contract-agent` remains the
 deterministic coreless cross-repository contract harness.
 
@@ -149,9 +149,12 @@ newest release of either stability class.
 `cmd/contract-agent` deliberately uses a deterministic coreless runtime. It is
 not the production daemon: it lets a control plane exercise the real agent
 transport/state/apply/report stack without downloading or launching Xray.
-Responses carrying tasks are rejected until the task execution contract and
-its exactly-once result state are defined; silently dropping a future side effect is not a
-compatibility strategy.
+The durable task/result protocol is implemented, but the harness advertises no
+kind-specific task capability and therefore receives no tasks from a conforming
+control plane. Production RealityProbe and AgentUpgrade handlers are likewise
+intentionally absent until their input, deadline, recovery, and authorization
+contracts are specified; silently dropping or guessing a future side effect is
+not a compatibility strategy.
 
 ```bash
 go run ./cmd/contract-agent \

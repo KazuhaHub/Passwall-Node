@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -9,6 +10,143 @@ import (
 func emptyHave() map[string]StreamState {
 	return map[string]StreamState{
 		StreamConfig: {}, StreamRoster: {}, StreamDirectives: {},
+	}
+}
+
+func TestDurableTaskContractValidatesIdentityBoundsAndThreeTerminalStates(t *testing.T) {
+	if got, want := ComputeTaskInputSHA256("reality_probe.v1", []byte(`{"target":"example.com:443"}`)),
+		"7578595b14afff1b40892f0b8a74b1b6c271fa08fd26cd90f2f46250a9bdb920"; got != want {
+		t.Fatalf("task input golden digest = %s, want %s", got, want)
+	}
+	if ComputeTaskInputSHA256("test.v1", nil) != ComputeTaskInputSHA256("test.v1", []byte{}) {
+		t.Fatal("nil and empty task args have different identities")
+	}
+	task := Task{ID: "task-1", Kind: "reality_probe.v1", Args: []byte("probe")}
+	task.InputSHA256 = ComputeTaskInputSHA256(task.Kind, task.Args)
+	if err := ValidateSyncResponse(SyncResponse{Tasks: []Task{task}}); err != nil {
+		t.Fatalf("valid task response: %v", err)
+	}
+	mutated := task
+	mutated.Args = []byte("different")
+	if err := ValidateTasks([]Task{mutated}); err == nil {
+		t.Fatal("task digest did not bind exact argument bytes")
+	}
+	if err := ValidateTasks([]Task{task, task}); err == nil {
+		t.Fatal("duplicate task id was accepted")
+	}
+	uppercaseID := task
+	uppercaseID.ID = "Task-1"
+	if err := ValidateTasks([]Task{uppercaseID}); err == nil {
+		t.Fatal("uppercase task id was accepted despite cross-database collation ambiguity")
+	}
+	reservedKind := Task{ID: "task-reserved", Kind: "execution.v1"}
+	reservedKind.InputSHA256 = ComputeTaskInputSHA256(reservedKind.Kind, nil)
+	if err := ValidateTasks([]Task{reservedKind}); err == nil {
+		t.Fatal("task kind that aliases the base execution capability was accepted")
+	}
+	tooManyTasks := make([]Task, MaxTasksPerResponse+1)
+	for index := range tooManyTasks {
+		tooManyTasks[index] = Task{ID: "task-count-" + string(rune('a'+index%26)) + string(rune('a'+index/26)), Kind: "test.v1"}
+		tooManyTasks[index].InputSHA256 = ComputeTaskInputSHA256(tooManyTasks[index].Kind, nil)
+	}
+	if err := ValidateTasks(tooManyTasks); err == nil {
+		t.Fatal("task count bound was not enforced")
+	}
+	largeTasks := make([]Task, 5)
+	for index := range largeTasks {
+		largeTasks[index] = Task{ID: "task-large-" + string(rune('a'+index)), Kind: "test.v1", Args: bytes.Repeat([]byte{'x'}, MaxTaskArgsBytes)}
+		largeTasks[index].InputSHA256 = ComputeTaskInputSHA256(largeTasks[index].Kind, largeTasks[index].Args)
+	}
+	if err := ValidateTasks(largeTasks); err == nil {
+		t.Fatal("aggregate task argument budget was not enforced")
+	}
+	if MaxTaskKindBytes > MaxCapabilityBytes-len("task.") {
+		t.Fatalf("kind bound %d cannot fit capability bound %d", MaxTaskKindBytes, MaxCapabilityBytes)
+	}
+
+	base := TaskResult{ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256}
+	states := []TaskResult{
+		func() TaskResult { r := base; r.OK = true; r.Result = []byte("ok"); return r }(),
+		func() TaskResult { r := base; r.ErrorCode = "probe_failed"; r.Error = "probe failed"; return r }(),
+		func() TaskResult {
+			r := base
+			r.Indeterminate = true
+			r.ErrorCode = "probe_indeterminate"
+			r.Error = "outcome unknown"
+			return r
+		}(),
+	}
+	for _, result := range states {
+		if err := ValidateTaskResults([]TaskResult{result}); err != nil {
+			t.Fatalf("valid terminal result %+v: %v", result, err)
+		}
+	}
+	invalid := []TaskResult{
+		func() TaskResult { r := states[0]; r.Indeterminate = true; return r }(),
+		func() TaskResult { r := states[1]; r.Result = []byte("ambiguous"); return r }(),
+		func() TaskResult { r := states[2]; r.OK = true; return r }(),
+		func() TaskResult { r := states[2]; r.ErrorCode = ""; return r }(),
+	}
+	uppercaseResult := states[0]
+	uppercaseResult.ID = "Task-1"
+	invalid = append(invalid, uppercaseResult)
+	for _, result := range invalid {
+		if err := ValidateTaskResults([]TaskResult{result}); err == nil {
+			t.Fatalf("ambiguous terminal result was accepted: %+v", result)
+		}
+	}
+	largeResults := make([]TaskResult, 5)
+	for index := range largeResults {
+		largeResults[index] = base
+		largeResults[index].ID = "result-large-" + string(rune('a'+index))
+		largeResults[index].OK = true
+		largeResults[index].Result = bytes.Repeat([]byte{'x'}, MaxTaskResultBytes)
+	}
+	if err := ValidateTaskResults(largeResults); err == nil {
+		t.Fatal("aggregate task result budget was not enforced")
+	}
+}
+
+func TestCapabilitiesSurviveFullAndPartialReportShapes(t *testing.T) {
+	capabilities := []string{CapabilityTaskExecutionV1, TaskCapability("reality_probe.v1")}
+	for _, partial := range []bool{false, true} {
+		body, err := json.Marshal(NodeReport{AgentID: "agent-1", Partial: partial, Capabilities: capabilities})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded NodeReport
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if len(decoded.Capabilities) != len(capabilities) || decoded.Capabilities[1] != capabilities[1] {
+			t.Fatalf("partial=%v capabilities lost: %s", partial, body)
+		}
+	}
+	invalid := NodeReport{AgentID: "agent-1", Have: emptyHave(), Capabilities: []string{"task.a.v1", "task.a.v1"}}
+	if err := ValidateNodeReport(invalid); err == nil {
+		t.Fatal("duplicate capability was accepted")
+	}
+	invalid.Capabilities = []string{"Task.Uppercase"}
+	if err := ValidateNodeReport(invalid); err == nil {
+		t.Fatal("noncanonical capability was accepted")
+	}
+}
+
+func TestLegacyTaskResultValidationRequiresAbsenceOfDurableFields(t *testing.T) {
+	report := NodeReport{
+		AgentID: "agent-1", Have: emptyHave(),
+		TaskResults: []TaskResult{{ID: "legacy-1", Error: "legacy failure"}},
+	}
+	if err := ValidateNodeReport(report); err != nil {
+		t.Fatalf("bounded legacy result should remain parse-compatible: %v", err)
+	}
+	report.TaskResults[0].Indeterminate = true
+	if err := ValidateNodeReport(report); err == nil {
+		t.Fatal("incomplete durable result shape was accepted")
+	}
+	report.TaskResults[0].Kind = "test.v1"
+	if err := ValidateNodeReport(report); err == nil {
+		t.Fatal("mixed legacy/durable result shape was accepted")
 	}
 }
 

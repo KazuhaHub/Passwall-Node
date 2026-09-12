@@ -27,6 +27,7 @@ type ProcessorOptions struct {
 	SkewToleranceRounds int
 	ObjectIssueTimeout  time.Duration
 	Now                 func() time.Time
+	TaskWake            func()
 }
 
 // Processor turns received documents into re-entrant local convergence.
@@ -37,6 +38,7 @@ type Processor struct {
 	skewToleranceRounds int
 	objectIssueTimeout  time.Duration
 	now                 func() time.Time
+	taskWake            func()
 }
 
 func NewProcessor(options ProcessorOptions) (*Processor, error) {
@@ -57,15 +59,44 @@ func NewProcessor(options ProcessorOptions) (*Processor, error) {
 		store: options.Store, runtime: options.Runtime, issues: options.Issues,
 		skewToleranceRounds: options.SkewToleranceRounds,
 		objectIssueTimeout:  options.ObjectIssueTimeout, now: now,
+		taskWake: options.TaskWake,
 	}, nil
 }
 
 func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse) (ProcessResult, error) {
+	now := p.now()
+	nowMS := now.UnixMilli()
+	if nowMS <= 0 {
+		return ProcessResult{}, fmt.Errorf("processor clock must be after Unix epoch")
+	}
+	result := ProcessResult{}
 	if len(response.Tasks) != 0 {
-		// §9 has not fixed task kinds or their exactly-once execution state yet.
-		// Silently ignoring a task would make PSP wait for a result that can
-		// never exist and could lose a future side effect during version skew.
-		return ProcessResult{}, fmt.Errorf("task execution is not configured")
+		if p.taskWake == nil {
+			return result, fmt.Errorf("task worker is not configured")
+		}
+		accepted, err := p.store.AcceptTasks(ctx, response.Tasks, nowMS)
+		if err != nil {
+			if errors.Is(err, state.ErrTaskIdentityConflict) {
+				taskID, inputDigest := "unknown", "unknown"
+				var conflict *state.TaskIdentityConflictError
+				if errors.As(err, &conflict) {
+					taskID, inputDigest = conflict.ID, conflict.InputSHA256
+				}
+				_, issueErr := p.issues.Record(ctx, LocalIssue{
+					Kind: LocalIssueTaskIdentityConflict, Key: taskID,
+					DedupeKey: "task-identity-conflict:" + taskID + ":" + inputDigest,
+					Detail:    err.Error(),
+				})
+				if issueErr != nil {
+					return result, errors.Join(fmt.Errorf("accept tasks: %w", err), fmt.Errorf("record task identity conflict: %w", issueErr))
+				}
+			}
+			return result, fmt.Errorf("accept tasks: %w", err)
+		}
+		result.ReportImmediately = accepted.ResultAvailable
+		if accepted.WorkAvailable {
+			p.taskWake()
+		}
 	}
 	oldConfig, err := optionalStoredBody[protocol.ConfigBody](ctx, p.store, protocol.StreamConfig)
 	if err != nil {
@@ -75,16 +106,11 @@ func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse)
 	if err != nil {
 		return ProcessResult{}, err
 	}
-	now := p.now()
-	nowMS := now.UnixMilli()
-	if nowMS <= 0 {
-		return ProcessResult{}, fmt.Errorf("processor clock must be after Unix epoch")
-	}
 	received, err := (SegmentReceiver{Store: p.store, NowMS: func() int64 { return nowMS }}).Receive(ctx, response)
 	if err != nil {
 		return ProcessResult{}, err
 	}
-	result := ProcessResult{ReportImmediately: received.NeedImmediatePoll}
+	result.ReportImmediately = result.ReportImmediately || received.NeedImmediatePoll
 	for _, failure := range received.Failures {
 		if err := p.recordIssue(ctx, LocalIssue{
 			Kind: LocalIssueSegmentRejected, Stream: failure.Stream,

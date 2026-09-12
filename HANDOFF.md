@@ -19,7 +19,7 @@ protocol/     线上契约，本地实现已定稿
   protocol_test.go
 internal/agent/       HTTP 拨出、三段接收、可重入应用、报告与调度
 internal/state/       持久化端口
-internal/state/sqlite SQLite schema v7：流、对象、计数、配额闸、幂等 outbox、core 部署与 sing-box 事件账本
+internal/state/sqlite SQLite schema v8：流、对象、计数、配额闸、幂等 outbox、task execution journal、core 部署与 sing-box 事件账本
 cmd/contract-agent/   C2 真 agent 契约执行器（仅 core 为确定性替身）
 cmd/node/             生产 daemon：同步、安装、编译、运行、观测、离线执法、优雅退出
 internal/core/        Compiler / Supervisor / Telemetry + Xray / sing-box 实现
@@ -29,7 +29,7 @@ corecatalog/          精确、校验和固定、跨平台的 Xray / sing-box �
 
 **Xray 与 sing-box 生产路径均已接通。** 一轮同步把本地观测、期望文档接收和至多一次 core 收敛串成一个提交边界；
 精确 core 安装、配置校验、原子替换、失败回滚、重启前 digest 核验、Xray 计数读取与断网时到期/配额
-停用都在生产 composition root 中。三类长期服务由统一 supervisor 管理，任何一项异常都会取消并排空
+停用都在生产 composition root 中。五类长期服务由统一 supervisor 管理，任何一项异常都会取消并排空
 其余服务，goroutine panic 不会悄悄留下半活进程。
 
 sing-box 固定核验 `1.14.0`，原生编译 VLESS、VMess、Trojan 和 Shadowsocks-2022。其官方 API
@@ -95,10 +95,11 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 
 ### B2 — agent 骨架
 
-**状态：已完成。** 真实 HTTP client、SQLite schema v7、三段独立接收、可重入 join、
+**状态：已完成。** 真实 HTTP client、SQLite schema v8、三段独立接收、可重入 join、
 config add/update → roster → config delete 顺序、epoch 恢复、全量/轻量报告、配额周期推进、
-对象超时升级与幂等 outbox 均已落地。outbox 成功投递后保留 dedupe tombstone：持续存在的
-同一问题不会在每轮重新触发即时上报、把未来生产同步循环拖进无间隔自旋。
+对象超时升级与幂等 outbox 均已落地。Issue outbox 成功投递后保留 dedupe tombstone：持续存在的
+同一问题不会在每轮重新触发即时上报、把未来生产同步循环拖进无间隔自旋；task result 则以 journal
+作为唯一长期副本，ACK 后删除 outbox payload，需要时可重新武装。
 
 `POST /v1/node/sync` 的客户端侧、三段的应用、状态上报。**先不碰 core。**
 
@@ -121,7 +122,15 @@ config add/update → roster → config delete 顺序、epoch 恢复、全量/�
 - **`Applied` 只能是字节真收到并落盘的版本**,绝不是从 `unchanged` 响应上读来的
 - `(epoch, version)` 必须两项都为正；半零坐标在接收、状态机、SQLite 三层都拒绝
 - 已 applied 且内容和 listener 依赖都未变的 client 不触碰 runtime；pending / blocked 仍重试
-- §9 定义任务执行与 exactly-once 状态前，非空 `tasks[]` 明确拒绝，绝不静默吞掉
+- task 只按同一轮 `NodeReport.capabilities` 双门槛下发：必须同时有 `task.execution.v1` 与
+  `task.<kind>`；旧 agent 和只具备 durable 基础设施、没有该 kind handler 的 agent 都 fail closed
+- task ID 只允许小写 canonical ASCII（避免 MySQL 默认 collation 与 SQLite/Postgres 对大小写作出不同裁定），
+  并与 `SHA-256(domain NUL || kind NUL || exact args bytes)` 绑定；同 ID 同内容重放不再执行，
+  同 ID 异内容整批回滚并持久上报 `task_identity_conflict`
+- claim 先把 `received → running` 落盘再调用 handler；`running → terminal` 与 result outbox 同事务，
+  success / failed / indeterminate 是互斥的三个 wire 状态，终态不可修改
+- result 在报告成功前至少一次重放；ACK 后删除 outbox 中的重复 payload、journal 保留终态，PSP 再下发
+  同一 task 时从 journal 重新武装结果，不会重做副作用
 - 同步单向载荷上限统一由协议包固定为 16 MiB；Issue 字段在进入 outbox 前 UTF-8 安全截断，
   live IP 在持久化前解析、去重并规范化，避免一个坏观测永久毒化后续报告
 - 响应调度字段在 outbox 确认前整体校验（心跳至多 1 小时、全量周期至多 1 天）；
@@ -152,8 +161,30 @@ engine/version/binary/命令参数是一个原子部署身份，启动失败会�
 遥测重连能对已知活跃连接去重和查缺，但上述 1000 条历史边界是未解决的运营风险；在上游提供单调 cursor，
 或我们加入可独立核对的全局累计边界前，长时间 telemetry 中断后的计数必须视为有条件，不能视为数学上完整。
 
-后续增量：agent 自升级、带 exactly-once 状态的任务协议、RealityProbe。不要为了实现这些能力复用
-或放宽当前 `tasks[]` 的明确拒绝语义。
+durable task foundation 已完成，但**尚无生产 task handler**。下一步只能在分别写清输入 schema、权限、
+deadline、幂等键和 crash recovery 后实现 `RealityProbe` 与 `AgentUpgrade`；core 选择仍是 declarative
+`ConfigBody.Core`，TLS material 仍随配置内联，不能重新伪装成 task。
+
+这里的 crash window 必须精确描述，不能笼统宣传“exactly once”：claim 提交前崩溃不会执行；claim
+提交后、terminal 提交前崩溃会留下 `running`。实现 `TaskRecoverer` 的 kind 在重启后查询/恢复真实结果；
+没有 recovery contract 的 kind 终结为显式 `indeterminate`，绝不盲目再执行。只有下游支持 task ID
+幂等键或可查询结果时，外部副作用才能获得 exactly-once 效果；本 journal 保证的是身份唯一、终态不可变、
+结果可靠重放和“不把未知伪装成失败”。handler 必须响应传入的 context；关停取消期间没有返回确定结果的
+handler 保持 `running`，已返回确定结果则用短时独立 context 尽力提交终态。
+
+schema v7 中没有 kind/input identity 的旧 `task_result` 无法安全升级为新终态。v8 migration 会把原始行
+改成合法 task ID 不可能碰撞的取证 key、标记 delivered 并仅留在本机，同时产生不含原始 payload（只含
+task ID、长度、SHA-256）的 `legacy_task_result_quarantined` Issue。v8 是单向 migration；旧 binary 会拒绝
+打开更新后的数据库，回滚程序必须同时恢复升级前备份，不能拿旧 binary 直接读 v8。
+
+真实 task 上线前以下运营边界全部是 blocker，不能只补 handler 就开放 capability：
+
+- PSP 对每个 agent 的 queued 与 offered 数量/字节 quota，防止控制面或积压耗尽 node 磁盘
+- task expiry 字段以及 PSP 不再 offer、Node 未 claim / 已 running / 已 terminal 时的两端精确语义
+- Node terminal journal 与 PSP terminal record 各自按时间和数量的 retention；当前 ACK 已去掉
+  Node outbox 的第二份 payload，但 journal 会永久保留终态
+- PSP 数据库 restore 后的 task ID namespace / generation；restore 不得在 Node retention 或最长离线窗口内
+  重用历史 ID，否则会触发身份冲突或取回旧 terminal result
 
 ## 4. 十条不要
 
