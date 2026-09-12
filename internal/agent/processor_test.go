@@ -96,14 +96,16 @@ func TestProcessorRequestsImmediateReportOnlyForNewIssue(t *testing.T) {
 	}
 }
 
-func TestProcessorRejectsTasksUntilExecutionContractExists(t *testing.T) {
+func TestProcessorRejectsTasksWithoutAWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openAgentTestStore(t)
 	runtime := &recordingRuntime{}
 	processor := newTestProcessor(t, store, runtime, &recordingIssueSink{}, 3)
 	response := validSyncResponse()
-	response.Tasks = []protocol.Task{{ID: "future-task", Kind: "future-kind"}}
-	if _, err := processor.Process(ctx, response); err == nil || !strings.Contains(err.Error(), "task execution is not configured") {
+	task := protocol.Task{ID: "future-task", Kind: "future-kind.v1"}
+	task.InputSHA256 = protocol.ComputeTaskInputSHA256(task.Kind, nil)
+	response.Tasks = []protocol.Task{task}
+	if _, err := processor.Process(ctx, response); err == nil || !strings.Contains(err.Error(), "task worker is not configured") {
 		t.Fatalf("unsupported task error = %v", err)
 	}
 	if len(runtime.calls) != 0 {
@@ -111,6 +113,39 @@ func TestProcessorRejectsTasksUntilExecutionContractExists(t *testing.T) {
 	}
 	if _, err := store.Stream(ctx, protocol.StreamConfig); !errors.Is(err, state.ErrNotFound) {
 		t.Fatalf("unsupported task response persisted streams: %v", err)
+	}
+}
+
+func TestProcessorPersistsExactSecondTaskIdentityConflictWithoutMutatingBatch(t *testing.T) {
+	ctx := context.Background()
+	store := openAgentTestStore(t)
+	existing := protocol.Task{ID: "task-existing", Kind: "test.v1", Args: []byte("original")}
+	existing.InputSHA256 = protocol.ComputeTaskInputSHA256(existing.Kind, existing.Args)
+	if _, err := store.AcceptTasks(ctx, []protocol.Task{existing}, 1); err != nil {
+		t.Fatal(err)
+	}
+	first := protocol.Task{ID: "task-first", Kind: "test.v1"}
+	first.InputSHA256 = protocol.ComputeTaskInputSHA256(first.Kind, first.Args)
+	conflict := existing
+	conflict.Args = []byte("different")
+	conflict.InputSHA256 = protocol.ComputeTaskInputSHA256(conflict.Kind, conflict.Args)
+	issues := &recordingIssueSink{}
+	processor := newTestProcessor(t, store, &recordingRuntime{}, issues, 3)
+	processor.taskWake = func() {}
+	response := validSyncResponse()
+	response.Tasks = []protocol.Task{first, conflict}
+	if _, err := processor.Process(ctx, response); !errors.Is(err, state.ErrTaskIdentityConflict) {
+		t.Fatalf("identity conflict error = %v", err)
+	}
+	if len(issues.issues) != 1 || issues.issues[0].Kind != LocalIssueTaskIdentityConflict || issues.issues[0].Key != existing.ID {
+		t.Fatalf("identity conflict issue = %+v", issues.issues)
+	}
+	if _, err := store.Task(ctx, first.ID); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("earlier batch task was not rolled back: %v", err)
+	}
+	stored, err := store.Task(ctx, existing.ID)
+	if err != nil || string(stored.Args) != "original" || stored.InputSHA256 != existing.InputSHA256 {
+		t.Fatalf("existing task changed = %+v, %v", stored, err)
 	}
 }
 

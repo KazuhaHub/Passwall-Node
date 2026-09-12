@@ -3,8 +3,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
@@ -22,9 +24,11 @@ type ReportBuilder struct {
 	CoreVersion  string
 	CoreState    string
 	CoreStatus   func() agentcore.Status
+	Capabilities []string
 	Store        state.Store
 	OutboxLimit  int
 	Now          func() time.Time
+	maxBodyBytes int64
 }
 
 // BuiltReport retains the outbox ids that may be acknowledged only after the
@@ -50,6 +54,7 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool) (BuiltReport, er
 		ReportedAtMS: now.UnixMilli(), AgentVersion: b.AgentVersion,
 		CoreEngine: b.CoreEngine, CoreVersion: b.CoreVersion, CoreState: b.CoreState,
 		Partial: partial, Have: make(map[string]protocol.StreamState, 3),
+		Capabilities: sortedUniqueStrings(append([]string{protocol.CapabilityTaskExecutionV1}, b.Capabilities...)),
 	}
 	if b.CoreStatus != nil {
 		status := b.CoreStatus()
@@ -113,7 +118,64 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool) (BuiltReport, er
 	}
 	report.Issues = batch.Issues
 	report.TaskResults = batch.TaskResults
+	if err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit()); err != nil {
+		return BuiltReport{}, err
+	}
 	return BuiltReport{Report: report, OutboxIDs: batch.IDs}, nil
+}
+
+func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64) error {
+	body, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("encode node report for wire-size check: %w", err)
+	}
+	if int64(len(body)) <= maxBytes {
+		return nil
+	}
+	if report.Partial || !hasOutbox {
+		return fmt.Errorf("node report exceeds %d bytes", maxBytes)
+	}
+	// Do not let a terminal result become trapped behind a large full
+	// enumeration forever. Flush the outbox in a partial report; the next
+	// successful full report remains due because Runner records the actual
+	// shape sent, not the shape originally requested.
+	report.Partial = true
+	report.Objects = nil
+	report.ListenerCounters = nil
+	report.Clients = nil
+	report.Subjects = nil
+	body, err = json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("encode partial outbox flush for wire-size check: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return fmt.Errorf("partial node report exceeds %d bytes", maxBytes)
+	}
+	return nil
+}
+
+func (b ReportBuilder) bodyLimit() int64 {
+	if b.maxBodyBytes > 0 {
+		return b.maxBodyBytes
+	}
+	return protocol.MaxSyncBodyBytes
+}
+
+func sortedUniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := append([]string(nil), values...)
+	sort.Strings(result)
+	write := 0
+	for _, value := range result {
+		if write != 0 && result[write-1] == value {
+			continue
+		}
+		result[write] = value
+		write++
+	}
+	return result[:write]
 }
 
 func (b ReportBuilder) now() time.Time {

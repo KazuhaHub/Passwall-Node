@@ -156,9 +156,20 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	issues := agent.OutboxIssueSink{
 		Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() },
 	}
+	taskRegistry, err := agent.NewTaskRegistry(nil)
+	if err != nil {
+		return err
+	}
+	taskWorker, err := agent.NewTaskWorker(agent.TaskWorkerOptions{
+		Store: store, Registry: taskRegistry, Now: now,
+	})
+	if err != nil {
+		return err
+	}
 	processor, err := agent.NewProcessor(agent.ProcessorOptions{
 		Store: store, Runtime: coreRuntime, Issues: issues,
 		SkewToleranceRounds: 3, ObjectIssueTimeout: 5 * time.Minute, Now: now,
+		TaskWake: taskWorker.Wake,
 	})
 	if err != nil {
 		return err
@@ -177,6 +188,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Reports: agent.ReportBuilder{
 			AgentID: parsed.AgentID, AgentVersion: buildversion.String(),
 			Store: store, CoreStatus: supervisor.Status, Now: now,
+			Capabilities: taskRegistry.Capabilities(),
 		},
 		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
 		LocalConverger: coreRuntime,
@@ -187,6 +199,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	taskWorker.SetResultNotifier(runner.Wake)
 
 	logger.Printf("starting agent_id=%s version=%s endpoint=%s", parsed.AgentID, buildversion.String(), parsed.Endpoint)
 	err = lifecycle.Run(ctx,
@@ -195,6 +208,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		lifecycle.Service{Name: "local expiry", Run: func(ctx context.Context) error {
 			return coreRuntime.RunExpiryLoop(ctx, func(err error) { logger.Printf("%v", err) })
 		}},
+		lifecycle.Service{Name: "task worker", Run: taskWorker.Run},
 		lifecycle.Service{Name: "control-plane sync", Run: runner.Run},
 	)
 	if err == nil {

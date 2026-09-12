@@ -27,20 +27,6 @@ func (s *Store) EnqueueIssue(ctx context.Context, dedupeKey string, issue protoc
 	return s.enqueue(ctx, outboxIssue, dedupeKey, issue, atMS)
 }
 
-func (s *Store) EnqueueTaskResult(ctx context.Context, result protocol.TaskResult, atMS int64) error {
-	if strings.TrimSpace(result.ID) == "" || atMS < 0 {
-		return fmt.Errorf("task result requires an id and non-negative timestamp")
-	}
-	if result.OK && result.Error != "" {
-		return fmt.Errorf("successful task result cannot carry an error")
-	}
-	if !result.OK && strings.TrimSpace(result.Error) == "" {
-		return fmt.Errorf("failed task result requires an error")
-	}
-	_, err := s.enqueue(ctx, outboxTaskResult, result.ID, result, atMS)
-	return err
-}
-
 func (s *Store) enqueue(ctx context.Context, kind, dedupeKey string, payload any, atMS int64) (bool, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -66,13 +52,15 @@ func (s *Store) PendingOutbox(ctx context.Context, limit int) (state.OutboxBatch
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, payload FROM report_outbox
-		WHERE delivered = 0 ORDER BY created_at_ms, id LIMIT ?`, limit)
+		WHERE delivered = 0
+		ORDER BY CASE kind WHEN 'task_result' THEN 0 ELSE 1 END, created_at_ms, id LIMIT ?`, limit)
 	if err != nil {
 		return state.OutboxBatch{}, fmt.Errorf("read report outbox: %w", err)
 	}
 	defer rows.Close()
 
 	batch := state.OutboxBatch{}
+	taskResultBytes := 0
 	for rows.Next() {
 		var id int64
 		var kind string
@@ -80,20 +68,31 @@ func (s *Store) PendingOutbox(ctx context.Context, limit int) (state.OutboxBatch
 		if err := rows.Scan(&id, &kind, &payload); err != nil {
 			return state.OutboxBatch{}, fmt.Errorf("scan report outbox: %w", err)
 		}
-		batch.IDs = append(batch.IDs, id)
 		switch kind {
 		case outboxIssue:
+			if len(batch.Issues) >= protocol.MaxIssuesPerReport {
+				continue
+			}
 			var issue protocol.Issue
 			if err := json.Unmarshal(payload, &issue); err != nil {
 				return state.OutboxBatch{}, fmt.Errorf("decode issue outbox row %d: %w", id, err)
 			}
 			batch.Issues = append(batch.Issues, issue)
+			batch.IDs = append(batch.IDs, id)
 		case outboxTaskResult:
+			if len(batch.TaskResults) >= protocol.MaxTaskResultsPerReport {
+				continue
+			}
 			var result protocol.TaskResult
 			if err := json.Unmarshal(payload, &result); err != nil {
 				return state.OutboxBatch{}, fmt.Errorf("decode task result outbox row %d: %w", id, err)
 			}
+			if len(result.Result) > protocol.MaxTaskResultBytesPerReport-taskResultBytes {
+				continue
+			}
+			taskResultBytes += len(result.Result)
 			batch.TaskResults = append(batch.TaskResults, result)
+			batch.IDs = append(batch.IDs, id)
 		default:
 			return state.OutboxBatch{}, fmt.Errorf("outbox row %d has unknown kind %q", id, kind)
 		}
@@ -124,6 +123,20 @@ func (s *Store) AckOutbox(ctx context.Context, ids []int64) error {
 		}
 		if _, err := statement.ExecContext(ctx, id); err != nil {
 			return fmt.Errorf("acknowledge report outbox row %d: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE task_executions SET result_delivered = 1
+			WHERE task_id = (SELECT dedupe_key FROM report_outbox WHERE id = ? AND kind = ?)`, id, outboxTaskResult); err != nil {
+			return fmt.Errorf("acknowledge task journal result for outbox row %d: %w", id, err)
+		}
+		// A journalled result already has its immutable payload in
+		// task_executions. Drop the second copy after acknowledgement; a PSP
+		// redispatch rebuilds the outbox row from the journal. Quarantined legacy
+		// rows have no journal and retain their delivered forensic copy.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM report_outbox
+			WHERE id = ? AND kind = ? AND EXISTS (
+				SELECT 1 FROM task_executions WHERE task_id = report_outbox.dedupe_key
+			)`, id, outboxTaskResult); err != nil {
+			return fmt.Errorf("compact acknowledged task result row %d: %w", id, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

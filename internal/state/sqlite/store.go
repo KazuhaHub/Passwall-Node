@@ -3,17 +3,23 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/KazuhaHub/passwall-node/protocol"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 // Store serialises access through one SQLite connection. The agent has one
 // writer and modest data volume; this makes transaction behaviour predictable
@@ -137,6 +143,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if current < 8 {
+		if err := migrateV8(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("record state schema version: %w", err)
 	}
@@ -144,6 +155,117 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("commit state migration: %w", err)
 	}
 	return nil
+}
+
+func migrateV8(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE task_executions (
+			task_id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+			args BLOB NOT NULL,
+			state TEXT NOT NULL CHECK (state IN ('received', 'running', 'succeeded', 'failed', 'indeterminate')),
+			result BLOB NOT NULL DEFAULT X'',
+			error_code TEXT NOT NULL DEFAULT '',
+			error_detail TEXT NOT NULL DEFAULT '',
+			received_at_ms INTEGER NOT NULL CHECK (received_at_ms >= 0),
+			started_at_ms INTEGER NOT NULL DEFAULT 0 CHECK (started_at_ms >= 0),
+			finished_at_ms INTEGER NOT NULL DEFAULT 0 CHECK (finished_at_ms >= 0),
+			result_delivered INTEGER NOT NULL DEFAULT 0 CHECK (result_delivered IN (0, 1)),
+			CHECK ((state = 'received' AND started_at_ms = 0 AND finished_at_ms = 0) OR
+			       (state = 'running' AND started_at_ms > 0 AND finished_at_ms = 0) OR
+			       (state IN ('succeeded', 'failed', 'indeterminate') AND started_at_ms > 0 AND finished_at_ms > 0)),
+			CHECK ((state = 'succeeded' AND error_code = '' AND error_detail = '') OR
+			       (state IN ('failed', 'indeterminate') AND result = X'' AND error_code <> '' AND error_detail <> '') OR
+			       (state IN ('received', 'running') AND result = X'' AND error_code = '' AND error_detail = ''))
+		) STRICT`,
+		`CREATE INDEX idx_task_executions_claim
+			ON task_executions(state, received_at_ms, task_id)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply state schema v8: %w", err)
+		}
+	}
+	if err := quarantineLegacyTaskResultsV8(ctx, tx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func quarantineLegacyTaskResultsV8(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, dedupe_key, payload, created_at_ms
+		FROM report_outbox WHERE kind = 'task_result'`)
+	if err != nil {
+		return fmt.Errorf("read legacy task results during v8 migration: %w", err)
+	}
+	type legacyRow struct {
+		id           int64
+		dedupeKey    string
+		payloadBytes int
+		payloadSHA   string
+		evidenceSHA  string
+		createdMS    int64
+	}
+	var legacy []legacyRow
+	for rows.Next() {
+		var row legacyRow
+		var payload []byte
+		if err := rows.Scan(&row.id, &row.dedupeKey, &payload, &row.createdMS); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan legacy task result during v8 migration: %w", err)
+		}
+		payloadSum := sha256.Sum256(payload)
+		row.payloadBytes = len(payload)
+		row.payloadSHA = hex.EncodeToString(payloadSum[:])
+		evidenceHash := sha256.New()
+		_, _ = evidenceHash.Write([]byte(row.dedupeKey))
+		_, _ = evidenceHash.Write([]byte{0})
+		_, _ = evidenceHash.Write(payload)
+		row.evidenceSHA = hex.EncodeToString(evidenceHash.Sum(nil))
+		legacy = append(legacy, row)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate legacy task results during v8 migration: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close legacy task result scan: %w", err)
+	}
+	for _, row := range legacy {
+		issue := protocol.Issue{
+			Code: protocol.IssueLegacyTaskResultQuarantined,
+			Key:  truncateMigrationUTF8(row.dedupeKey, protocol.MaxIssueKeyBytes),
+			Detail: fmt.Sprintf("schema v8 quarantined a legacy task result without kind/input identity (bytes=%d sha256=%s)",
+				row.payloadBytes, row.payloadSHA),
+		}
+		body, err := json.Marshal(issue)
+		if err != nil {
+			return fmt.Errorf("encode quarantined legacy task result %d: %w", row.id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO report_outbox
+			(kind, dedupe_key, payload, created_at_ms, delivered) VALUES ('issue', ?, ?, ?, 0)`,
+			"legacy-task-result:"+row.evidenceSHA, body, row.createdMS); err != nil {
+			return fmt.Errorf("preserve legacy task result %d as issue: %w", row.id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE report_outbox SET delivered = 1, dedupe_key = ? WHERE id = ?`,
+			":legacy:"+row.evidenceSHA, row.id); err != nil {
+			return fmt.Errorf("quarantine legacy task result %d: %w", row.id, err)
+		}
+	}
+	return nil
+}
+
+func truncateMigrationUTF8(value string, maxBytes int) string {
+	value = strings.ToValidUTF8(value, "�")
+	if len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func migrateV7(ctx context.Context, tx *sql.Tx) error {

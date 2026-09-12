@@ -24,6 +24,7 @@ const (
 	LocalIssueObjectRejectedTimeout     LocalIssueKind = "object_rejected_timeout"
 	LocalIssueCoreConvergenceFailed     LocalIssueKind = "core_convergence_failed"
 	LocalIssueCoreTelemetryFailed       LocalIssueKind = "core_telemetry_failed"
+	LocalIssueTaskIdentityConflict      LocalIssueKind = LocalIssueKind(protocol.IssueTaskIdentityConflict)
 )
 
 type LocalIssue struct {

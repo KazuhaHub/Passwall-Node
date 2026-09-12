@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -22,6 +23,9 @@ func ValidateNodeReport(report NodeReport) error {
 	}
 	if report.CoreEngine != "" && report.CoreEngine != "xray" && report.CoreEngine != "sing-box" {
 		return fmt.Errorf("core_engine %q is unsupported", report.CoreEngine)
+	}
+	if err := validateCapabilities(report.Capabilities); err != nil {
+		return err
 	}
 	for _, stream := range []string{StreamConfig, StreamRoster, StreamDirectives} {
 		state, ok := report.Have[stream]
@@ -206,23 +210,205 @@ func validateOutbox(report NodeReport) error {
 		}
 		seenIssues[identity] = struct{}{}
 	}
-	seenTasks := make(map[string]struct{}, len(report.TaskResults))
 	for _, result := range report.TaskResults {
-		if result.ID == "" {
-			return fmt.Errorf("task result id is required")
+		if result.Kind != "" || result.InputSHA256 != "" || result.ErrorCode != "" || result.Indeterminate {
+			return ValidateTaskResults(report.TaskResults)
 		}
-		if result.OK && result.Error != "" {
-			return fmt.Errorf("successful task result %q cannot carry an error", result.ID)
+	}
+	return validateLegacyTaskResults(report.TaskResults)
+}
+
+// ValidateTasks validates task identity, bounds, and content binding. It does
+// not reject an unknown but canonical kind; capability negotiation happens at
+// PSP and an accidental unknown dispatch becomes an explicit failed result at
+// the worker rather than a malformed round trip.
+func ValidateTasks(tasks []Task) error {
+	if len(tasks) > MaxTasksPerResponse {
+		return fmt.Errorf("tasks exceeds maximum of %d", MaxTasksPerResponse)
+	}
+	seen := make(map[string]struct{}, len(tasks))
+	totalArgs := 0
+	for _, task := range tasks {
+		if !validTaskID(task.ID) || len(task.ID) > MaxTaskIDBytes {
+			return fmt.Errorf("task id must be 1..%d canonical lowercase ASCII characters", MaxTaskIDBytes)
 		}
-		if !result.OK && result.Error == "" {
-			return fmt.Errorf("failed task result %q requires an error", result.ID)
+		if !validToken(task.Kind) || len(task.Kind) > MaxTaskKindBytes {
+			return fmt.Errorf("task %q kind must be 1..%d canonical lowercase characters", task.ID, MaxTaskKindBytes)
 		}
-		if _, exists := seenTasks[result.ID]; exists {
-			return fmt.Errorf("duplicate task result %q", result.ID)
+		if TaskCapability(task.Kind) == CapabilityTaskExecutionV1 {
+			return fmt.Errorf("task %q kind %q is reserved by the execution capability", task.ID, task.Kind)
 		}
-		seenTasks[result.ID] = struct{}{}
+		if len(task.Args) > MaxTaskArgsBytes {
+			return fmt.Errorf("task %q args exceeds maximum of %d bytes", task.ID, MaxTaskArgsBytes)
+		}
+		if len(task.Args) > MaxTaskArgsBytesPerResponse-totalArgs {
+			return fmt.Errorf("task args exceed aggregate maximum of %d bytes", MaxTaskArgsBytesPerResponse)
+		}
+		totalArgs += len(task.Args)
+		if err := validateDigest(task.InputSHA256); err != nil {
+			return fmt.Errorf("task %q input_sha256: %w", task.ID, err)
+		}
+		if want := ComputeTaskInputSHA256(task.Kind, task.Args); task.InputSHA256 != want {
+			return fmt.Errorf("task %q input_sha256 does not match kind and args", task.ID)
+		}
+		if _, exists := seen[task.ID]; exists {
+			return fmt.Errorf("duplicate task %q", task.ID)
+		}
+		seen[task.ID] = struct{}{}
 	}
 	return nil
+}
+
+// ValidateTaskResults validates immutable task-result payloads before they are
+// persisted or sent. Failed results require a stable machine code and a
+// bounded human diagnostic; successful results carry neither.
+func ValidateTaskResults(results []TaskResult) error {
+	if len(results) > MaxTaskResultsPerReport {
+		return fmt.Errorf("task_results exceeds maximum of %d", MaxTaskResultsPerReport)
+	}
+	seen := make(map[string]struct{}, len(results))
+	totalResult := 0
+	for _, result := range results {
+		if !validTaskID(result.ID) || len(result.ID) > MaxTaskIDBytes {
+			return fmt.Errorf("task result id must be 1..%d canonical lowercase ASCII characters", MaxTaskIDBytes)
+		}
+		if !validToken(result.Kind) || len(result.Kind) > MaxTaskKindBytes {
+			return fmt.Errorf("task result %q kind must be canonical and bounded", result.ID)
+		}
+		if TaskCapability(result.Kind) == CapabilityTaskExecutionV1 {
+			return fmt.Errorf("task result %q kind %q is reserved by the execution capability", result.ID, result.Kind)
+		}
+		if err := validateDigest(result.InputSHA256); err != nil {
+			return fmt.Errorf("task result %q input_sha256: %w", result.ID, err)
+		}
+		if len(result.Result) > MaxTaskResultBytes {
+			return fmt.Errorf("task result %q payload exceeds maximum of %d bytes", result.ID, MaxTaskResultBytes)
+		}
+		if len(result.Result) > MaxTaskResultBytesPerReport-totalResult {
+			return fmt.Errorf("task result payloads exceed aggregate maximum of %d bytes", MaxTaskResultBytesPerReport)
+		}
+		totalResult += len(result.Result)
+		if !utf8.ValidString(result.Error) || len(result.Error) > MaxTaskErrorBytes {
+			return fmt.Errorf("task result %q error is invalid or oversized", result.ID)
+		}
+		if result.OK {
+			if result.Indeterminate || result.ErrorCode != "" || result.Error != "" {
+				return fmt.Errorf("successful task result %q cannot carry an error", result.ID)
+			}
+		} else {
+			if !validToken(result.ErrorCode) || len(result.ErrorCode) > MaxTaskErrorCodeBytes {
+				return fmt.Errorf("failed task result %q requires a canonical bounded error_code", result.ID)
+			}
+			if strings.TrimSpace(result.Error) == "" || strings.TrimSpace(result.Error) != result.Error {
+				return fmt.Errorf("failed task result %q requires a canonical error", result.ID)
+			}
+			if len(result.Result) != 0 {
+				return fmt.Errorf("failed task result %q cannot carry a result payload", result.ID)
+			}
+		}
+		if _, exists := seen[result.ID]; exists {
+			return fmt.Errorf("duplicate task result %q", result.ID)
+		}
+		seen[result.ID] = struct{}{}
+	}
+	return nil
+}
+
+func validateLegacyTaskResults(results []TaskResult) error {
+	if len(results) > MaxTaskResultsPerReport {
+		return fmt.Errorf("task_results exceeds maximum of %d", MaxTaskResultsPerReport)
+	}
+	seen := make(map[string]struct{}, len(results))
+	totalResult := 0
+	for _, result := range results {
+		if result.Kind != "" || result.InputSHA256 != "" || result.ErrorCode != "" || result.Indeterminate {
+			return fmt.Errorf("task result %q mixes durable and legacy result schemas", result.ID)
+		}
+		if !validTaskID(result.ID) || len(result.ID) > MaxTaskIDBytes {
+			return fmt.Errorf("legacy task result id must be canonical and bounded")
+		}
+		if len(result.Result) > MaxTaskResultBytes || len(result.Result) > MaxTaskResultBytesPerReport-totalResult {
+			return fmt.Errorf("legacy task result %q exceeds result size limits", result.ID)
+		}
+		totalResult += len(result.Result)
+		if !utf8.ValidString(result.Error) || len(result.Error) > MaxTaskErrorBytes {
+			return fmt.Errorf("legacy task result %q error is invalid or oversized", result.ID)
+		}
+		if result.OK && result.Error != "" {
+			return fmt.Errorf("successful legacy task result %q cannot carry an error", result.ID)
+		}
+		if !result.OK && (strings.TrimSpace(result.Error) == "" || strings.TrimSpace(result.Error) != result.Error) {
+			return fmt.Errorf("failed legacy task result %q requires a canonical error", result.ID)
+		}
+		if _, exists := seen[result.ID]; exists {
+			return fmt.Errorf("duplicate task result %q", result.ID)
+		}
+		seen[result.ID] = struct{}{}
+	}
+	return nil
+}
+
+func validateCapabilities(capabilities []string) error {
+	if len(capabilities) > MaxCapabilitiesPerReport {
+		return fmt.Errorf("capabilities exceeds maximum of %d", MaxCapabilitiesPerReport)
+	}
+	seen := make(map[string]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		if !validToken(capability) || len(capability) > MaxCapabilityBytes {
+			return fmt.Errorf("capability must be 1..%d canonical lowercase characters", MaxCapabilityBytes)
+		}
+		if _, exists := seen[capability]; exists {
+			return fmt.Errorf("duplicate capability %q", capability)
+		}
+		seen[capability] = struct{}{}
+	}
+	return nil
+}
+
+func validateDigest(value string) error {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256DigestBytes || hex.EncodeToString(decoded) != value {
+		return fmt.Errorf("must be a lowercase sha256 hex digest")
+	}
+	return nil
+}
+
+const sha256DigestBytes = 32
+
+func validTaskID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if asciiLowerAlphaNumeric(character) {
+			continue
+		}
+		if index > 0 && (character == '_' || character == '-' || character == '.' || character == ':') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validToken(value string) bool {
+	if value == "" || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+			character == '_' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func asciiLowerAlphaNumeric(character byte) bool {
+	return character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
 }
 
 func validStream(stream string) bool {

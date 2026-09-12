@@ -36,6 +36,12 @@ type NodeReport struct {
 	CoreVersion  string `json:"core_version,omitempty"`
 	CoreState    string `json:"core_state,omitempty"`
 
+	// Capabilities are an allowlist for optional behaviour in this exact
+	// report. PSP dispatches a task only when both task.execution.v1 and the
+	// task-kind capability are present; absence therefore fails closed for
+	// older and partially upgraded agents.
+	Capabilities []string `json:"capabilities,omitempty"`
+
 	// Partial says this report OMITTED the enumerations — Objects,
 	// ListenerCounters, Clients and Subjects — and carries only Have (plus any
 	// Issues). It exists so the poll
@@ -133,6 +139,7 @@ func (r NodeReport) MarshalJSON() ([]byte, error) {
 		CoreEngine      string                 `json:"core_engine,omitempty"`
 		CoreVersion     string                 `json:"core_version,omitempty"`
 		CoreState       string                 `json:"core_state,omitempty"`
+		Capabilities    []string               `json:"capabilities,omitempty"`
 		Partial         bool                   `json:"partial"`
 		Have            map[string]StreamState `json:"have"`
 		Issues          []Issue                `json:"issues,omitempty"`
@@ -142,7 +149,7 @@ func (r NodeReport) MarshalJSON() ([]byte, error) {
 		AgentID: r.AgentID, ProtocolVersion: r.ProtocolVersion,
 		ReportedAtMS: r.ReportedAtMS, AgentVersion: r.AgentVersion,
 		CoreEngine: r.CoreEngine, CoreVersion: r.CoreVersion, CoreState: r.CoreState,
-		Partial: true, Have: r.Have,
+		Partial: true, Have: r.Have, Capabilities: r.Capabilities,
 		Issues: r.Issues, TaskResults: r.TaskResults,
 	})
 }
@@ -297,4 +304,11 @@ const (
 	// mandatory convergence enumeration. PSP produces this issue because only
 	// PSP knows the expected closure.
 	IssueReportMissingObject = "report_missing_object"
+	// IssueTaskIdentityConflict means PSP reused one task id for different
+	// kind/argument bytes. The original journal row remains unchanged.
+	IssueTaskIdentityConflict = "task_identity_conflict"
+	// IssueLegacyTaskResultQuarantined preserves evidence from schema v7 task
+	// outbox rows that predate kind/input identity and cannot be trusted as a
+	// durable terminal result.
+	IssueLegacyTaskResultQuarantined = "legacy_task_result_quarantined"
 )
