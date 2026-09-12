@@ -200,6 +200,9 @@ func (w *TaskWorker) Run(ctx context.Context) error {
 func (w *TaskWorker) recoverRunning(ctx context.Context) error {
 	tasks, err := w.store.RunningTasks(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("read interrupted tasks: %w", err)
 	}
 	for _, task := range tasks {
@@ -241,7 +244,10 @@ func (w *TaskWorker) drain(ctx context.Context) (bool, error) {
 			return worked, nil
 		}
 		if err != nil {
-			if executionInterrupted(ctx, err) {
+			// SQLite may report SQLITE_INTERRUPT instead of wrapping the
+			// cancellation sentinel. No handler has started on this error path;
+			// any committed claim remains running and Recover owns it next boot.
+			if ctx.Err() != nil {
 				return worked, nil
 			}
 			return worked, fmt.Errorf("claim task: %w", err)

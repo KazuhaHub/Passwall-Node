@@ -186,9 +186,15 @@ engine/version/binary/命令参数是一个原子部署身份，启动失败会�
 遥测重连能对已知活跃连接去重和查缺，但上述 1000 条历史边界是未解决的运营风险；在上游提供单调 cursor，
 或我们加入可独立核对的全局累计边界前，长时间 telemetry 中断后的计数必须视为有条件，不能视为数学上完整。
 
-durable task foundation 已完成，但**尚无生产 task handler**。下一步只能在分别写清输入 schema、权限、
-deadline、幂等键和 crash recovery 后实现 `RealityProbe` 与 `AgentUpgrade`；core 选择仍是 declarative
-`ConfigBody.Core`，TLS material 仍随配置内联，不能重新伪装成 task。
+durable task foundation 已完成。新增 `agent.upgrade.v1` 仅由已显式启用 root-owned systemd 升级助手的
+Linux daemon 注册；`RealityProbe` 仍未实现。输入只允许精确目标/预期旧版本，必须有截止时间，禁止降级、
+任意 URL/命令与浮动 latest。非 root daemon 经原任务通道接收；独立 helper 校验官方发行档、同 schema/
+upgrade contract 后保留旧程序并切换，失败回退。新进程须重新认证同步、严格 core 收敛，并给出新 activation
+nonce/PID；helper 核实际非 root MainPID/运行映像 digest 后提交不可变终态，Recover 不重新执行。
+helper 下载前拒绝 systemd drop-in 覆写并核验旧进程；备份 fsync 完成后、停机前重验同 boot 截止。
+旧 beta2 需首个支持版本发布后人工维护一次，保留 config/data 并启用助手。Docker 不开放容器特权升级。
+这不新增数据库/VM 快照恢复、通用终态 GC 或无损流量停机保证；详见 README 的 Remote agent upgrades。
+core 选择仍是 declarative `ConfigBody.Core`，TLS material 仍随配置内联，不能重新伪装成 task。
 
 这里的 crash window 必须精确描述，不能笼统宣传“exactly once”：claim 提交前崩溃不会执行；claim
 提交后、terminal 提交前崩溃会留下 `running`。实现 `TaskRecoverer` 的 kind 在重启后查询/恢复真实结果；
@@ -222,19 +228,20 @@ Node 的 deadline 接收/执行保护已实现：同一进程共享控制面时�
 - 时间 counter 或 server timestamp 回退会失效 anchor；保留曾经证明的历史 lower floor，
   不能因没有中途采样而复活旧授权。该保护**不检测 DB/VM 快照回滚或双端同时恢复**
 
-这些是未开放生产 kind 的基础设施。PSP 必须先引用本仓已发布版本，才可接通 deadline-aware
-offer/result；在下述 restore、retention 与每种 handler 的契约验收之前，仍禁止注册生产 kind。
+PSP 当前引用已发布 beta2 的兼容任务协议；远程升级的新实现需本仓支持版本先发布、人工引导旧节点后才能
+运行，不能把 queued 状态当作 beta2 已获得升级能力。下述通用 restore/retention 风险仍存在，不能宣传已完成。
 
-真实 task 上线前以下运营边界全部是 blocker，不能只补 handler 就开放 capability：
+以下是已完成的任务保护与仍需运营管理的长期边界；不要把本期升级扩展成自动快照恢复框架：
 
 - PSP 已实现 per-agent queued + offered 的硬 quota（256 行 / 16 MiB 原始 args），同一 owner-lock
   事务保证新建/下发/完成并发不越界；不能把该 active 上限误认为 terminal journal retention
-- Node expiry 字段与未 claim / 已 running / 已 terminal 的保护已实现；PSP deadline-aware
-  offer/result 连接与两端 restore 验收仍是 blocker
+- Node expiry 字段与未 claim / 已 running / 已 terminal 的保护，以及 PSP deadline-aware
+  offer/result 连接已实现；同 schema 的程序回退不等于两端数据库/VM restore 保证
 - Node terminal journal 与 PSP terminal record 各自按时间和数量的 retention；当前 ACK 已去掉
   Node outbox 的第二份 payload，但 journal 会永久保留终态
-- PSP 数据库 restore 后的 task ID namespace / generation；restore 不得在 Node retention 或最长离线窗口内
-  重用历史 ID，否则会触发身份冲突或取回旧 terminal result
+- PSP task minter 使用每进程新 CSPRNG issuer，而非可恢复的数据库自增号；不能因此承诺对运行中 VM
+  快照还原安全。restore 不得在 Node retention 或最长离线窗口内重用历史 ID，否则会触发身份冲突
+  或取回旧 terminal result
 
 ## 4. 十条不要
 

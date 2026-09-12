@@ -1,0 +1,9 @@
+[Unit]
+Description=Passwall-Node remote upgrade request watcher
+
+[Path]
+PathChanged=/opt/passwall-node/data/upgrades/request.json
+Unit=passwall-node-upgrade.service
+
+[Install]
+WantedBy=multi-user.target

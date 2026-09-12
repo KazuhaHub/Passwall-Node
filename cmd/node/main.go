@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/internal/lifecycle"
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
+	"github.com/KazuhaHub/passwall-node/internal/upgrade"
 	buildversion "github.com/KazuhaHub/passwall-node/internal/version"
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
@@ -54,6 +56,18 @@ func main() {
 }
 
 func run(arguments []string, stdout, stderr io.Writer) error {
+	if len(arguments) == 1 {
+		switch arguments[0] {
+		case "--upgrade-info":
+			return json.NewEncoder(stdout).Encode(upgrade.BuildInfo{Version: buildversion.Version, StateSchema: statesqlite.SupportedSchema, UpgradeContract: 1})
+		case "--run-upgrade-helper":
+			ctx, stop := signalContext(context.Background())
+			defer stop()
+			return upgrade.RunHelper(ctx, upgrade.InstallRoot, statesqlite.SupportedSchema)
+		case "--enable-remote-upgrade":
+			return enableRemoteUpgrade()
+		}
+	}
 	parsed, err := parseOptions(arguments, stderr)
 	if err != nil {
 		return err
@@ -156,10 +170,6 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	issues := agent.OutboxIssueSink{
 		Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() },
 	}
-	taskRegistry, err := agent.NewTaskRegistry(nil)
-	if err != nil {
-		return err
-	}
 	// These are explicit operational guard margins, not execution TTLs or a
 	// measured hardware/SLA guarantee. Individual kinds still need execution,
 	// recovery and restore acceptance before production handlers are registered.
@@ -172,6 +182,16 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		logger.Printf("task start clock unavailable; expiry tasks stay disabled: %v", clockErr)
 	} else {
 		startClock = taskClock
+	}
+	var upgradeClient *upgrade.Client
+	handlers := map[string]agent.TaskHandler{}
+	if remoteUpgradeEnabled(parsed, buildversion.Version) && startClock != nil {
+		upgradeClient = &upgrade.Client{RootDir: upgrade.InstallRoot, Version: buildversion.Version, Clock: startClock, ConfirmConverged: coreRuntime.Converge}
+		handlers[upgrade.TaskKind] = upgradeClient
+	}
+	taskRegistry, err := agent.NewTaskRegistry(handlers)
+	if err != nil {
+		return err
 	}
 	taskWorker, err := agent.NewTaskWorker(agent.TaskWorkerOptions{
 		Store: store, Registry: taskRegistry, Now: now, Clock: startClock,
@@ -206,6 +226,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Printf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
+	}
+	if upgradeClient != nil {
+		synchronizer.OnSynced = func(ctx context.Context) error { return upgradeClient.RecordReady(ctx, store) }
 	}
 	runner, err := agent.NewRunner(synchronizer, agent.RunnerOptions{OnError: func(err error) {
 		logger.Printf("sync failed; retrying: %v", err)

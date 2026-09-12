@@ -148,6 +148,12 @@ unit_tmp=$(mktemp /etc/systemd/system/.passwall-node.service.XXXXXX)
 install -m 0644 "$root/passwall-node.service" "$unit_tmp"
 mv -f "$unit_tmp" "$unit"
 unit_tmp=
+# Older published binaries keep their original installation behavior. New
+# binaries explicitly install the separate root helper, without changing the
+# non-root agent unit or exposing an unauthenticated network upgrade endpoint.
+if "$root/bin/passwall-node" --upgrade-info >/dev/null 2>&1; then
+    "$root/bin/passwall-node" --enable-remote-upgrade || fail 'remote upgrade setup failed; installed identity and data were retained'
+fi
 systemctl daemon-reload || fail 'systemd reload failed; installed identity and data were retained'
 systemctl enable --now passwall-node.service || fail 'service startup failed; installed identity and data were retained'
 printf '%s\n' 'Passwall-Node installed; identity and state retained under /opt/passwall-node. Delete this private installation script securely.'

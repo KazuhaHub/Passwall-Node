@@ -64,6 +64,47 @@ func TestSyncOnceObservesOnlyBeforeFullReport(t *testing.T) {
 	}
 }
 
+func TestUpgradeReadinessOnlyAfterValidResponseAndLocalConvergence(t *testing.T) {
+	for _, name := range []string{"success", "transport failure", "invalid response", "core failure"} {
+		t.Run(name, func(t *testing.T) {
+			store := openAgentTestStore(t)
+			ready := false
+			converged := false
+			s := Synchronizer{Reports: ReportBuilder{AgentID: "agent-1", Store: store}, Store: store,
+				Syncer: syncerFunc(func(context.Context, protocol.NodeReport) (protocol.SyncResponse, error) {
+					if name == "transport failure" {
+						return protocol.SyncResponse{}, errors.New("offline")
+					}
+					if name == "invalid response" {
+						return protocol.SyncResponse{Envelope: protocol.Envelope{NextPollSeconds: -1}}, nil
+					}
+					return protocol.SyncResponse{}, nil
+				}),
+				Processor: processorFunc(func(context.Context, protocol.SyncResponse) (ProcessResult, error) {
+					if name == "core failure" {
+						return ProcessResult{}, errors.New("core unavailable")
+					}
+					converged = true
+					return ProcessResult{}, nil
+				}), OnSynced: func(context.Context) error {
+					if !converged {
+						t.Fatal("ready preceded core convergence")
+					}
+					ready = true
+					return nil
+				}}
+			_, err := s.SyncOnce(t.Context(), true)
+			if name == "success" {
+				if err != nil || !ready {
+					t.Fatalf("ready=%v err=%v", ready, err)
+				}
+			} else if err == nil || ready {
+				t.Fatalf("false readiness=%v err=%v", ready, err)
+			}
+		})
+	}
+}
+
 func TestSyncOnceConvergesClosedGateBeforeNetwork(t *testing.T) {
 	store := openAgentTestStore(t)
 	order := make([]string, 0, 3)

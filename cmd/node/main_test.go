@@ -93,3 +93,13 @@ func TestVersionModeNeedsNoRuntimeConfiguration(t *testing.T) {
 		t.Fatal("version output is empty")
 	}
 }
+
+func TestUpgradeInfoDoesNotOpenStateOrRequireCredentials(t *testing.T) {
+	var output strings.Builder
+	if err := run([]string{"--upgrade-info"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"state_schema":9`) || !strings.Contains(output.String(), `"upgrade_contract":1`) {
+		t.Fatal(output.String())
+	}
+}

@@ -202,10 +202,10 @@ not the production daemon: it lets a control plane exercise the real agent
 transport/state/apply/report stack without downloading or launching Xray.
 The durable task/result protocol is implemented, but the harness advertises no
 kind-specific task capability and therefore receives no tasks from a conforming
-control plane. Production RealityProbe and AgentUpgrade handlers are likewise
-intentionally absent until their input, deadline, recovery, and authorization
-contracts are specified; silently dropping or guessing a future side effect is
-not a compatibility strategy.
+control plane. Reality probing remains unimplemented. The production daemon
+registers `agent.upgrade.v1` only for a managed Linux/systemd installation with
+its separate root-owned upgrade helper explicitly enabled. The contract harness
+does not perform upgrades.
 
 Deadline-aware infrastructure additionally requires `task.expiry.v1` alongside
 execution and kind capabilities. `not_after_ms` is an immutable latest-start
@@ -219,8 +219,8 @@ Linux/macOS have suspend-inclusive elapsed backends; Windows currently disables
 expiry support without affecting proxy cores or synchronization. The daemon's
 30-second anchor/RTT windows and one-second uncertainty allowance are operational
 guard margins, not measured accuracy guarantees. Process restart requires a new
-valid sync anchor. Database/VM restore safety, retention, and each kind's recovery
-contract remain separate release gates; no production task handler is registered.
+valid sync anchor. Database/VM restore safety and general task-journal retention
+are not provided by remote upgrading; do not infer them from lifecycle settings.
 Schema v9 preserves v8 journals and outbox bytes, but older binaries cannot open
 the upgraded database. Roll back the matching pre-upgrade database backup too.
 
@@ -232,6 +232,54 @@ go run ./cmd/contract-agent \
   -rounds 2 \
   -allow-insecure-http
 ```
+
+## Remote agent upgrades (Linux/systemd)
+
+PSP administrators request an **exact newer published PN release**, with an
+expected current release and an idempotency key. The existing authenticated
+sync/task channel delivers it only to agents advertising execution, expiry and
+`task.agent.upgrade.v1`. There is no SSH requirement, floating `latest`, arbitrary
+download URL, shell command or additional public node endpoint.
+
+The daemon stays non-root with its original filesystem sandbox. A separate
+root-owned systemd path/oneshot controller downloads the official archive,
+checks SHA-256 and native build identity, then stops the agent gracefully and
+atomically replaces its binary, version metadata and bundled licence files.
+Credential, endpoint, identity, SQLite state and desired core selection are
+retained. The helper confirms the new non-root MainPID/executable digest plus
+fresh local activation evidence after authenticated sync and **strict** core
+convergence; only then does the restarted agent return a successful task result.
+PSP additionally requires a fresh matching reported version before showing
+verified success. Activation evidence assumes a trusted daemon/service UID; it
+is not remote attestation against an already-compromised node.
+
+The start authorization is ten minutes, tied to same-boot suspend-inclusive time.
+It is checked again after backup preparation, immediately before stopping the
+daemon. Customized systemd drop-ins or an unverified current service process
+require manual maintenance and are rejected before downloading or stopping it.
+Download failures leave the running agent untouched. Startup/readiness failures
+restore the retained previous managed files and restart them; interrupted tasks
+read durable receipts rather than blindly download/execute again. **Only equal
+state schemas and upgrade-contract versions support automatic upgrade/rollback.**
+Changes to either require manual maintenance. No database/VM snapshot framework
+is added. Persisted counters survive, but traffic not sampled before a core stop
+has the existing restart metering gap; do not promise lossless byte accounting.
+
+New installations of a supporting binary configure the helper automatically.
+Existing `v0.0.1-beta2` installations cannot execute an upgrade task: first
+perform one manual binary maintenance update after a supporting release is
+published, preserving `/opt/passwall-node/config` and `data`, then run the
+installed binary as root with `--enable-remote-upgrade` and restart the agent.
+The private install script deliberately refuses cross-version replacement;
+do not delete state or recreate PSP server/node rows to bypass that guard.
+Docker containers and other operating systems use host-managed/manual updates;
+no privileged container or Docker socket is required.
+
+The helper retains at most three completed managed-file backups; it never
+prunes live, indeterminate or foreign evidence. General terminal journals and
+small immutable receipts are not automatically garbage-collected.
+Keep disk monitoring and ordinary backups; lifecycle retention settings alone
+do not constitute a GC implementation or database-restore guarantee.
 
 ## Licence
 
