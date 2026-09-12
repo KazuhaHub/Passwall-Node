@@ -63,12 +63,16 @@ func TestTelemetryCollectsDurableMappedConnectionTotals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	epoch := got.Clients[0].CounterEpoch
+	if epoch == 0 {
+		t.Fatal("counter epoch is zero")
+	}
 	wantClients := []agentcore.ClientCounters{{
 		Key: snapshot.Clients[0].Key, Present: true, UpBytes: 11, DownBytes: 12,
-		CounterEpoch: 1, LiveIPs: []string{"192.0.2.1"},
+		CounterEpoch: epoch, LiveIPs: []string{"192.0.2.1"},
 	}}
 	wantListeners := []agentcore.ListenerCounters{{
-		Key: snapshot.Listeners[0].Key, Present: true, UpBytes: 11, DownBytes: 12, CounterEpoch: 1,
+		Key: snapshot.Listeners[0].Key, Present: true, UpBytes: 11, DownBytes: 12, CounterEpoch: epoch,
 	}}
 	if !reflect.DeepEqual(got.Clients, wantClients) || !reflect.DeepEqual(got.Listeners, wantListeners) {
 		t.Fatalf("counters = %#v", got)

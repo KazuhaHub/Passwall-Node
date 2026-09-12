@@ -78,14 +78,16 @@ documented, versioned, with a deprecation cycle for breaking changes.
 
 ## Run the production daemon
 
-Create a **PSP Node** on PSP's Servers page. PSP returns an agent ID, sync
-endpoint and credential exactly once; it stores only the credential's SHA-256
-digest. Save the credential as a private regular file, then start the daemon:
+Create a **PSP Node** on PSP's Servers page. PSP assigns a stable agent ID and a
+long-lived credential for that logical server. Authentication uses its SHA-256
+digest; the administrator can retrieve the same credential/private installer
+later from an encrypted recovery copy. Save the credential as a private regular
+file through a private channel (not a shell command containing the value), then
+start the daemon:
 
 ```bash
 install -d -m 0700 /etc/passwall-node /var/lib/passwall-node
-printf '%s\n' 'pspn_REPLACE_WITH_THE_ONE_TIME_VALUE' > /etc/passwall-node/credential
-chmod 0600 /etc/passwall-node/credential
+install -m 0600 /private/path/to/credential /etc/passwall-node/credential
 
 passwall-node \
   --endpoint https://panel.example/v1/node/sync \
@@ -112,10 +114,10 @@ cover Linux, macOS and Windows on both architectures.
 ```bash
 cp compose.example.yaml compose.yaml
 install -d -m 0700 secrets
-printf '%s\n' 'pspn_REPLACE_WITH_THE_ONE_TIME_VALUE' > secrets/node-credential
-chmod 0600 secrets/node-credential
+install -m 0600 /private/path/to/credential secrets/node-credential
 export PSP_NODE_ENDPOINT=https://panel.example/v1/node/sync
 export PSP_NODE_AGENT_ID=agt_REPLACE_WITH_THE_ASSIGNED_ID
+export NODE_VERSION=vREPLACE_WITH_AN_EXPLICIT_PUBLISHED_RELEASE
 docker compose up -d
 ```
 
@@ -130,6 +132,48 @@ On Linux hosts where unprivileged processes cannot bind ports below 1024, use
 listener ports at or above 1024 or deliberately configure the host's
 `net.ipv4.ip_unprivileged_port_start`. The container does not retain root merely
 to make port 443 convenient.
+
+## Linux systemd installation
+
+The public Go package `deployment` renders a **private** installer for an
+already registered PSP identity and an explicitly selected, already published
+Node release. PSP can generate it with `deployment.RenderLinux(Options{Endpoint,
+AgentID, Credential, Version})`. The endpoint must use HTTPS; a PSP path prefix
+before `/v1/node/sync` is supported. The version must be an explicit
+`vMAJOR.MINOR.PATCH[-prerelease]`, never `latest` or an arbitrary download URL.
+This does not mint an identity, redeem a bootstrap token or publish a release.
+
+Save the rendered script as mode 0600, transfer it through a private channel,
+and run `sudo sh /absolute/path/to/private-install.sh` on Linux amd64/arm64 with
+systemd. The script itself contains the long-lived credential: never put its
+contents in command arguments, shell history, tracing, shared logs or a public
+URL. Remove that private file after use. The `deployment/install.sh` included
+in release archives is an unrendered template, not a public bootstrap script.
+
+The installer downloads only the exact release tag from this repository using
+HTTPS with timeouts, selects one exact `SHA256SUMS.txt` entry, and verifies the
+archive before reading only its regular binary, LICENSE and NOTICE members.
+Checksums authenticate neither an independent publisher nor a compromised
+GitHub release; that release and its HTTPS delivery remain trusted inputs.
+
+Installation uses a dedicated non-login `passwall-node` account. Its credential
+is mode 0600 under `/opt/passwall-node/config`; configuration and persistent
+data directories are mode 0700. The systemd unit contains only the credential
+file path, not its value, and gives the non-root daemon only
+`CAP_NET_BIND_SERVICE` so PSP-owned listeners can use port 443 without changing
+host sysctls. Existing 3X-UI/sing-box services, firewall and host networking
+configuration are not taken over or modified; choose non-conflicting ports.
+
+A same-identity/endpoint/credential/version rerun is offline and preserves state.
+Any differing or incomplete installation, or unrelated systemd unit, requires
+manual inspection; there is no automatic upgrade, credential rotation or
+rebind. Stop the old machine before reinstalling a replacement with the same
+credential; credentials bind a logical server, not a physical machine. Reusing
+the same identity does not update a changed public proxy address in PSP.
+Failed downloads do not publish a partial identity. A systemd failure
+retains the complete installation and state so the same private script can be
+retried. Back up the matching private config and data before any manually
+planned upgrade or migration; never erase the database to work around a rebind.
 
 ## Development and release gates
 

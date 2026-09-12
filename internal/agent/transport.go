@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -75,21 +76,22 @@ func NewHTTPSyncer(endpoint string, options HTTPOptions) (*HTTPSyncer, error) {
 	if u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("sync endpoint must be an absolute URL without userinfo, query, or fragment")
 	}
-	if u.Path != "/v1/node/sync" {
-		return nil, fmt.Errorf("sync endpoint path must be /v1/node/sync")
+	if !strings.HasSuffix(u.Path, "/v1/node/sync") || path.Clean(u.Path) != u.Path || u.RawPath != "" || strings.Contains(u.Path, "//") {
+		return nil, fmt.Errorf("sync endpoint path must be a canonical /v1/node/sync path, optionally below a PSP panel prefix")
 	}
 	if u.Scheme != "https" && !(options.AllowInsecureHTTP && u.Scheme == "http") {
 		return nil, fmt.Errorf("sync endpoint must use HTTPS")
 	}
 	client := options.Client
 	if client == nil {
-		client = &http.Client{
-			Timeout: defaultHTTPTimeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+		client = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	// Preserve a caller's transport/TLS setup without mutating its client. The
+	// credential-bearing sync operation must never follow redirects, including
+	// same-origin redirects that Go would otherwise forward Authorization to.
+	privateClient := *client
+	privateClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &privateClient
 	maxResponseBytes := options.MaxResponseBytes
 	if maxResponseBytes == 0 {
 		maxResponseBytes = defaultMaxResponseBody

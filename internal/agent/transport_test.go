@@ -83,10 +83,46 @@ func TestHTTPSyncerRejectsUnsafeEndpoint(t *testing.T) {
 		"https://user:secret@panel.example/v1/node/sync",
 		"https://panel.example/wrong",
 		"https://panel.example/v1/node/sync?token=secret",
+		"https://panel.example/panel/../v1/node/sync",
+		"https://panel.example/panel//v1/node/sync",
+		"https://panel.example/panel/%2e%2e/v1/node/sync",
+		"https://panel.example/panel/v1/node/sync/",
 	} {
 		if _, err := NewHTTPSyncer(endpoint, HTTPOptions{}); err == nil {
 			t.Errorf("unsafe endpoint %q was accepted", endpoint)
 		}
+	}
+}
+
+func TestHTTPSyncerSupportsPanelPrefixWithoutFollowingRedirect(t *testing.T) {
+	const prefix = "/private-panel/v1/node/sync"
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != prefix || r.Header.Get("Authorization") != "Bearer test-private-credential" {
+			t.Errorf("unexpected request path or authentication")
+		}
+		http.Redirect(w, r, "/other", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	customClient := server.Client()
+	syncer, err := NewHTTPSyncer(server.URL+prefix, HTTPOptions{
+		AllowInsecureHTTP: true,
+		Client:            customClient,
+		Signer: func(r *http.Request) error {
+			r.Header.Set("Authorization", "Bearer test-private-credential")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = syncer.Sync(context.Background(), protocol.NodeReport{AgentID: "agt_prefix", Partial: true})
+	if err == nil || !strings.Contains(err.Error(), "status 307") || requests != 1 {
+		t.Fatalf("redirect must not forward the credential: requests=%d err=%v", requests, err)
+	}
+	if customClient.CheckRedirect != nil {
+		t.Fatal("syncer mutated its caller's HTTP client")
 	}
 }
 
