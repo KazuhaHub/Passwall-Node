@@ -120,6 +120,8 @@ jobs:
             cp "${dir}/passwall-node${ext}" "${package_dir}/passwall-node${ext}"
             chmod +x "${package_dir}/passwall-node${ext}" || true
             cp LICENSE NOTICE README.md HANDOFF.md compose.example.yaml "${package_dir}/"
+            mkdir -p "${package_dir}/deployment"
+            cp deployment/install.sh "${package_dir}/deployment/"
             if [ "$goos" = "windows" ]; then
               (cd build && zip -qr "../dist/${package}.zip" "$package")
             else

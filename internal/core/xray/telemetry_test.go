@@ -70,14 +70,18 @@ func TestTelemetryReportsCompleteAppliedEnumerationsAndDurableEpoch(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	epoch := got.Clients[0].CounterEpoch
+	if epoch == 0 {
+		t.Fatal("counter epoch is zero")
+	}
 	want := agentcore.Counters{
 		Clients: []agentcore.ClientCounters{
-			{Key: client1, Present: true, UpBytes: 11, DownBytes: 12, CounterEpoch: 1, LiveIPs: []string{"2001:db8::1", "192.0.2.1"}},
-			{Key: client2, CounterEpoch: 1},
+			{Key: client1, Present: true, UpBytes: 11, DownBytes: 12, CounterEpoch: epoch, LiveIPs: []string{"2001:db8::1", "192.0.2.1"}},
+			{Key: client2, CounterEpoch: epoch},
 		},
 		Listeners: []agentcore.ListenerCounters{
-			{Key: listener1, Present: true, UpBytes: 13, DownBytes: 14, CounterEpoch: 1},
-			{Key: listener2, CounterEpoch: 1},
+			{Key: listener1, Present: true, UpBytes: 13, DownBytes: 14, CounterEpoch: epoch},
+			{Key: listener2, CounterEpoch: epoch},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -87,13 +91,13 @@ func TestTelemetryReportsCompleteAppliedEnumerationsAndDurableEpoch(t *testing.T
 		t.Fatalf("command runs = %d, want 2", runs)
 	}
 	got, err = telemetry.Collect(ctx)
-	if err != nil || got.Clients[0].CounterEpoch != 1 {
-		t.Fatalf("same process epoch = (%d, %v), want 1, nil", got.Clients[0].CounterEpoch, err)
+	if err != nil || got.Clients[0].CounterEpoch != epoch {
+		t.Fatalf("same process epoch = (%d, %v), want %d, nil", got.Clients[0].CounterEpoch, err, epoch)
 	}
 	status.LastChangedAt = status.LastChangedAt.Add(time.Second)
 	got, err = telemetry.Collect(ctx)
-	if err != nil || got.Clients[0].CounterEpoch != 2 {
-		t.Fatalf("new process epoch = (%d, %v), want 2, nil", got.Clients[0].CounterEpoch, err)
+	if err != nil || got.Clients[0].CounterEpoch != epoch+1 {
+		t.Fatalf("new process epoch = (%d, %v), want %d, nil", got.Clients[0].CounterEpoch, err, epoch+1)
 	}
 }
 

@@ -24,6 +24,7 @@ cmd/contract-agent/   C2 真 agent 契约执行器（仅 core 为确定性替身
 cmd/node/             生产 daemon：同步、安装、编译、运行、观测、离线执法、优雅退出
 internal/core/        Compiler / Supervisor / Telemetry + Xray / sing-box 实现
 corecatalog/          精确、校验和固定、跨平台的 Xray / sing-box 版本目录
+deployment/           私有凭据 + exact Node release 的 Linux/systemd 安装脚本渲染器
 .github/workflows/    test/race/vet、六平台编译、Release + GHCR 多架构镜像
 ```
 
@@ -75,6 +76,23 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 判定用 `protocol.ShouldSendFull`,**不要自己写一遍**。
 
 ## 3. 下一步做什么
+
+### 安装/重装对接（2026-09-12）
+
+`deployment.RenderLinux` 是 PSP 调用的唯一 Linux/systemd 脚本模板。默认二进制安装在
+`/opt/passwall-node`，保留 identity/config/data；精确版本、身份、endpoint 或凭据不一致的
+已有安装停止等待人工处理，不自动升级/换绑。Docker Compose 改为显式 `NODE_VERSION`
+镜像，手动安装仍可使用六平台发行档。模板本身不含真实凭据，渲染结果含长期秘密，须私下
+传输、0600 保存并删除；它不是公开 bootstrap URL。
+
+重装机器可沿用原 AgentID + 凭据重新取三流，不必重建 PSP server/node/client 行；须停旧实例。
+若公网代理地址改变仍须更新节点地址。清空本地数据库时 counter epoch 使用新的随机正数
+命名空间；已有数据库的 epoch 原样保留，core 后续重启递增。PSP 按 epoch 变化重新 seed
+raw baseline，历史 lifetime/period usage 不清零。这只是普通重装的计量衔接，不是 DB/VM
+快照恢复检测。单机真实 Linux/systemd 启动仍需部署验收，脚本返回成功不等于代理已就绪。
+
+首个可下载 Node 版本尚未发布；不要伪造默认 tag 或将本地 module pseudo-version 当成
+Release 资产。先核验本仓 CI 并更新 PSP 的已发布 module pin，再单独选择 release tag。
 
 ### B1 — `protocol/conformance` 一致性测试
 
@@ -154,8 +172,8 @@ amd64/arm64 Docker）、core
 `26.6.27`；`26.7.28` 自动写 `minClientVer=0.0.0`，三客户端握手已核验；`26.9.9` 只允许
 Xray 与 `chrome + support-x25519mlkem768` 的 Mihomo，sing-box 的失败也已作为预期失败写进证据。
 完整 REALITY 兼容门见 PSP ADR 0029。PSP 已接通严格 Bearer `/v1/node/sync` 生产路由；创建
-原生节点时铸造 agent ID + 长期随机凭据，只存 SHA-256 摘要、原文只展示一次，且支持立即吊销旧值的
-一次性凭据轮换。`Client.ExpiresAtMS` 已由 PSP 的单一有效到期链铸造，runtime 在 PSP 断线时仍按
+原生节点时铸造 agent ID + 长期随机凭据，认证仍读 SHA-256；PSP 另存加密副本，管理员可重复取回
+同一安装脚本，轮换仍是显式操作并立即吊销旧值。`Client.ExpiresAtMS` 已由 PSP 的单一有效到期链铸造，runtime 在 PSP 断线时仍按
 绝对截止时间本地停用。断线后才发生的人工/策略撤销若要更短窗口，仍需租约或第二通道。
 
 sing-box `1.14.0` 的六平台官方资产同样固定 SHA-256，安装器支持安全的嵌套 tar.gz/ZIP 解包；切换
