@@ -83,7 +83,7 @@ jobs:
   upgrade-systemd:
     name: upgrade helper sandbox (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -112,8 +112,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -v ./internal/upgrade -run 'TestHelper|TestUpgradeSystemd' -count=1 -timeout=5m | tee upgrade-systemd-tests.log
-          ! grep -Eq '^[[:space:]]*--- SKIP:' upgrade-systemd-tests.log
+          go test -v ./internal/upgrade -run '^TestHelper.*$|^TestUpgradeSystemd(ProcInspection|SandboxContract|DiagnosticsAreBounded)$' -count=1 -timeout=5m | tee "$RUNNER_TEMP/upgrade-systemd-tests.log"
+          ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/upgrade-systemd-tests.log"
+      - name: Build exact real source artifacts for upgrade and rollback E2E
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          for node_version in v1.0.0 v1.1.0 v1.2.0; do
+            go build -trimpath -ldflags="-s -w -X github.com/KazuhaHub/passwall-node/internal/version.Version=$node_version -X github.com/KazuhaHub/passwall-node/internal/version.Commit=abcdef1234567" \
+              -o "$RUNNER_TEMP/passwall-node-e2e-$node_version" ./cmd/node
+            test "$("$RUNNER_TEMP/passwall-node-e2e-$node_version" --version)" = "$node_version (abcdef1234567)"
+            sh deployment/check-build.sh "$RUNNER_TEMP/passwall-node-e2e-$node_version" linux "${{ matrix.arch }}" "$GITHUB_SHA"
+          done
+      - name: Real Node journal recovery, authenticated readiness and start-failure rollback
+        env:
+          PN_NODE_UPGRADE_E2E: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PN_E2E_OLD_BINARY="$RUNNER_TEMP/passwall-node-e2e-v1.0.0"
+          export PN_E2E_NEW_BINARY="$RUNNER_TEMP/passwall-node-e2e-v1.1.0"
+          export PN_E2E_FAIL_BINARY="$RUNNER_TEMP/passwall-node-e2e-v1.2.0"
+          export PN_E2E_SOURCE_DIR="$GITHUB_WORKSPACE"
+          go test -v ./internal/upgrade -run '^TestUpgradeSystemdRealNodeE2E$' -count=1 -timeout=12m | tee "$RUNNER_TEMP/upgrade-node-e2e-tests.log"
+          ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/upgrade-node-e2e-tests.log"
 
   container:
     name: container
