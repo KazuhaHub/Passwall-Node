@@ -11,7 +11,12 @@ const (
 	// protocol. It is necessary but not sufficient for dispatch: PSP must also
 	// observe TaskCapability(kind) in the same report.
 	CapabilityTaskExecutionV1 = "task.execution.v1"
-	taskInputDomain           = "passwall-node/task-input/v1\x00"
+	// CapabilityTaskExpiryV1 additionally fences the latest permissible START
+	// with fresh control-plane time bounds. It never promises completion by the
+	// deadline, and must be negotiated together with execution and task kind.
+	CapabilityTaskExpiryV1      = "task.expiry.v1"
+	TaskErrorExpiredBeforeStart = "task_expired_before_start"
+	taskInputDomain             = "passwall-node/task-input/v1\x00"
 )
 
 // SyncResponse is PSP's half of the round trip.
@@ -146,6 +151,11 @@ type Task struct {
 	Kind        string `json:"kind"`
 	Args        []byte `json:"args,omitempty"`
 	InputSHA256 string `json:"input_sha256"`
+	// NotAfterMS is an immutable control-plane UTC deadline for starting the
+	// operation. Zero is retained only for legacy foundation identities; real
+	// producers must set a positive value and require the expiry capability.
+	// It is compared separately, not folded into the v1 input digest.
+	NotAfterMS int64 `json:"not_after_ms,omitempty"`
 }
 
 // TaskResult is its other half, returned on a later report. OK and
@@ -156,6 +166,7 @@ type TaskResult struct {
 	ID            string `json:"id"`
 	Kind          string `json:"kind"`
 	InputSHA256   string `json:"input_sha256"`
+	NotAfterMS    int64  `json:"not_after_ms,omitempty"`
 	OK            bool   `json:"ok"`
 	Indeterminate bool   `json:"indeterminate,omitempty"`
 	Result        []byte `json:"result,omitempty"`

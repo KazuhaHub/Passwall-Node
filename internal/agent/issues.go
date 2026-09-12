@@ -25,6 +25,7 @@ const (
 	LocalIssueCoreConvergenceFailed     LocalIssueKind = "core_convergence_failed"
 	LocalIssueCoreTelemetryFailed       LocalIssueKind = "core_telemetry_failed"
 	LocalIssueTaskIdentityConflict      LocalIssueKind = LocalIssueKind(protocol.IssueTaskIdentityConflict)
+	LocalIssueTaskReplayFenced          LocalIssueKind = LocalIssueKind(protocol.IssueTaskReplayFenced)
 )
 
 type LocalIssue struct {

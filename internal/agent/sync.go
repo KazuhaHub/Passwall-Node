@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	"github.com/KazuhaHub/passwall-node/protocol"
@@ -27,7 +28,12 @@ type Synchronizer struct {
 	Syncer    Syncer
 	Store     state.Store
 	Processor ResponseProcessor
-	Observer  Observer
+	// TaskClock uses one suspend-inclusive elapsed domain for the complete
+	// request/response interval and worker authorization. Clock faults pause new
+	// tasks only; they must not stop heartbeat, result receipt or proxy cores.
+	TaskClock        *ControlPlaneTaskClock
+	OnTaskClockError func(error)
+	Observer         Observer
 	// LocalConverger is the offline safety path. When a full sync cannot
 	// complete after local quota/expiry state has advanced, it applies the
 	// already-durable desired documents without waiting for PSP to recover.
@@ -69,12 +75,25 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial bool) (SyncResult, e
 	if err := protocol.ValidateNodeReport(built.Report); err != nil {
 		return SyncResult{}, fmt.Errorf("validate local node report: %w", err)
 	}
+	var requestStarted time.Duration
+	var taskClockErr error
+	if s.TaskClock != nil {
+		requestStarted, taskClockErr = s.TaskClock.Capture()
+	}
 	response, err := s.Syncer.Sync(ctx, built.Report)
 	if err != nil {
 		return SyncResult{}, s.withOfflineConvergence(ctx, err)
 	}
 	if err := protocol.ValidateSyncResponse(response); err != nil {
 		return SyncResult{}, s.withOfflineConvergence(ctx, fmt.Errorf("validate sync response: %w", err))
+	}
+	if s.TaskClock != nil {
+		if taskClockErr == nil {
+			taskClockErr = s.TaskClock.Observe(response.Envelope.ComputedAtMS, requestStarted)
+		}
+		if taskClockErr != nil && s.OnTaskClockError != nil {
+			s.OnTaskClockError(taskClockErr)
+		}
 	}
 	if err := s.Store.AckOutbox(ctx, built.OutboxIDs); err != nil {
 		return SyncResult{}, s.withOfflineConvergence(ctx, fmt.Errorf("acknowledge delivered report outbox: %w", err))

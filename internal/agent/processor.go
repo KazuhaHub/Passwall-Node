@@ -28,6 +28,7 @@ type ProcessorOptions struct {
 	ObjectIssueTimeout  time.Duration
 	Now                 func() time.Time
 	TaskWake            func()
+	TaskClock           state.TaskStartClock
 }
 
 // Processor turns received documents into re-entrant local convergence.
@@ -39,6 +40,7 @@ type Processor struct {
 	objectIssueTimeout  time.Duration
 	now                 func() time.Time
 	taskWake            func()
+	taskClock           state.TaskStartClock
 }
 
 func NewProcessor(options ProcessorOptions) (*Processor, error) {
@@ -59,7 +61,7 @@ func NewProcessor(options ProcessorOptions) (*Processor, error) {
 		store: options.Store, runtime: options.Runtime, issues: options.Issues,
 		skewToleranceRounds: options.SkewToleranceRounds,
 		objectIssueTimeout:  options.ObjectIssueTimeout, now: now,
-		taskWake: options.TaskWake,
+		taskWake: options.TaskWake, taskClock: options.TaskClock,
 	}, nil
 }
 
@@ -74,7 +76,7 @@ func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse)
 		if p.taskWake == nil {
 			return result, fmt.Errorf("task worker is not configured")
 		}
-		accepted, err := p.store.AcceptTasks(ctx, response.Tasks, nowMS)
+		accepted, err := p.store.AcceptTasksFenced(ctx, response.Tasks, nowMS, p.taskClock)
 		if err != nil {
 			if errors.Is(err, state.ErrTaskIdentityConflict) {
 				taskID, inputDigest := "unknown", "unknown"
@@ -94,9 +96,24 @@ func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse)
 			return result, fmt.Errorf("accept tasks: %w", err)
 		}
 		result.ReportImmediately = accepted.ResultAvailable
+		for _, fenced := range accepted.ReplayFenced {
+			if err := p.recordIssue(ctx, LocalIssue{
+				Kind: LocalIssueTaskReplayFenced, Key: fenced.ID,
+				DedupeKey: fmt.Sprintf("task-replay-fenced:%s:%s:%d", fenced.ID, fenced.InputSHA256, fenced.NotAfterMS),
+				Detail:    "no local task journal and fresh start authorization cannot be proven; no result was fabricated",
+			}, &result); err != nil {
+				return result, err
+			}
+		}
 		if accepted.WorkAvailable {
 			p.taskWake()
 		}
+	}
+	// Every valid response refreshes the shared in-process clock before Process
+	// in Synchronizer. Wake also on empty task responses so held received work
+	// can resume without forcing PSP to redispatch an already-received request.
+	if p.taskClock != nil && p.taskWake != nil {
+		p.taskWake()
 	}
 	oldConfig, err := optionalStoredBody[protocol.ConfigBody](ctx, p.store, protocol.StreamConfig)
 	if err != nil {

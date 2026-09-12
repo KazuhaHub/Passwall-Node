@@ -307,6 +307,10 @@ const (
 	// IssueTaskIdentityConflict means PSP reused one task id for different
 	// kind/argument bytes. The original journal row remains unchanged.
 	IssueTaskIdentityConflict = "task_identity_conflict"
+	// IssueTaskReplayFenced preserves a bounded diagnostic, never a fabricated
+	// terminal outcome, when a deadline-aware request has no local journal and
+	// fresh start authorization cannot be proven.
+	IssueTaskReplayFenced = "task_replay_fenced"
 	// IssueLegacyTaskResultQuarantined preserves evidence from schema v7 task
 	// outbox rows that predate kind/input identity and cannot be trusted as a
 	// durable terminal result.

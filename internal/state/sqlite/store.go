@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,13 +20,16 @@ import (
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 // Store serialises access through one SQLite connection. The agent has one
 // writer and modest data volume; this makes transaction behaviour predictable
 // while WAL still gives crash recovery and tooling-friendly reads.
 type Store struct {
 	db *sql.DB
+	// Production uses crypto/rand.Reader. This per-store seam lets tests prove
+	// entropy failure cannot turn received into an executable running claim.
+	taskClaimEntropy io.Reader
 }
 
 // Open opens or creates a private SQLite state file, configures durable
@@ -148,11 +152,66 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if current < 9 {
+		if err := migrateV9(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("record state schema version: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit state migration: %w", err)
+	}
+	return nil
+}
+
+// V9 extends the task journal without inventing authorization for V8 rows.
+// Rebuild is necessary because expiry-before-start is the one legitimate
+// terminal that has no started timestamp. It does not rerun V8's legacy-result
+// quarantine: existing immutable results and their outbox bytes stay untouched.
+func migrateV9(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE task_executions_v9 (
+			task_id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+			args BLOB NOT NULL,
+			not_after_ms INTEGER NOT NULL DEFAULT 0 CHECK (not_after_ms >= 0),
+			claim_token TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL CHECK (state IN ('received', 'running', 'succeeded', 'failed', 'indeterminate')),
+			result BLOB NOT NULL DEFAULT X'',
+			error_code TEXT NOT NULL DEFAULT '',
+			error_detail TEXT NOT NULL DEFAULT '',
+			received_at_ms INTEGER NOT NULL CHECK (received_at_ms >= 0),
+			started_at_ms INTEGER NOT NULL DEFAULT 0 CHECK (started_at_ms >= 0),
+			finished_at_ms INTEGER NOT NULL DEFAULT 0 CHECK (finished_at_ms >= 0),
+			result_delivered INTEGER NOT NULL DEFAULT 0 CHECK (result_delivered IN (0, 1)),
+			CHECK ((state = 'received' AND started_at_ms = 0 AND finished_at_ms = 0 AND claim_token = '') OR
+			       (state = 'running' AND started_at_ms > 0 AND finished_at_ms = 0) OR
+			       (state IN ('succeeded', 'failed', 'indeterminate') AND finished_at_ms > 0 AND
+			        (started_at_ms > 0 OR
+			         (state = 'failed' AND started_at_ms = 0 AND not_after_ms > 0 AND
+			          claim_token = '' AND error_code = 'task_expired_before_start')))),
+			CHECK ((state = 'succeeded' AND error_code = '' AND error_detail = '') OR
+			       (state IN ('failed', 'indeterminate') AND result = X'' AND error_code <> '' AND error_detail <> '') OR
+			       (state IN ('received', 'running') AND result = X'' AND error_code = '' AND error_detail = ''))
+		) STRICT`,
+		`INSERT INTO task_executions_v9
+			(task_id, kind, input_sha256, args, state, result, error_code, error_detail,
+			 received_at_ms, started_at_ms, finished_at_ms, result_delivered)
+		 SELECT task_id, kind, input_sha256, args, state, result, error_code, error_detail,
+			 received_at_ms, started_at_ms, finished_at_ms, result_delivered
+		 FROM task_executions`,
+		`DROP TABLE task_executions`,
+		`ALTER TABLE task_executions_v9 RENAME TO task_executions`,
+		`CREATE INDEX idx_task_executions_claim
+			ON task_executions(state, received_at_ms, task_id)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply state schema v9: %w", err)
+		}
 	}
 	return nil
 }

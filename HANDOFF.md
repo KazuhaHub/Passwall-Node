@@ -19,7 +19,7 @@ protocol/     线上契约，本地实现已定稿
   protocol_test.go
 internal/agent/       HTTP 拨出、三段接收、可重入应用、报告与调度
 internal/state/       持久化端口
-internal/state/sqlite SQLite schema v8：流、对象、计数、配额闸、幂等 outbox、task execution journal、core 部署与 sing-box 事件账本
+internal/state/sqlite SQLite schema v9：流、对象、计数、配额闸、幂等 outbox、deadline-aware task execution journal、core 部署与 sing-box 事件账本
 cmd/contract-agent/   C2 真 agent 契约执行器（仅 core 为确定性替身）
 cmd/node/             生产 daemon：同步、安装、编译、运行、观测、离线执法、优雅退出
 internal/core/        Compiler / Supervisor / Telemetry + Xray / sing-box 实现
@@ -95,7 +95,7 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 
 ### B2 — agent 骨架
 
-**状态：已完成。** 真实 HTTP client、SQLite schema v8、三段独立接收、可重入 join、
+**状态：已完成。** 真实 HTTP client、SQLite schema v9、三段独立接收、可重入 join、
 config add/update → roster → config delete 顺序、epoch 恢复、全量/轻量报告、配额周期推进、
 对象超时升级与幂等 outbox 均已落地。Issue outbox 成功投递后保留 dedupe tombstone：持续存在的
 同一问题不会在每轮重新触发即时上报、把未来生产同步循环拖进无间隔自旋；task result 则以 journal
@@ -123,10 +123,13 @@ config add/update → roster → config delete 顺序、epoch 恢复、全量/�
 - `(epoch, version)` 必须两项都为正；半零坐标在接收、状态机、SQLite 三层都拒绝
 - 已 applied 且内容和 listener 依赖都未变的 client 不触碰 runtime；pending / blocked 仍重试
 - task 只按同一轮 `NodeReport.capabilities` 双门槛下发：必须同时有 `task.execution.v1` 与
-  `task.<kind>`；旧 agent 和只具备 durable 基础设施、没有该 kind handler 的 agent 都 fail closed
+  `task.<kind>`；带截止时间的真实任务还必须有 `task.expiry.v1`。旧 agent 和只具备 durable
+  基础设施、没有该 kind handler 的 agent 都 fail closed
 - task ID 只允许小写 canonical ASCII（避免 MySQL 默认 collation 与 SQLite/Postgres 对大小写作出不同裁定），
   并与 `SHA-256(domain NUL || kind NUL || exact args bytes)` 绑定；同 ID 同内容重放不再执行，
   同 ID 异内容整批回滚并持久上报 `task_identity_conflict`
+- `not_after_ms` 是不可更改的最迟开始时间，不是完成 TTL，单独参与任务/结果身份比较，不能
+  更改 v1 输入 digest。零值只兼容旧基础设施记录；真实 producer 必须设置正值
 - claim 先把 `received → running` 落盘再调用 handler；`running → terminal` 与 result outbox 同事务，
   success / failed / indeterminate 是互斥的三个 wire 状态，终态不可修改
 - result 在报告成功前至少一次重放；ACK 后删除 outbox 中的重复 payload、journal 保留终态，PSP 再下发
@@ -177,10 +180,35 @@ schema v7 中没有 kind/input identity 的旧 `task_result` 无法安全升级�
 task ID、长度、SHA-256）的 `legacy_task_result_quarantined` Issue。v8 是单向 migration；旧 binary 会拒绝
 打开更新后的数据库，回滚程序必须同时恢复升级前备份，不能拿旧 binary 直接读 v8。
 
+schema v9 增加不可变 `not_after_ms` 与每次领取的随机 claim token。v8 的五种 journal 状态、
+输入、终态及原始 outbox bytes 原样保留；不得重新执行 v8 的旧结果隔离。v9 同样是单向升级，
+旧程序不能读取更新后的 DB。
+
+Node 的 deadline 接收/执行保护已实现：同一进程共享控制面时间区间，只在完整、合法 HTTP
+响应后建立新 anchor；Linux 使用 CLOCK_BOOTTIME，macOS 使用 CLOCK_MONOTONIC_RAW，均包含
+休眠时间。Windows 目前没有核验过的误差边界，禁用 expiry capability，但代理 core、心跳、
+配置收敛和结果投递不因此停用。生产默认 anchor/RTT 上限各 30 秒、uncertainty 1 秒是显式运维
+保护余量，**不是硬件精度或 SLA 保证**。重启不从本地墙钟/序列化 anchor 恢复启动授权。
+
+- 已知 `received` 只在新鲜 upper < deadline 时原子领取，handler 前再次采样；失效时仅由
+  仍确定没有调用 Execute 的 live owner 用精确 token 释放本次领取。进程崩溃后的 `running`
+  仍走原 Recover 契约，绝不靠过期把它重新开放为 received
+- 新鲜 lower >= deadline 才能把可信 received 原子变成 `task_expired_before_start` 并写 outbox；
+  区间重叠或时钟失效时保持等待。合法开始后的晚完成仍提交真实结果
+- 未知 task 没有 journal 且无法证明启动授权时，不插入 received、不捏造 expired terminal，
+  只写有界、去重的 `task_replay_fenced` Issue；已有 terminal 不依赖时钟直接重放原结果
+- 时间 counter 或 server timestamp 回退会失效 anchor；保留曾经证明的历史 lower floor，
+  不能因没有中途采样而复活旧授权。该保护**不检测 DB/VM 快照回滚或双端同时恢复**
+
+这些是未开放生产 kind 的基础设施。PSP 必须先引用本仓已发布版本，才可接通 deadline-aware
+offer/result；在下述 restore、retention 与每种 handler 的契约验收之前，仍禁止注册生产 kind。
+
 真实 task 上线前以下运营边界全部是 blocker，不能只补 handler 就开放 capability：
 
-- PSP 对每个 agent 的 queued 与 offered 数量/字节 quota，防止控制面或积压耗尽 node 磁盘
-- task expiry 字段以及 PSP 不再 offer、Node 未 claim / 已 running / 已 terminal 时的两端精确语义
+- PSP 已实现 per-agent queued + offered 的硬 quota（256 行 / 16 MiB 原始 args），同一 owner-lock
+  事务保证新建/下发/完成并发不越界；不能把该 active 上限误认为 terminal journal retention
+- Node expiry 字段与未 claim / 已 running / 已 terminal 的保护已实现；PSP deadline-aware
+  offer/result 连接与两端 restore 验收仍是 blocker
 - Node terminal journal 与 PSP terminal record 各自按时间和数量的 retention；当前 ACK 已去掉
   Node outbox 的第二份 payload，但 journal 会永久保留终态
 - PSP 数据库 restore 后的 task ID namespace / generation；restore 不得在 Node retention 或最长离线窗口内
