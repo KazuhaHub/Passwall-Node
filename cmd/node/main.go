@@ -160,8 +160,21 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// These are explicit operational guard margins, not execution TTLs or a
+	// measured hardware/SLA guarantee. Individual kinds still need execution,
+	// recovery and restore acceptance before production handlers are registered.
+	taskClock, clockErr := agent.NewControlPlaneTaskClock(agent.ClockOptions{
+		MaxAnchorAge: 30 * time.Second, MaxRoundTrip: 30 * time.Second,
+		Uncertainty: time.Second,
+	})
+	var startClock state.TaskStartClock
+	if clockErr != nil {
+		logger.Printf("task start clock unavailable; expiry tasks stay disabled: %v", clockErr)
+	} else {
+		startClock = taskClock
+	}
 	taskWorker, err := agent.NewTaskWorker(agent.TaskWorkerOptions{
-		Store: store, Registry: taskRegistry, Now: now,
+		Store: store, Registry: taskRegistry, Now: now, Clock: startClock,
 	})
 	if err != nil {
 		return err
@@ -169,7 +182,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	processor, err := agent.NewProcessor(agent.ProcessorOptions{
 		Store: store, Runtime: coreRuntime, Issues: issues,
 		SkewToleranceRounds: 3, ObjectIssueTimeout: 5 * time.Minute, Now: now,
-		TaskWake: taskWorker.Wake,
+		TaskWake: taskWorker.Wake, TaskClock: startClock,
 	})
 	if err != nil {
 		return err
@@ -188,9 +201,10 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Reports: agent.ReportBuilder{
 			AgentID: parsed.AgentID, AgentVersion: buildversion.String(),
 			Store: store, CoreStatus: supervisor.Status, Now: now,
-			Capabilities: taskRegistry.Capabilities(),
+			Capabilities: taskWorker.Capabilities(),
 		},
 		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
+		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Printf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
 	}
 	runner, err := agent.NewRunner(synchronizer, agent.RunnerOptions{OnError: func(err error) {

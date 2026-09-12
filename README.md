@@ -5,7 +5,7 @@ an audited Xray or sing-box version, applies only PSP-owned desired state, and
 reports what the selected core actually applied and counted.
 
 **Status: the Xray and sing-box production paths are implemented.** `cmd/node`
-wires outbound HTTPS synchronization, SQLite schema v8, exact checksum-pinned core install,
+wires outbound HTTPS synchronization, SQLite schema v9, exact checksum-pinned core install,
 full-config compilation, atomic process/config replacement with rollback,
 offline expiry/quota enforcement, core-specific telemetry, durable issue
 delivery, a durable capability-negotiated task journal, and graceful shutdown.
@@ -155,6 +155,23 @@ control plane. Production RealityProbe and AgentUpgrade handlers are likewise
 intentionally absent until their input, deadline, recovery, and authorization
 contracts are specified; silently dropping or guessing a future side effect is
 not a compatibility strategy.
+
+Deadline-aware infrastructure additionally requires `task.expiry.v1` alongside
+execution and kind capabilities. `not_after_ms` is an immutable latest-start
+deadline, not a completion timeout. The worker authorizes starts only from fresh
+control-plane time bounds, checks again before handler entry, and never executes
+an unknown expired replay or converts an already-running task into a new start.
+Unknown unprovable requests produce a bounded deduplicated Issue, not a guessed
+terminal result; existing terminal evidence remains replayable without a clock.
+
+Linux/macOS have suspend-inclusive elapsed backends; Windows currently disables
+expiry support without affecting proxy cores or synchronization. The daemon's
+30-second anchor/RTT windows and one-second uncertainty allowance are operational
+guard margins, not measured accuracy guarantees. Process restart requires a new
+valid sync anchor. Database/VM restore safety, retention, and each kind's recovery
+contract remain separate release gates; no production task handler is registered.
+Schema v9 preserves v8 journals and outbox bytes, but older binaries cannot open
+the upgraded database. Roll back the matching pre-upgrade database backup too.
 
 ```bash
 go run ./cmd/contract-agent \

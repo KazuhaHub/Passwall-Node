@@ -76,8 +76,8 @@ type TaskRegistry struct {
 }
 
 func NewTaskRegistry(handlers map[string]TaskHandler) (*TaskRegistry, error) {
-	if len(handlers) > protocol.MaxCapabilitiesPerReport-1 {
-		return nil, fmt.Errorf("task registry has %d handlers; maximum is %d", len(handlers), protocol.MaxCapabilitiesPerReport-1)
+	if len(handlers) > protocol.MaxCapabilitiesPerReport-2 {
+		return nil, fmt.Errorf("task registry has %d handlers; maximum is %d", len(handlers), protocol.MaxCapabilitiesPerReport-2)
 	}
 	registry := &TaskRegistry{handlers: make(map[string]TaskHandler, len(handlers))}
 	for kind, handler := range handlers {
@@ -118,6 +118,7 @@ type TaskWorkerOptions struct {
 	Store    state.Store
 	Registry *TaskRegistry
 	Now      func() time.Time
+	Clock    state.TaskStartClock
 }
 
 // TaskWorker drains the journal independently of the heartbeat. Wake is
@@ -126,6 +127,7 @@ type TaskWorker struct {
 	store    state.Store
 	registry *TaskRegistry
 	now      func() time.Time
+	clock    state.TaskStartClock
 	wake     chan struct{}
 	mu       sync.RWMutex
 	notify   func()
@@ -140,9 +142,21 @@ func NewTaskWorker(options TaskWorkerOptions) (*TaskWorker, error) {
 		now = time.Now
 	}
 	return &TaskWorker{
-		store: options.Store, registry: options.Registry, now: now,
+		store: options.Store, registry: options.Registry, now: now, clock: options.Clock,
 		wake: make(chan struct{}, 1),
 	}, nil
+}
+
+// Capabilities advertises expiry only when this worker has an elapsed-backed
+// authorization clock. Lack of a fresh anchor still holds received tasks;
+// capability is implementation support, not a claim that time is fresh now.
+func (w *TaskWorker) Capabilities() []string {
+	capabilities := w.registry.Capabilities()
+	if w.clock != nil {
+		capabilities = append(capabilities, protocol.CapabilityTaskExpiryV1)
+		sort.Strings(capabilities)
+	}
+	return capabilities
 }
 
 // SetResultNotifier wires the runner after both components are constructed.
@@ -222,7 +236,7 @@ func (w *TaskWorker) drain(ctx context.Context) (bool, error) {
 		if ctx.Err() != nil {
 			return worked, nil
 		}
-		task, err := w.store.ClaimNextTask(ctx, w.now().UnixMilli())
+		task, err := w.store.ClaimNextTaskFenced(ctx, w.now().UnixMilli(), w.clock)
 		if errors.Is(err, state.ErrNotFound) {
 			return worked, nil
 		}
@@ -233,6 +247,12 @@ func (w *TaskWorker) drain(ctx context.Context) (bool, error) {
 			return worked, fmt.Errorf("claim task: %w", err)
 		}
 		worked = true
+		if task.State.Terminal() {
+			// Expiration of a trusted received journal is committed atomically
+			// with its outbox by the store; never send it to Execute.
+			w.notifyResult()
+			continue
+		}
 		handler, ok := w.registry.Handler(task.Kind)
 		if !ok {
 			if err := w.finishError(ctx, task, TaskErrorUnsupportedKind, false,
@@ -241,7 +261,24 @@ func (w *TaskWorker) drain(ctx context.Context) (bool, error) {
 			}
 			continue
 		}
-		wireTask := protocol.Task{ID: task.ID, Kind: task.Kind, Args: append([]byte(nil), task.Args...), InputSHA256: task.InputSHA256}
+		wireTask := protocol.Task{ID: task.ID, Kind: task.Kind, Args: append([]byte(nil), task.Args...), InputSHA256: task.InputSHA256, NotAfterMS: task.NotAfterMS}
+		if task.NotAfterMS > 0 {
+			// Re-sample after SQL claim and immediately before entering the
+			// handler. A delayed commit, system suspend or clock fault cannot
+			// turn old authorization bounds into permission to start.
+			bounds, clockErr := taskStartBounds(w.clock)
+			if clockErr != nil || bounds.UpperMS >= task.NotAfterMS {
+				// Only this live worker knows Execute was not called. Its fresh
+				// claim token fences release; a crash before release remains
+				// running and must Recover, never blindly Execute on restart.
+				if err := w.store.ReleaseTaskClaim(ctx, task); err != nil {
+					return worked, fmt.Errorf("defer task before handler start: %w", err)
+				}
+				// Wait for another heartbeat wake instead of repeatedly claiming
+				// the same row under an intermittently failing clock.
+				return false, nil
+			}
+		}
 		payload, callErr := invokeHandler(ctx, handler, wireTask)
 		if executionInterrupted(ctx, callErr) {
 			return worked, nil
@@ -266,7 +303,7 @@ func (w *TaskWorker) finishInvocation(ctx context.Context, task state.TaskExecut
 		return w.finishError(ctx, task, code, indeterminate, callErr)
 	}
 	result := protocol.TaskResult{
-		ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256,
+		ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256, NotAfterMS: task.NotAfterMS,
 		OK: true, Result: payload,
 	}
 	if err := protocol.ValidateTaskResults([]protocol.TaskResult{result}); err != nil {
@@ -284,7 +321,7 @@ func (w *TaskWorker) finishError(ctx context.Context, task state.TaskExecution, 
 		terminal = state.TaskIndeterminate
 	}
 	result := protocol.TaskResult{
-		ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256,
+		ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256, NotAfterMS: task.NotAfterMS,
 		Indeterminate: indeterminate, ErrorCode: code, Error: boundedError(cause),
 	}
 	return w.complete(ctx, task, terminal, result)
@@ -300,13 +337,31 @@ func (w *TaskWorker) complete(ctx context.Context, task state.TaskExecution, ter
 	if err := w.store.CompleteTask(commitCtx, task.ID, terminal, result, w.now().UnixMilli()); err != nil {
 		return fmt.Errorf("complete task %s: %w", task.ID, err)
 	}
+	w.notifyResult()
+	return nil
+}
+
+func (w *TaskWorker) notifyResult() {
 	w.mu.RLock()
 	notify := w.notify
 	w.mu.RUnlock()
 	if notify != nil {
 		notify()
 	}
-	return nil
+}
+
+func taskStartBounds(clock state.TaskStartClock) (state.TaskTimeBounds, error) {
+	if clock == nil {
+		return state.TaskTimeBounds{}, fmt.Errorf("task authorization clock is unavailable")
+	}
+	bounds, err := clock.TaskTimeBounds()
+	if err != nil {
+		return state.TaskTimeBounds{}, err
+	}
+	if err := bounds.Validate(); err != nil {
+		return state.TaskTimeBounds{}, err
+	}
+	return bounds, nil
 }
 
 func executionInterrupted(ctx context.Context, err error) bool {

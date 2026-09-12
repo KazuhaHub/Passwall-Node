@@ -56,10 +56,15 @@ func (s TaskState) Terminal() bool {
 // TaskExecution is the local journal row. Result delivery is tracked through
 // the transactional report outbox and mirrored by ResultDelivered for audit.
 type TaskExecution struct {
-	ID              string
-	Kind            string
-	Args            []byte
-	InputSHA256     string
+	ID          string
+	Kind        string
+	Args        []byte
+	InputSHA256 string
+	NotAfterMS  int64
+	// ClaimToken is a fresh per-claim capability. A release may only undo the
+	// exact claim that has not entered Execute; a stale owner cannot undo a
+	// later running claim with the same timestamp and task identity.
+	ClaimToken      string
 	State           TaskState
 	Result          []byte
 	ErrorCode       string
@@ -74,6 +79,29 @@ type TaskExecution struct {
 type TaskAcceptance struct {
 	WorkAvailable   bool
 	ResultAvailable bool
+	// ReplayFenced tasks have no local execution journal. Their authorization
+	// could not be proven, so callers report an Issue, not a fabricated result.
+	ReplayFenced []protocol.Task
+}
+
+// TaskTimeBounds bounds current control-plane time. Upper < NotAfterMS proves
+// start authorization; Lower >= NotAfterMS proves expiration. An overlapping
+// interval proves neither. The clock provider owns freshness and elapsed-time
+// advancement; this type never converts local wall time into authorization.
+type TaskTimeBounds struct {
+	LowerMS int64
+	UpperMS int64
+}
+
+func (b TaskTimeBounds) Validate() error {
+	if b.LowerMS <= 0 || b.UpperMS <= 0 || b.LowerMS > b.UpperMS {
+		return fmt.Errorf("%w: task time bounds must be positive and ordered", ErrInvalidState)
+	}
+	return nil
+}
+
+type TaskStartClock interface {
+	TaskTimeBounds() (TaskTimeBounds, error)
 }
 
 // StreamDocument is one received and durably accepted protocol segment.
@@ -270,9 +298,12 @@ type Store interface {
 	AckOutbox(context.Context, []int64) error
 
 	AcceptTasks(context.Context, []protocol.Task, int64) (TaskAcceptance, error)
+	AcceptTasksFenced(context.Context, []protocol.Task, int64, TaskStartClock) (TaskAcceptance, error)
 	Task(context.Context, string) (TaskExecution, error)
 	RunningTasks(context.Context) ([]TaskExecution, error)
 	ClaimNextTask(context.Context, int64) (TaskExecution, error)
+	ClaimNextTaskFenced(context.Context, int64, TaskStartClock) (TaskExecution, error)
+	ReleaseTaskClaim(context.Context, TaskExecution) error
 	CompleteTask(context.Context, string, TaskState, protocol.TaskResult, int64) error
 
 	ObserveReferenceSkew(context.Context, string, string, protocol.Version) (int, error)

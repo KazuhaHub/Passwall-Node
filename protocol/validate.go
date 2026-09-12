@@ -235,8 +235,11 @@ func ValidateTasks(tasks []Task) error {
 		if !validToken(task.Kind) || len(task.Kind) > MaxTaskKindBytes {
 			return fmt.Errorf("task %q kind must be 1..%d canonical lowercase characters", task.ID, MaxTaskKindBytes)
 		}
-		if TaskCapability(task.Kind) == CapabilityTaskExecutionV1 {
+		if TaskCapability(task.Kind) == CapabilityTaskExecutionV1 || TaskCapability(task.Kind) == CapabilityTaskExpiryV1 {
 			return fmt.Errorf("task %q kind %q is reserved by the execution capability", task.ID, task.Kind)
+		}
+		if task.NotAfterMS < 0 {
+			return fmt.Errorf("task %q not_after_ms must be non-negative", task.ID)
 		}
 		if len(task.Args) > MaxTaskArgsBytes {
 			return fmt.Errorf("task %q args exceeds maximum of %d bytes", task.ID, MaxTaskArgsBytes)
@@ -275,8 +278,11 @@ func ValidateTaskResults(results []TaskResult) error {
 		if !validToken(result.Kind) || len(result.Kind) > MaxTaskKindBytes {
 			return fmt.Errorf("task result %q kind must be canonical and bounded", result.ID)
 		}
-		if TaskCapability(result.Kind) == CapabilityTaskExecutionV1 {
+		if TaskCapability(result.Kind) == CapabilityTaskExecutionV1 || TaskCapability(result.Kind) == CapabilityTaskExpiryV1 {
 			return fmt.Errorf("task result %q kind %q is reserved by the execution capability", result.ID, result.Kind)
+		}
+		if result.NotAfterMS < 0 {
+			return fmt.Errorf("task result %q not_after_ms must be non-negative", result.ID)
 		}
 		if err := validateDigest(result.InputSHA256); err != nil {
 			return fmt.Errorf("task result %q input_sha256: %w", result.ID, err)
@@ -321,7 +327,7 @@ func validateLegacyTaskResults(results []TaskResult) error {
 	seen := make(map[string]struct{}, len(results))
 	totalResult := 0
 	for _, result := range results {
-		if result.Kind != "" || result.InputSHA256 != "" || result.ErrorCode != "" || result.Indeterminate {
+		if result.Kind != "" || result.InputSHA256 != "" || result.NotAfterMS != 0 || result.ErrorCode != "" || result.Indeterminate {
 			return fmt.Errorf("task result %q mixes durable and legacy result schemas", result.ID)
 		}
 		if !validTaskID(result.ID) || len(result.ID) > MaxTaskIDBytes {
