@@ -33,7 +33,7 @@ var (
 // credential through command arguments, shell tracing, history or shared logs.
 // Installation never changes an existing identity, credential or release.
 func RenderLinux(options Options) (string, error) {
-	if !validReleaseVersion(options.Version) {
+	if !ValidReleaseVersion(options.Version) {
 		return "", errors.New("installation requires an explicit vMAJOR.MINOR.PATCH[-prerelease] release")
 	}
 	if !agentIdentity.MatchString(options.AgentID) {
@@ -74,7 +74,9 @@ func RenderLinux(options Options) (string, error) {
 	).Replace(linuxTemplate), nil
 }
 
-func validReleaseVersion(value string) bool {
+// ValidReleaseVersion is the single release-tag rule shared by installation
+// and publishing. No floating aliases, leading zeroes or build metadata.
+func ValidReleaseVersion(value string) bool {
 	if !releaseVersion.MatchString(value) {
 		return false
 	}

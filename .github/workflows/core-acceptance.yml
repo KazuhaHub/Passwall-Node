@@ -1,0 +1,74 @@
+name: Real core acceptance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+concurrency:
+  group: real-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-core:
+    name: official cores and REALITY Linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Require native Linux and pinned Go toolchain
+        run: |
+          set -euo pipefail
+          test "$(go env GOHOSTOS)" = linux
+          test "$(go env GOHOSTARCH)" = '${{ matrix.arch }}'
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+      - name: Verify fail-closed acceptance fixture
+        run: go test -count=1 ./deployment/coreacceptance
+      - name: Download and execute exact official binary versions
+        run: |
+          set -euo pipefail
+          go run ./deployment/coreacceptance prepare \
+            --directory "$RUNNER_TEMP/core-acceptance" \
+            --env-file "$GITHUB_ENV" | tee "$RUNNER_TEMP/core-acceptance-versions.json"
+      - name: Real installer, compiled config, API wire and three-client HTTP handshake
+        run: |
+          set -euo pipefail
+          go test -json -count=1 -timeout=10m ./internal/core/install \
+            -run '^TestOfficial(Xray|SingBox)InstallIntegration$' \
+            | tee "$RUNNER_TEMP/core-acceptance-tests.json"
+          go test -json -count=1 -timeout=5m ./internal/core/xray \
+            -run '^TestCompilerArtifactPassesPinnedXrayValidation$/^26\.6\.27$' \
+            | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
+          go test -json -count=1 -timeout=5m ./internal/core/singbox \
+            -run '^(TestCompilerArtifactPassesPinnedSingBoxValidation|TestDaemonAPIWireCompatibilityWithPinnedSingBox|TestRealityHandshakeMatrix)$' \
+            | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
+          go run ./deployment/coreacceptance check \
+            --results "$RUNNER_TEMP/core-acceptance-tests.json"
+      - name: Keep exact-version and test execution evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-core-linux-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/core-acceptance-versions.json
+            ${{ runner.temp }}/core-acceptance-tests.json
+          if-no-files-found: warn
+          retention-days: 7

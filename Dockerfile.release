@@ -1,7 +1,7 @@
 # Runtime-only image used by the release workflow. The six-platform build job
 # produces the binaries once; buildx selects the matching Linux artifact here,
 # so the image contains the same bytes published in the GitHub release archive.
-FROM alpine:3.20
+FROM alpine:3.24.1
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 ARG TARGETARCH
 

@@ -78,6 +78,13 @@ documented, versioned, with a deprecation cycle for breaking changes.
 
 ## Run the production daemon
 
+The build toolchain is pinned to `go1.26.8` in `go.mod` (`go 1.26.0` is the
+minimum language/toolchain requirement). CI selects that preferred toolchain
+without automatic switching and inspects all six release binaries. Source
+container builds use the same compiler; both container paths use Alpine
+`3.24.1`. `v0.0.1-beta1` remains testing-only because it was built with the
+older Go/Alpine baselines; its published artifacts are not replaced.
+
 Create a **PSP Node** on PSP's Servers page. PSP assigns a stable agent ID and a
 long-lived credential for that logical server. Authentication uses its SHA-256
 digest; the administrator can retrieve the same credential/private installer
