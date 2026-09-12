@@ -38,6 +38,10 @@ jobs:
         with:
           fetch-depth: 0
       - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
           cache: true
@@ -97,6 +101,10 @@ jobs:
         with:
           ref: ${{ needs.setup.outputs.sha }}
       - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
           cache: true
