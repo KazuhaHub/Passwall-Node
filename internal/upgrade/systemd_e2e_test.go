@@ -622,17 +622,14 @@ func (f *nodeE2E) cleanup() error {
 				return err
 			}
 			if _, err := f.privateCommand(ctx, "/usr/bin/systemctl", "stop", name); err != nil {
-				return err
+				return fmt.Errorf("stop owned acceptance unit %s: %w", name, err)
 			}
 			if err := f.verifyUnit(name); err != nil {
 				return err
 			}
-			if _, err := f.privateCommand(ctx, "/usr/bin/systemctl", "reset-failed", name); err != nil {
-				return err
-			}
-			if err := f.verifyUnit(name); err != nil {
-				return err
-			}
+			// These fixture units were never enabled. Stopping and unlinking the
+			// exact owned files is sufficient; reset-failed requires an in-memory
+			// unit that PID 1 may already have collected after stop.
 			if err := os.Remove(filepath.Join("/etc/systemd/system", name)); err != nil {
 				return err
 			}
