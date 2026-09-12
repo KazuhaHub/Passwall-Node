@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
 concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -20,6 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
           cache: true
@@ -27,12 +35,18 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Vet
         run: go vet ./...
+      - name: Verify pinned build toolchain
+        run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
       - name: Unit and integration tests
         run: go test ./...
       - name: Race detector
         run: go test -race ./...
+      - name: Reachable vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Validate container entrypoint
         run: sh -n docker-entrypoint.sh
+      - name: Validate immutable image publishing check
+        run: node --test deployment/check_image_test.mjs
 
   cross-compile:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -50,6 +64,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
           cache: true
@@ -58,7 +76,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
+        run: |
+          go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
+          sh deployment/check-build.sh "passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$GITHUB_SHA"
 
   container:
     name: container

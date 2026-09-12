@@ -91,8 +91,12 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 raw baseline，历史 lifetime/period usage 不清零。这只是普通重装的计量衔接，不是 DB/VM
 快照恢复检测。单机真实 Linux/systemd 启动仍需部署验收，脚本返回成功不等于代理已就绪。
 
-首个可下载 Node 版本尚未发布；不要伪造默认 tag 或将本地 module pseudo-version 当成
-Release 资产。先核验本仓 CI 并更新 PSP 的已发布 module pin，再单独选择 release tag。
+首个可下载版本 `v0.0.1-beta1` 已发布，但 Go 1.25.0 / Alpine 3.20 已结束支持，发行说明
+明确限制为隔离测试，暂勿用于生产；不可重绑 tag 或替换资产。本轮 `v0.0.1-beta2` 先更新
+首选构建工具链 `go1.26.8`（最低要求 `go 1.26.0`）和两条 Docker 的 Alpine `3.24.1`
+基线。六平台产物均检查实际编译器、OS/arch、CGO=0、VCS revision 与 clean 状态；发布
+只接受安装器相同的严格 tag 规则，tag 的 commit 必须匹配当前执行 ref，不可覆盖已有
+发行版。跨仓仍先发布 Node，再更新 PSP 已发布 module pin；本地 `go.work` 不是验收证据。
 
 ### B1 — `protocol/conformance` 一致性测试
 

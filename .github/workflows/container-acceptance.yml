@@ -1,0 +1,91 @@
+name: Published container acceptance
+
+# Run against the release tag ref after its exact public image has been published.
+# This is native image execution/identity acceptance, not proxy, credential or
+# persistent-data acceptance. It never starts the agent business loop.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published exact version; select the same release tag ref"
+        required: true
+        type: string
+        default: v0.0.1-beta2
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+jobs:
+  published-container:
+    name: execute published image Linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    env:
+      REQUESTED_VERSION: ${{ inputs.version }}
+      ACCEPTANCE_ARCH: ${{ matrix.arch }}
+      IMAGE_REPOSITORY: ghcr.io/kazuhahub/passwall-node
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Bind harness to the exact release tag and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./deployment/cmd/release-tag "$REQUESTED_VERSION"
+          test "$GITHUB_REF" = "refs/tags/$REQUESTED_VERSION"
+          test "$(git rev-parse --verify "refs/tags/${REQUESTED_VERSION}^{commit}")" = "$GITHUB_SHA"
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOHOSTOS)" = linux
+          test "$(go env GOHOSTARCH)" = "$ACCEPTANCE_ARCH"
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+      - name: Anonymous native pull, OCI identity and isolated executable version
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v docker > /dev/null
+          # Isolate this client's authentication without modifying/logging out
+          # any existing Docker configuration. No registry token is supplied.
+          export DOCKER_CONFIG="$(mktemp -d "$RUNNER_TEMP/passwall-container-auth.XXXXXX")"
+          test ! -e "$DOCKER_CONFIG/config.json"
+          docker info > /dev/null
+          image="${IMAGE_REPOSITORY}:${REQUESTED_VERSION}"
+          docker pull --platform "linux/$ACCEPTANCE_ARCH" "$image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$ACCEPTANCE_ARCH"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$REQUESTED_VERSION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image")" = Apache-2.0
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image")" = "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          digest="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$image")"
+          case "$digest" in
+            "$IMAGE_REPOSITORY"@sha256:*) ;;
+            *) exit 1 ;;
+          esac
+          version_file="$RUNNER_TEMP/passwall-container-version-${ACCEPTANCE_ARCH}.txt"
+          timeout 30s docker run --rm --pull never \
+            --platform "linux/$ACCEPTANCE_ARCH" \
+            --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            "$image" --version > "$version_file"
+          # Compare exact stdout bytes, including its one trailing newline.
+          printf '%s (%s)\n' "$REQUESTED_VERSION" "${GITHUB_SHA:0:7}" | cmp - "$version_file"
+          printf '%s\n' "$digest"
+          cat "$version_file"

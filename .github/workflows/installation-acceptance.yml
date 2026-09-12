@@ -1,0 +1,58 @@
+name: Published Linux installation acceptance
+
+# Opt-in only: this consumes an already public exact release, and mutates only
+# new disposable GitHub-hosted VMs. Never supply real PSP credentials or a host.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Already published exact Node release"
+        required: true
+        default: "v0.0.1-beta2"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+jobs:
+  installation:
+    name: systemd ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact pinned host and compiler toolchain
+        run: |
+          set -eu
+          acceptance_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$acceptance_toolchain"
+          test "$(go env GOVERSION)" = "$acceptance_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$acceptance_toolchain"
+      - name: Build disposable installation acceptance tool
+        run: go build -trimpath -o "$RUNNER_TEMP/passwall-node-installation-acceptance" ./deployment/acceptance
+      - name: Install public release, inspect isolation, rerun offline and reinstall
+        env:
+          ACCEPTANCE_VERSION: ${{ inputs.version }}
+        run: |
+          set +x
+          set -eu
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            "$RUNNER_TEMP/passwall-node-installation-acceptance" -version "$ACCEPTANCE_VERSION"
+      # No artifacts, raw journal, script, proc environment or diagnostics are
+      # uploaded: the private fixture credential is deliberately ephemeral.

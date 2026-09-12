@@ -14,8 +14,15 @@ on:
         type: string
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+concurrency:
+  group: release-passwall-node
+  cancel-in-progress: false
 
 jobs:
   setup:
@@ -24,24 +31,56 @@ jobs:
     outputs:
       tag: ${{ steps.identity.outputs.tag }}
       owner_lc: ${{ steps.identity.outputs.owner_lc }}
+      sha: ${{ steps.identity.outputs.sha }}
+      build_date: ${{ steps.identity.outputs.build_date }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Resolve tag and owner
         id: identity
         shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$REQUESTED_TAG"
           else
             tag="${GITHUB_REF_NAME}"
           fi
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "invalid release tag: $tag" >&2
+          go run ./deployment/cmd/release-tag "$tag"
+          release_sha=$(git rev-parse --verify "refs/tags/${tag}^{commit}")
+          if [ "$release_sha" != "$GITHUB_SHA" ]; then
+            echo 'select the release tag ref; refusing to stamp a different checkout with this version' >&2
             exit 1
           fi
-          owner_lc=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          # Fail closed on API errors and never rebuild/replace an already
+          # published version. A failed job may be retried within its own run.
+          export RELEASE_TAG="$tag"
+          existing=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .id')
+          if [ -n "$existing" ]; then
+            echo 'this version is already published; use a new release tag' >&2
+            exit 1
+          fi
+          owner_lc=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
+          echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
+          # Successful build-job retries reuse this stamp instead of changing
+          # the daemon bytes by reading a fresh clock in every build job.
+          echo "build_date=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -59,7 +98,13 @@ jobs:
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.setup.outputs.sha }}
       - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
           cache: true
@@ -70,18 +115,19 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
           VERSION: ${{ needs.setup.outputs.tag }}
-          COMMIT: ${{ github.sha }}
+          COMMIT: ${{ needs.setup.outputs.sha }}
+          BUILD_DATE: ${{ needs.setup.outputs.build_date }}
         run: |
           set -euo pipefail
           mkdir -p out
           short_sha="${COMMIT:0:7}"
-          build_date="$(date -u +%FT%TZ)"
           ldflags="-s -w"
           ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.Version=${VERSION}"
           ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.Commit=${short_sha}"
-          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.BuildDate=${build_date}"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.BuildDate=${BUILD_DATE}"
           go build -trimpath -ldflags="${ldflags}" \
             -o "out/passwall-node${{ matrix.ext }}" ./cmd/node
+          sh deployment/check-build.sh "out/passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$COMMIT"
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
@@ -94,8 +140,12 @@ jobs:
     name: Publish GitHub release
     runs-on: ubuntu-latest
     needs: [setup, build]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.setup.outputs.sha }}
       - name: Download binaries
         uses: actions/download-artifact@v8
         with:
@@ -133,10 +183,11 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.setup.outputs.tag }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ needs.setup.outputs.sha }}
           name: ${{ needs.setup.outputs.tag }}
           prerelease: ${{ contains(needs.setup.outputs.tag, '-') }}
           generate_release_notes: true
+          overwrite_files: false
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -145,8 +196,13 @@ jobs:
     name: Publish container image
     runs-on: ubuntu-latest
     needs: [setup, build]
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.setup.outputs.sha }}
       - name: Download linux/amd64 binary
         uses: actions/download-artifact@v8
         with:
@@ -176,9 +232,14 @@ jobs:
           labels: |
             org.opencontainers.image.title=passwall-node
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.setup.outputs.sha }}
             org.opencontainers.image.version=${{ needs.setup.outputs.tag }}
             org.opencontainers.image.licenses=Apache-2.0
+      - name: Refuse an already published exact image tag
+        env:
+          IMAGE_REPOSITORY: ${{ needs.setup.outputs.owner_lc }}/passwall-node
+          RELEASE_VERSION: ${{ needs.setup.outputs.tag }}
+        run: node deployment/check-image.mjs "$IMAGE_REPOSITORY" "$RELEASE_VERSION"
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
         with:

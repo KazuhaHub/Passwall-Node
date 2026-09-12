@@ -1,10 +1,12 @@
 # Build the production daemon as a static Linux binary. BuildKit supplies
 # TARGETOS/TARGETARCH for ordinary and multi-platform builds.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.8-alpine3.24 AS builder
+ENV GOTOOLCHAIN=local GOWORK=off
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)" \
+ && go mod download
 COPY . .
 
 ARG TARGETOS=linux
@@ -24,7 +26,7 @@ RUN target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
 # The entrypoint starts as root only to turn a read-only Docker secret into the
 # daemon's required mode-0600 credential and to repair the state-volume owner.
 # It then execs the daemon through su-exec as an unprivileged numeric UID/GID.
-FROM alpine:3.20
+FROM alpine:3.24.1
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 RUN apk add --no-cache ca-certificates tzdata su-exec \
  && addgroup -g 10001 passwall-node \
