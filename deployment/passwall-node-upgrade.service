@@ -1,0 +1,20 @@
+[Unit]
+Description=Passwall-Node bounded privileged upgrade controller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/passwall-node/bin/passwall-node --run-upgrade-helper
+TimeoutStartSec=9min
+TimeoutStopSec=100s
+Restart=on-failure
+RestartSec=5s
+UMask=0027
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/passwall-node/bin /opt/passwall-node/config /opt/passwall-node/licenses /opt/passwall-node/upgrades
+ReadOnlyPaths=/opt/passwall-node/config/credential /opt/passwall-node/config/environment /opt/passwall-node/data

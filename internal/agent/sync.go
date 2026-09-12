@@ -38,6 +38,9 @@ type Synchronizer struct {
 	// complete after local quota/expiry state has advanced, it applies the
 	// already-durable desired documents without waiting for PSP to recover.
 	LocalConverger interface{ Converge(context.Context) error }
+	// OnSynced is local activation evidence, not a second network channel. It
+	// runs only after authentication, outbox acknowledgement and core convergence.
+	OnSynced func(context.Context) error
 }
 
 type SyncResult struct {
@@ -104,6 +107,11 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial bool) (SyncResult, e
 			Envelope: response.Envelope, ReportWasFull: !built.Report.Partial,
 			ReportImmediately: processed.ReportImmediately,
 		}, fmt.Errorf("process sync response: %w", err)
+	}
+	if s.OnSynced != nil {
+		if err := s.OnSynced(ctx); err != nil {
+			return SyncResult{}, fmt.Errorf("record successful sync: %w", err)
+		}
 	}
 	return SyncResult{
 		Envelope: response.Envelope, ReportWasFull: !built.Report.Partial,

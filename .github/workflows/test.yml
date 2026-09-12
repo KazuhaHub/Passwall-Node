@@ -80,6 +80,41 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
           sh deployment/check-build.sh "passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$GITHUB_SHA"
 
+  upgrade-systemd:
+    name: upgrade helper sandbox (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact preferred compiler
+        run: |
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      - name: Verify native runner architecture
+        run: test "$(go env GOHOSTARCH)" = "${{ matrix.arch }}"
+      - name: Run real isolated systemd permission and helper fixture acceptance
+        env:
+          PN_SYSTEMD_ACCEPTANCE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./internal/upgrade -run 'TestHelper|TestUpgradeSystemd' -count=1 -timeout=5m | tee upgrade-systemd-tests.log
+          ! grep -Eq '^[[:space:]]*--- SKIP:' upgrade-systemd-tests.log
+
   container:
     name: container
     runs-on: ubuntu-latest

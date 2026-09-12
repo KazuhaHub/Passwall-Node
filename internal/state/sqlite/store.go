@@ -22,6 +22,10 @@ import (
 
 const schemaVersion = 9
 
+// SupportedSchema is the binary's state compatibility boundary. Remote agent
+// upgrades require equality so binary rollback never reads a newer schema.
+const SupportedSchema = schemaVersion
+
 // Store serialises access through one SQLite connection. The agent has one
 // writer and modest data volume; this makes transaction behaviour predictable
 // while WAL still gives crash recovery and tooling-friendly reads.
