@@ -28,6 +28,8 @@ type helperFixture struct {
 	wrongPID       bool
 	denyNewProcess bool
 	failNewStart   bool
+	dropIns        string
+	denyOldProcess bool
 }
 
 func helperFixtureBinary(version string, schema int) []byte {
@@ -80,6 +82,9 @@ func newHelperFixture(t *testing.T) *helperFixture {
 		return f.candidate, nil
 	}
 	f.c.command = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) == 4 && args[0] == "show" && args[1] == nodeService && args[2] == "--property=DropInPaths" && args[3] == "--value" {
+			return f.dropIns, nil
+		}
 		if len(args) != 2 || args[1] != nodeService || (args[0] != "start" && args[0] != "stop") {
 			t.Fatalf("unsafe system command seam: %v", args)
 		}
@@ -132,6 +137,9 @@ func newHelperFixture(t *testing.T) *helperFixture {
 		if f.denyNewProcess && want == f.candidate.BinarySHA256 {
 			return errors.New("unverified new process")
 		}
+		if f.denyOldProcess && want != f.candidate.BinarySHA256 {
+			return errors.New("unverified old process")
+		}
 		return nil
 	}
 	return f
@@ -181,7 +189,7 @@ func TestHelperConfirmedUpgradeAndImmutableReplay(t *testing.T) {
 }
 
 func TestHelperRejectsBeforeStoppingOriginal(t *testing.T) {
-	for _, name := range []string{"download", "schema", "CAS", "boot", "deadline", "symlink"} {
+	for _, name := range []string{"download", "schema", "CAS", "boot", "deadline", "symlink", "drop-in", "old-process"} {
 		t.Run(name, func(t *testing.T) {
 			f := newHelperFixture(t)
 			switch name {
@@ -197,6 +205,10 @@ func TestHelperRejectsBeforeStoppingOriginal(t *testing.T) {
 				f.request.BootID = "old kernel"
 			case "deadline":
 				f.request.AuthorizedUntilBoottimeNS = 1
+			case "drop-in":
+				f.dropIns = "/etc/systemd/system/passwall-node.service.d/override.conf\n"
+			case "old-process":
+				f.denyOldProcess = true
 			case "symlink":
 				file := filepath.Join(f.root, "data", "upgrades", "request.json")
 				if err := os.Rename(file, file+".original"); err != nil {
@@ -217,9 +229,50 @@ func TestHelperRejectsBeforeStoppingOriginal(t *testing.T) {
 			if len(f.commands) != 0 {
 				t.Fatalf("original daemon disturbed before validation: %v", f.commands)
 			}
+			if (name == "drop-in" || name == "old-process") && f.fetches != 0 {
+				t.Fatal("customized or foreign service downloaded an upgrade candidate")
+			}
 			info, err := readBuildInfo(context.Background(), filepath.Join(f.root, "bin", "passwall-node"))
 			if err != nil || info.Version != "v1.0.0" {
 				t.Fatal("original binary changed")
+			}
+			f.assertProtected(t)
+		})
+	}
+}
+
+func TestHelperRechecksAuthorizationAfterFilePreparation(t *testing.T) {
+	for _, name := range []string{"deadline", "boot"} {
+		t.Run(name, func(t *testing.T) {
+			f := newHelperFixture(t)
+			checks := 0
+			f.c.clock = func() (string, int64, error) {
+				checks++
+				if checks < 3 {
+					return f.request.BootID, 1, nil
+				}
+				if name == "boot" {
+					return "another-kernel-boot", 1, nil
+				}
+				return f.request.BootID, f.request.AuthorizedUntilBoottimeNS, nil
+			}
+			if err := f.c.run(context.Background()); err == nil {
+				t.Fatal("expired preparation activated the target")
+			}
+			if checks != 3 || len(f.commands) != 0 {
+				t.Fatalf("late authorization did not preserve the running daemon: checks=%d commands=%v", checks, f.commands)
+			}
+			var backup helperBackup
+			if err := ReadDocument(filepath.Join(f.root, "upgrades", f.request.Task.ID+".backup"), "metadata.json", &backup); err != nil {
+				t.Fatalf("test did not reach completed file preparation: %v", err)
+			}
+			receipt := f.receipt(t)
+			if receipt.Phase != "failed" || receipt.ErrorCode != "agent_upgrade_authorization_expired" {
+				t.Fatalf("invalid deadline outcome: %+v", receipt)
+			}
+			info, err := readBuildInfo(context.Background(), filepath.Join(f.root, "bin", "passwall-node"))
+			if err != nil || info.Version != "v1.0.0" {
+				t.Fatalf("old binary changed after preparation expired: %+v %v", info, err)
 			}
 			f.assertProtected(t)
 		})

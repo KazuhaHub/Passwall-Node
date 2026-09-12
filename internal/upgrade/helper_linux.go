@@ -113,6 +113,16 @@ func (c *helperController) run(ctx context.Context) error {
 	if err != nil {
 		return c.fail(request, "agent_upgrade_installation_invalid", errors.New("installed binary cannot be verified"), gid)
 	}
+	// A matching base unit does not describe systemd drop-in overrides. Do not
+	// remotely manage a locally customized service, or stop a foreign/root
+	// process that happens to use the managed service name.
+	dropIns, err := c.command(ctx, "show", nodeService, "--property=DropInPaths", "--value")
+	if err != nil || strings.TrimSpace(dropIns) != "" {
+		return c.fail(request, "agent_upgrade_installation_invalid", errors.New("service drop-in overrides require manual maintenance"), gid)
+	}
+	if c.process == nil || c.process(ctx, oldDigest, uid, 0) != nil {
+		return c.fail(request, "agent_upgrade_installation_invalid", errors.New("current managed non-root process cannot be verified"), gid)
+	}
 	if c.fetch == nil {
 		stage := filepath.Join(receipts, "staging")
 		f, err := NewReleaseFetcher(ReleaseFetcherOptions{RootDir: stage})
@@ -151,6 +161,12 @@ func (c *helperController) run(ctx context.Context) error {
 	receipt.Phase = "activating"
 	if err := c.writeReceipt(receipt, gid); err != nil {
 		return err
+	}
+	// Copying and syncing the previous release can consume the remaining
+	// authorization window. Recheck immediately before disturbing the daemon;
+	// preparation never extends the original same-boot start deadline.
+	if err := c.authorized(request); err != nil {
+		return c.fail(request, "agent_upgrade_authorization_expired", err, gid)
 	}
 	if _, err := c.command(ctx, "stop", nodeService); err != nil {
 		return c.rollback(receipt, backup, uid, gid, "service stop failed")

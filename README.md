@@ -254,6 +254,9 @@ verified success. Activation evidence assumes a trusted daemon/service UID; it
 is not remote attestation against an already-compromised node.
 
 The start authorization is ten minutes, tied to same-boot suspend-inclusive time.
+It is checked again after backup preparation, immediately before stopping the
+daemon. Customized systemd drop-ins or an unverified current service process
+require manual maintenance and are rejected before downloading or stopping it.
 Download failures leave the running agent untouched. Startup/readiness failures
 restore the retained previous managed files and restart them; interrupted tasks
 read durable receipts rather than blindly download/execute again. **Only equal
