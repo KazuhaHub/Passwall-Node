@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func installationOptions() Options {
@@ -94,7 +96,40 @@ func newShellFixture(t *testing.T) *shellFixture {
 	f.writeCommand("getent", `printf 'passwall-node:x:10001:10001::%s:/usr/sbin/nologin\n' "$FAKE_INSTALL_ROOT"`)
 	f.writeCommand("useradd", `printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"`)
 	f.writeCommand("chown", `printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"`)
-	f.writeCommand("systemctl", `printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"; [ "${FAKE_SERVICE_FAIL:-0}" != 1 ]`)
+	f.writeCommand("systemctl", `
+printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"
+[ "${FAKE_SERVICE_FAIL:-0}" != 1 ] || exit 1
+if [ "$1" = show ]; then
+    case "$3" in
+        --property=ActiveState)
+            count=0
+            [ ! -f "$FAKE_READY_COUNT" ] || read -r count < "$FAKE_READY_COUNT"
+            count=$((count + 1))
+            printf '%s\n' "$count" > "$FAKE_READY_COUNT"
+            if [ "${FAKE_SERVICE_DELAY:-0}" = 1 ] && [ "$count" -lt 2 ]; then
+                printf '%s\n' activating
+            else
+                printf '%s\n' "${FAKE_ACTIVE_STATE:-active}"
+            fi ;;
+        --property=SubState) printf '%s\n' "${FAKE_SUB_STATE:-running}" ;;
+        --property=MainPID) printf '%s\n' "${FAKE_MAIN_PID:-12345}" ;;
+        *) exit 1 ;;
+    esac
+fi
+`)
+	// Isolated shell tests never reach real systemd. A bounded number of fake
+	// polls models expiry; production uses real coreutils timeout deadlines.
+	f.writeCommand("sleep", `
+count=0
+[ ! -f "$FAKE_READY_COUNT" ] || read -r count < "$FAKE_READY_COUNT"
+[ "$count" -lt 3 ]
+`)
+	f.writeCommand("timeout", `
+printf '%s\n' "$*" >> "$FAKE_TIMEOUT_LOG"
+shift 2
+if [ "${FAKE_READINESS_TIMEOUT:-0}" = 1 ] && [ "$1" = sh ]; then exit 124; fi
+exec "$@"
+`)
 	f.writeCommand("curl", `
 printf '%s\n' "$*" >> "$FAKE_NETWORK_LOG"
 output=
@@ -103,6 +138,8 @@ while [ "$#" -gt 0 ]; do
     case "$1" in --output) output=$2; shift 2 ;; https://*) url=$1; shift ;; *) shift ;; esac
 done
 [ -n "$output" ] && [ -n "$url" ] || exit 1
+[ "${FAKE_DOWNLOAD_FAIL:-}" != manifest ] || { case "$url" in */SHA256SUMS.txt) exit 22 ;; esac; }
+[ "${FAKE_DOWNLOAD_FAIL:-}" != archive ] || { case "$url" in *.tar.gz) exit 22 ;; esac; }
 case "$url" in */SHA256SUMS.txt) cp "$FAKE_SUMS" "$output" ;; *.tar.gz) cp "$FAKE_ARCHIVE" "$output" ;; *) exit 1 ;; esac
 `)
 	f.archive = filepath.Join(f.dir, "release.tar.gz")
@@ -164,6 +201,10 @@ func (f *shellFixture) makeArchive(extra *tar.Header) {
 }
 
 func (f *shellFixture) run(extraEnvironment ...string) (string, error) {
+	return f.runTerminal(false, extraEnvironment...)
+}
+
+func (f *shellFixture) runTerminal(tty bool, extraEnvironment ...string) (string, error) {
 	f.t.Helper()
 	script, err := RenderLinux(f.options)
 	if err != nil {
@@ -176,17 +217,34 @@ func (f *shellFixture) run(extraEnvironment ...string) (string, error) {
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 		f.t.Fatal(err)
 	}
-	command := exec.Command("sh", path)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "sh", path)
+	if tty {
+		if _, err := exec.LookPath("script"); err != nil {
+			f.t.Skip("TTY fixture requires script; it never invokes real system services")
+		}
+		switch runtime.GOOS {
+		case "linux":
+			command = exec.CommandContext(ctx, "script", "--quiet", "--return", "--command", "sh "+shellQuote(path), "/dev/null")
+		case "darwin":
+			command = exec.CommandContext(ctx, "script", "-q", filepath.Join(f.dir, "private-tty.log"), "sh", path)
+		default:
+			f.t.Skip("TTY fixture supports Linux and Darwin script implementations")
+		}
+	}
+	command.WaitDelay = time.Second
 	command.Env = append(os.Environ(),
 		"PATH="+f.bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_INSTALL_ROOT="+f.root, "FAKE_ARCHIVE="+f.archive, "FAKE_SUMS="+f.sums,
-		"FAKE_NETWORK_LOG="+filepath.Join(f.dir, "network.log"), "FAKE_COMMAND_LOG="+filepath.Join(f.dir, "commands.log"))
+		"FAKE_NETWORK_LOG="+filepath.Join(f.dir, "network.log"), "FAKE_COMMAND_LOG="+filepath.Join(f.dir, "commands.log"),
+		"FAKE_READY_COUNT="+filepath.Join(f.dir, "ready.count"), "FAKE_TIMEOUT_LOG="+filepath.Join(f.dir, "timeout.log"))
 	command.Env = append(command.Env, extraEnvironment...)
 	output, err := command.CombinedOutput()
 	if bytes.Contains(output, []byte(f.options.Credential)) {
 		f.t.Fatal("secret appeared in installer output")
 	}
-	for _, name := range []string{"network.log", "commands.log"} {
+	for _, name := range []string{"network.log", "commands.log", "timeout.log"} {
 		data, _ := os.ReadFile(filepath.Join(f.dir, name))
 		if bytes.Contains(data, []byte(f.options.Credential)) {
 			f.t.Fatal("secret appeared in command arguments")
@@ -229,7 +287,7 @@ func TestLinuxInstallChecksumFailureIsRetryable(t *testing.T) {
 	if err := os.WriteFile(f.sums, []byte(strings.Repeat("0", 64)+"  passwall-node_"+f.options.Version+"_linux_amd64.tar.gz\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := f.run(); err == nil || !strings.Contains(output, "checksum verification failed") {
+	if output, err := f.run(); err == nil || !strings.Contains(output, "[4/6] ERROR") || !strings.Contains(output, "checksum verification failed") {
 		t.Fatalf("checksum failure not rejected: %v %s", err, output)
 	}
 	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
@@ -419,4 +477,161 @@ func TestLinuxInstallIgnoresUntrustedArchivePaths(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(f.dir, "outside")); !os.IsNotExist(err) {
 		t.Fatal("unrelated archive path was extracted")
 	}
+}
+
+func TestLinuxInstallPhaseFeedbackFreshAndOfflineRerun(t *testing.T) {
+	f := newShellFixture(t)
+	checkPhases := func(output string) {
+		t.Helper()
+		previous := -1
+		for number := 1; number <= 6; number++ {
+			marker := fmt.Sprintf("Passwall Node [%d/6]", number)
+			index := strings.Index(output, marker)
+			if index <= previous {
+				t.Fatalf("missing/out-of-order phase %d: %s", number, output)
+			}
+			previous = index
+		}
+		for _, required := range []string{"Agent startup confirmed only", "proxy readiness are not confirmed", "verify the server connection, core state and configured nodes in PSP", "test proxy traffic"} {
+			if !strings.Contains(output, required) {
+				t.Fatalf("installer omitted truthful next step %q", required)
+			}
+		}
+	}
+	output, err := f.run()
+	if err != nil {
+		t.Fatalf("fresh installation failed: %v %s", err, output)
+	}
+	checkPhases(output)
+	if !strings.Contains(output, "Download exact release "+f.options.Version+" (linux/amd64)") || !strings.Contains(output, "Verify checksum, archive members and executable version") {
+		t.Fatal("fresh feedback omitted pinned download/checksum verification")
+	}
+	network, _ := os.ReadFile(filepath.Join(f.dir, "network.log"))
+	for _, line := range strings.Split(strings.TrimSpace(string(network)), "\n") {
+		if !strings.HasPrefix(line, "--disable --fail ") {
+			t.Fatal("curl did not disable local configuration as its first argument")
+		}
+	}
+	if bytes.Contains(network, []byte("--progress-bar")) || strings.Count(string(network), "--silent") != 2 {
+		t.Fatal("non-TTY install emitted a curl transfer meter")
+	}
+	output, err = f.run()
+	if err != nil {
+		t.Fatalf("offline rerun failed: %v %s", err, output)
+	}
+	checkPhases(output)
+	if !strings.Contains(output, "download skipped (offline rerun)") || !strings.Contains(output, "checksum download not repeated") || strings.Contains(output, "Downloading release archive") || f.networkCalls() != 2 {
+		t.Fatal("matching rerun feedback did not accurately describe offline retention")
+	}
+}
+
+func TestLinuxInstallDownloadFailureHasPhaseAndRetainsRetry(t *testing.T) {
+	for _, failure := range []string{"manifest", "archive"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newShellFixture(t)
+			output, err := f.run("FAKE_DOWNLOAD_FAIL=" + failure)
+			if err == nil || !strings.Contains(output, "[3/6] ERROR") || !strings.Contains(output, "download failed; no installation was published") {
+				t.Fatalf("download failure omitted phase-specific safe error: %v %s", err, output)
+			}
+			if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+				t.Fatal("download failure published an identity")
+			}
+			if output, err := f.run(); err != nil {
+				t.Fatalf("download retry failed: %v %s", err, output)
+			}
+		})
+	}
+}
+
+func TestLinuxInstallTransferMeterOnlyOnTTY(t *testing.T) {
+	f := newShellFixture(t)
+	if output, err := f.runTerminal(true); err != nil {
+		t.Fatalf("TTY fixture install failed: %v %s", err, output)
+	}
+	network, _ := os.ReadFile(filepath.Join(f.dir, "network.log"))
+	lines := strings.Split(strings.TrimSpace(string(network)), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "--disable --fail ") || !strings.HasPrefix(lines[1], "--disable --fail ") || !strings.Contains(lines[0], "--silent") || !strings.Contains(lines[1], "--progress-bar") || strings.Contains(lines[1], "--silent") {
+		t.Fatal("TTY archive download did not selectively enable the transfer meter")
+	}
+}
+
+func TestLinuxInstallHelperFailureIsPrivateAndRetainsState(t *testing.T) {
+	f := newShellFixture(t)
+	if output, err := f.run(); err != nil {
+		t.Fatalf("initial install failed: %v %s", err, output)
+	}
+	statePath := filepath.Join(f.root, "data", "state.db")
+	if err := os.WriteFile(statePath, []byte("retained-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A helper's raw diagnostic output is untrusted private material, not a
+	// terminal message. The fixture deliberately emits the credential on failure.
+	body := "#!/bin/sh\ncase \"$1\" in\n--upgrade-info) exit 0 ;;\n--enable-remote-upgrade) printf '%s\\n' " + shellQuote(f.options.Credential) + "; exit 1 ;;\nesac\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "passwall-node"), []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := f.run()
+	if err == nil || !strings.Contains(output, "[5/6] ERROR") || !strings.Contains(output, "remote upgrade setup failed") || strings.Contains(output, "[6/6]") || f.networkCalls() != 2 {
+		t.Fatalf("helper failure omitted private phase-specific stop: %v %s", err, output)
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil || string(state) != "retained-state" {
+		t.Fatal("helper failure replaced installed data")
+	}
+}
+
+func TestLinuxInstallUnexpectedFailureStillReportsCurrentPhase(t *testing.T) {
+	f := newShellFixture(t)
+	f.writeCommand("install", "exit 1")
+	output, err := f.run()
+	if err == nil || !strings.Contains(output, "[5/6] ERROR") || !strings.Contains(output, "inspect this phase before retrying") {
+		t.Fatalf("unexpected filesystem failure omitted current phase: %v %s", err, output)
+	}
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Fatal("unexpected failure published an incomplete identity")
+	}
+}
+
+func TestLinuxInstallReadinessRequiresRunningProcessAndIsBounded(t *testing.T) {
+	for _, test := range []struct {
+		name, variable string
+	}{
+		{"failed", "FAKE_ACTIVE_STATE=failed"},
+		{"inactive", "FAKE_ACTIVE_STATE=inactive"},
+		{"not-running", "FAKE_SUB_STATE=exited"},
+		{"zero-pid", "FAKE_MAIN_PID=0"},
+		{"malformed-pid", "FAKE_MAIN_PID=invalid"},
+		{"readiness-timeout", "FAKE_READINESS_TIMEOUT=1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newShellFixture(t)
+			output, err := f.run(test.variable)
+			if err == nil || !strings.Contains(output, "[6/6] ERROR") || !strings.Contains(output, "active/running with a nonzero PID within 30s") || strings.Contains(output, "Agent startup confirmed only") {
+				t.Fatalf("unready process was incorrectly accepted: %v %s", err, output)
+			}
+			credential, err := os.ReadFile(filepath.Join(f.root, "config", "credential"))
+			if err != nil || string(credential) != f.options.Credential+"\n" {
+				t.Fatal("startup check failure discarded the original installed identity")
+			}
+			if output, err := f.run(); err != nil || f.networkCalls() != 2 {
+				t.Fatalf("same-identity offline startup retry failed: %v %s", err, output)
+			}
+		})
+	}
+	t.Run("delayed-running", func(t *testing.T) {
+		f := newShellFixture(t)
+		if output, err := f.run("FAKE_SERVICE_DELAY=1"); err != nil {
+			t.Fatalf("bounded delayed start failed: %v %s", err, output)
+		}
+		timeouts, _ := os.ReadFile(filepath.Join(f.dir, "timeout.log"))
+		for _, required := range []string{"--kill-after=5s 30s systemctl daemon-reload", "--kill-after=5s 30s systemctl enable --now", "--kill-after=1s 30s sh -c", "--kill-after=1s 3s systemctl show"} {
+			if !bytes.Contains(timeouts, []byte(required)) {
+				t.Fatalf("startup omitted a real command/deadline bound %q", required)
+			}
+		}
+		commands, _ := os.ReadFile(filepath.Join(f.dir, "commands.log"))
+		if strings.Contains(strings.ToLower(string(commands)), "restart") || strings.Contains(string(commands), "x-ui") {
+			t.Fatal("process readiness changed/restarted another service")
+		}
+	})
 }

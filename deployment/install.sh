@@ -6,7 +6,20 @@ set -eu
 umask 077
 unset ENV BASH_ENV CDPATH credential
 
-fail() { printf '%s\n' "passwall-node install: $1" >&2; exit 1; }
+phase_number=1
+phase_name=preflight
+failure_reported=0
+phase() {
+    phase_number=$1
+    phase_name=$2
+    printf 'Passwall Node [%s/6] %s\n' "$phase_number" "$phase_name"
+}
+fail() {
+    failure_reported=1
+    printf 'Passwall Node [%s/6] ERROR (%s): %s\n' "$phase_number" "$phase_name" "$1" >&2
+    exit 1
+}
+phase 1 'Check platform and prerequisites'
 [ "$(id -u)" = 0 ] || fail 'run this private script as root'
 [ "$(uname -s)" = Linux ] || fail 'only Linux is supported by this installer'
 case "$(uname -m)" in
@@ -14,8 +27,8 @@ case "$(uname -m)" in
     aarch64|arm64) arch=arm64 ;;
     *) fail 'only amd64 and arm64 are supported' ;;
 esac
-for tool in curl sha256sum tar awk mktemp install getent useradd chown cmp mv mkdir chmod rm rmdir systemctl; do
-    command -v "$tool" >/dev/null 2>&1 || fail 'a required installation command is unavailable'
+for tool in curl sha256sum tar awk mktemp install getent useradd chown cmp mv mkdir chmod rm rmdir systemctl timeout sleep; do
+    command -v "$tool" >/dev/null 2>&1 || fail "required installation command is unavailable: $tool"
 done
 [ -d /run/systemd/system ] || fail 'a running systemd host is required'
 
@@ -31,10 +44,15 @@ lock=/opt/.passwall-node-install.lock
 stage=
 unit_tmp=
 cleanup() {
+    result=$?
+    if [ "$result" -ne 0 ] && [ "$failure_reported" = 0 ]; then
+        printf 'Passwall Node [%s/6] ERROR (%s): installation stopped; inspect this phase before retrying\n' "$phase_number" "$phase_name" >&2
+    fi
     [ -z "$stage" ] || rm -rf -- "$stage"
     [ -z "$unit_tmp" ] || rm -f -- "$unit_tmp"
     rmdir "$lock" 2>/dev/null || true
 }
+phase 2 'Check installation identity and exact version'
 mkdir "$lock" 2>/dev/null || fail 'another installation is running; inspect the installation lock manually'
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -59,14 +77,27 @@ if [ -e "$root" ] || [ -L "$root" ]; then
     [ -d "$root/config" ] && [ ! -L "$root/config" ] && [ -d "$root/data" ] && [ ! -L "$root/data" ] || fail 'existing installation directories require manual inspection'
     [ -d "$root/bin" ] && [ ! -L "$root/bin" ] && [ -f "$root/bin/passwall-node" ] && [ ! -L "$root/bin/passwall-node" ] && [ -x "$root/bin/passwall-node" ] || fail 'existing binary requires manual repair'
     [ -f "$root/passwall-node.service" ] && [ ! -L "$root/passwall-node.service" ] || fail 'existing service definition requires manual repair'
+    phase 3 'Matching installation retained; download skipped (offline rerun)'
+    phase 4 'Existing exact release retained; checksum download not repeated'
+    phase 5 'Retain identity and state; configure service and optional upgrade helper'
 else
     package="passwall-node_${version}_linux_${arch}"
     asset="${package}.tar.gz"
     base="https://github.com/KazuhaHub/Passwall-Node/releases/download/${version}"
+    phase 3 "Download exact release $version (linux/$arch)"
     # Checksums detect corruption against the same trusted HTTPS release; they
     # are not a signature or protection against compromise of the publisher.
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --output "$stage/SHA256SUMS.txt" "$base/SHA256SUMS.txt"
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 300 --output "$stage/$asset" "$base/$asset"
+    # --disable must be first: local curl config must not override transport,
+    # output or terminal-progress policy for this private installer.
+    printf '%s\n' '  Downloading checksum manifest...'
+    curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --output "$stage/SHA256SUMS.txt" "$base/SHA256SUMS.txt" || fail 'checksum manifest download failed; no installation was published'
+    printf '%s\n' '  Downloading release archive...'
+    if [ -t 2 ]; then
+        curl --disable --fail --progress-bar --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 300 --output "$stage/$asset" "$base/$asset" || fail 'release archive download failed; no installation was published'
+    else
+        curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 300 --output "$stage/$asset" "$base/$asset" || fail 'release archive download failed; no installation was published'
+    fi
+    phase 4 'Verify checksum, archive members and executable version'
     awk -v name="$asset" '$2 == name || $2 == "*" name { count++; sum=$1 } END { if (count != 1 || length(sum) != 64 || sum ~ /[^0-9a-fA-F]/) exit 1; print sum "  " name }' "$stage/SHA256SUMS.txt" > "$stage/selected.sha256" || fail 'release checksum entry is missing, duplicated or invalid'
     (cd "$stage" && sha256sum --check --status selected.sha256) || fail 'release checksum verification failed'
     mkdir "$stage/bundle"
@@ -90,6 +121,7 @@ else
     IFS=' ' read -r binary_version ignored < "$stage/binary-version"
     [ "$binary_version" = "$version" ] || fail 'release binary version does not match the selected release'
 
+    phase 5 'Publish installation; configure service and optional upgrade helper'
     if ! getent passwd passwall-node > "$stage/account"; then
         useradd --system --user-group --home-dir "$root" --no-create-home --shell /usr/sbin/nologin passwall-node || fail 'cannot create the dedicated service account'
         getent passwd passwall-node > "$stage/account" || fail 'cannot inspect the service account'
@@ -152,8 +184,33 @@ unit_tmp=
 # binaries explicitly install the separate root helper, without changing the
 # non-root agent unit or exposing an unauthenticated network upgrade endpoint.
 if "$root/bin/passwall-node" --upgrade-info >/dev/null 2>&1; then
-    "$root/bin/passwall-node" --enable-remote-upgrade || fail 'remote upgrade setup failed; installed identity and data were retained'
+    printf '%s\n' '  Configuring supported remote-upgrade helper...'
+    "$root/bin/passwall-node" --enable-remote-upgrade > "$stage/helper-setup" 2>&1 || fail 'remote upgrade setup failed; installed identity and data were retained'
+else
+    printf '%s\n' '  This release has no remote-upgrade helper; original behavior retained.'
 fi
-systemctl daemon-reload || fail 'systemd reload failed; installed identity and data were retained'
-systemctl enable --now passwall-node.service || fail 'service startup failed; installed identity and data were retained'
-printf '%s\n' 'Passwall-Node installed; identity and state retained under /opt/passwall-node. Delete this private installation script securely.'
+phase 6 'Start systemd service; agent process check has a 30s deadline'
+printf '%s\n' '  Reloading systemd (30s deadline)...'
+timeout --kill-after=5s 30s systemctl daemon-reload > "$stage/systemd-reload" 2>&1 || fail 'systemd reload failed or timed out; installed identity and data were retained'
+printf '%s\n' '  Enabling and starting service (30s deadline)...'
+timeout --kill-after=5s 30s systemctl enable --now passwall-node.service > "$stage/systemd-start" 2>&1 || fail 'service startup failed or timed out; installed identity and data were retained'
+printf '%s\n' '  Waiting for active/running and a nonzero agent PID (30s total)...'
+# The outer deadline bounds the entire polling loop; every individual D-Bus
+# read also has a short bound. This proves only startup, not sync/proxy health.
+timeout --kill-after=1s 30s sh -c '
+    set -eu
+    while :; do
+        active=$(timeout --kill-after=1s 3s systemctl show passwall-node.service --property=ActiveState --value 2>/dev/null) || exit 1
+        sub=$(timeout --kill-after=1s 3s systemctl show passwall-node.service --property=SubState --value 2>/dev/null) || exit 1
+        pid=$(timeout --kill-after=1s 3s systemctl show passwall-node.service --property=MainPID --value 2>/dev/null) || exit 1
+        case "$pid" in
+            ""|*[!0-9]*) ;;
+            *) if [ "$active" = active ] && [ "$sub" = running ] && [ "$pid" -gt 0 ]; then exit 0; fi ;;
+        esac
+        [ "$active" != failed ] || exit 1
+        sleep 1
+    done
+' || fail 'agent did not reach active/running with a nonzero PID within 30s; installed identity and data were retained'
+printf '%s\n' 'Passwall Node installed; identity and state retained under /opt/passwall-node.'
+printf '%s\n' 'Agent startup confirmed only. PSP sync, core and proxy readiness are not confirmed by this installer.'
+printf '%s\n' 'Next: verify the server connection, core state and configured nodes in PSP, then test proxy traffic. Delete this private installation script securely.'
