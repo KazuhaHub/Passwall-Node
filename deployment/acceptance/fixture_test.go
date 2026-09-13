@@ -151,3 +151,105 @@ func emptyFixtureReport(agentID string) protocol.NodeReport {
 		protocol.StreamConfig: {}, protocol.StreamRoster: {}, protocol.StreamDirectives: {},
 	}}
 }
+
+func installerFeedbackFixture(offline bool) string {
+	steps := []string{
+		"Passwall Node [1/6] Check platform and prerequisites",
+		"Passwall Node [2/6] Check installation identity and exact version",
+		"Passwall Node [3/6] Download exact release v0.0.1-beta3 (linux/amd64)",
+		"  Downloading checksum manifest...",
+		"  Downloading release archive...",
+		"Passwall Node [4/6] Verify checksum, archive members and executable version",
+		"Passwall Node [5/6] Publish installation; configure service and optional upgrade helper",
+		"Passwall Node [6/6] Start systemd service; agent process check has a 30s deadline",
+		"Agent startup confirmed only. PSP sync, core and proxy readiness are not confirmed by this installer.",
+		"Next: verify the server connection, core state and configured nodes in PSP, then test proxy traffic. Delete this private installation script securely.",
+	}
+	if offline {
+		steps[2] = "Passwall Node [3/6] Matching installation retained; download skipped (offline rerun)"
+		steps[3], steps[4] = "", ""
+		steps[5] = "Passwall Node [4/6] Existing exact release retained; checksum download not repeated"
+		steps[6] = "Passwall Node [5/6] Retain identity and state; configure service and optional upgrade helper"
+	}
+	return strings.Join(steps, "\n") + "\n"
+}
+
+func TestInstallerFeedbackRequiresSixOrderedPhasesAndStartupOnlyNotices(t *testing.T) {
+	for _, offline := range []bool{false, true} {
+		if err := checkInstallerFeedback([]byte(installerFeedbackFixture(offline)), offline); err != nil {
+			t.Fatal("complete installer feedback was rejected")
+		}
+	}
+	fresh := installerFeedbackFixture(false)
+	for _, test := range []struct {
+		name, output string
+	}{
+		{"missing-phase", strings.Replace(fresh, "Passwall Node [4/6] ", "omitted phase ", 1)},
+		{"duplicate-phase", fresh + "Passwall Node [2/6] duplicate\n"},
+		{"reordered-phase", strings.NewReplacer("[1/6]", "[2/6]", "[2/6]", "[1/6]").Replace(fresh)},
+		{"missing-startup-only", strings.Replace(fresh, "Agent startup confirmed only.", "", 1)},
+		{"missing-readiness-limit", strings.Replace(fresh, "PSP sync, core and proxy readiness are not confirmed by this installer.", "", 1)},
+		{"missing-next-verification", strings.Replace(fresh, "verify the server connection, core state and configured nodes in PSP, then test proxy traffic.", "", 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := checkInstallerFeedback([]byte(test.output), false); err == nil {
+				t.Fatal("incomplete or reordered installer feedback was accepted")
+			}
+		})
+	}
+}
+
+func TestInstallerFeedbackRejectsMissingOrMixedDownloadAndOfflinePaths(t *testing.T) {
+	fresh, offline := installerFeedbackFixture(false), installerFeedbackFixture(true)
+	tests := []struct {
+		name, output string
+		offline      bool
+	}{
+		{"fresh-cannot-prove-offline", fresh, true},
+		{"offline-cannot-prove-fresh", offline, false},
+	}
+	for _, token := range []string{
+		"Download exact release ", "Downloading checksum manifest...",
+		"Downloading release archive...", "Verify checksum, archive members and executable version",
+	} {
+		tests = append(tests, struct {
+			name, output string
+			offline      bool
+		}{"missing-fresh-" + token, strings.Replace(fresh, token, "", 1), false})
+		tests = append(tests, struct {
+			name, output string
+			offline      bool
+		}{"mixed-offline-" + token, offline + token + "\n", true})
+	}
+	for _, token := range []string{
+		"Matching installation retained; download skipped (offline rerun)",
+		"Existing exact release retained; checksum download not repeated",
+	} {
+		tests = append(tests, struct {
+			name, output string
+			offline      bool
+		}{"missing-offline-" + token, strings.Replace(offline, token, "", 1), true})
+		tests = append(tests, struct {
+			name, output string
+			offline      bool
+		}{"mixed-fresh-" + token, fresh + token + "\n", false})
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := checkInstallerFeedback([]byte(test.output), test.offline); err == nil {
+				t.Fatal("missing or contradictory path feedback was accepted")
+			}
+		})
+	}
+}
+
+func TestInstallerFeedbackFailureWithholdsCapturedPrivateOutput(t *testing.T) {
+	private := "pspn_private_feedback_credential https://private.invalid/install-ticket"
+	output := installerFeedbackFixture(false) + "Passwall Node [2/6] duplicate " + private + "\n"
+	err := checkInstallerFeedback([]byte(output), false)
+	if err == nil || !strings.Contains(err.Error(), "private output withheld") ||
+		strings.Contains(err.Error(), "pspn_private_feedback_credential") ||
+		strings.Contains(err.Error(), "private.invalid") || strings.Contains(err.Error(), output) {
+		t.Fatal("feedback rejection did not safely withhold private diagnostics")
+	}
+}

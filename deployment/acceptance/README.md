@@ -6,9 +6,11 @@ the root/GitHub-hosted environment and refuses any existing installation,
 systemd unit, installation lock or `passwall-node` account before mutation.
 
 Dispatch `.github/workflows/installation-acceptance.yml` after the exact public
-release (default `v0.0.1-beta2`) has finished publishing. Both `ubuntu-24.04` and
+release (default `v0.0.1-beta4`) has finished publishing. Both `ubuntu-24.04` and
 `ubuntu-24.04-arm` execute the real installer and the **published binary**, not a
 locally built agent. The acceptance tool itself is built from the checkout.
+Before beta4 publication, dispatch the candidate checkout with an explicit
+`version=v0.0.1-beta3` to test the new installer against the existing public binary.
 
 The fixture generates an independent temporary AgentID and credential, listens
 only on `127.0.0.1` with HTTPS beneath a PSP-shaped panel prefix, and requires the
@@ -19,6 +21,10 @@ no production proxy listeners or clients.
 
 The gate checks:
 
+- All six installer phases occur once and in order on fresh install, offline
+  rerun and fresh reinstall. Download/skip feedback must match the actual path;
+  startup-only notices remain distinct from the core/report checks below. Only
+  safe assertion counts and booleans are printed, never captured private output.
 - Real systemd `active/running`, MainPID and all process UIDs non-root, plus an
   authenticated fresh report followed by acknowledgement of all three streams.
 - Exact published version verification by the unmodified installer; private

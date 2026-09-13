@@ -38,11 +38,12 @@ type acceptance struct {
 	temporaryDir, scriptPath, caPath    string
 	caCreated, rootOwned, unitOwned     bool
 	pausedPID                           int
+	feedbackChecks                      int
 	fixture                             *controlPlaneFixture
 }
 
 func main() {
-	version := flag.String("version", "v0.0.1-beta2", "exact already-public release to install")
+	version := flag.String("version", "v0.0.1-beta4", "exact already-public release to install")
 	flag.Parse()
 	if err := runAcceptance(*version); err != nil {
 		fmt.Fprintln(os.Stderr, "installation acceptance failed:", err)
@@ -133,13 +134,18 @@ func runAcceptance(version string) (resultErr error) {
 	if _, err := a.command("update-ca-certificates"); err != nil {
 		return err
 	}
-	if _, err := a.command("sh", a.scriptPath); err != nil {
+	installerOutput, err := a.command("sh", a.scriptPath)
+	if err != nil {
 		a.claimOwnedInstallation() // Recover only an identity proven to have been published by this run.
 		return err
 	}
 	if err := a.claimOwnedInstallation(); err != nil {
 		return err
 	}
+	if err := checkInstallerFeedback(installerOutput, false); err != nil {
+		return err
+	}
+	a.feedbackChecks++
 	if err := a.waitForFixture(); err != nil {
 		return err
 	}
@@ -170,9 +176,14 @@ func runAcceptance(version string) (resultErr error) {
 	// only this invocation lacks all network interfaces in a fresh namespace.
 	// systemd is reached through its real Unix socket; the already-active paused
 	// unit must be a no-op, so this tests rerun without concurrent SQLite writes.
-	if _, err := a.command("unshare", "--net", "--", "sh", a.scriptPath); err != nil {
+	installerOutput, err = a.command("unshare", "--net", "--", "sh", a.scriptPath)
+	if err != nil {
 		return err
 	}
+	if err := checkInstallerFeedback(installerOutput, true); err != nil {
+		return err
+	}
+	a.feedbackChecks++
 	afterDB, err := a.databaseManifest()
 	if err != nil || !sameManifest(firstDB, afterDB) {
 		return errors.New("offline reinstall invocation changed SQLite bytes or inode")
@@ -208,13 +219,18 @@ func runAcceptance(version string) (resultErr error) {
 		return err
 	}
 	a.fixture.beginReinstall() // Document version/ETag and credential remain fixed.
-	if _, err := a.command("sh", a.scriptPath); err != nil {
+	installerOutput, err = a.command("sh", a.scriptPath)
+	if err != nil {
 		a.claimOwnedInstallation()
 		return err
 	}
 	if err := a.claimOwnedInstallation(); err != nil {
 		return err
 	}
+	if err := checkInstallerFeedback(installerOutput, false); err != nil {
+		return err
+	}
+	a.feedbackChecks++
 	if err := a.waitForFixture(); err != nil {
 		return err
 	}
@@ -237,12 +253,17 @@ func runAcceptance(version string) (resultErr error) {
 	if err != nil || bytes.Equal(firstEpoch, secondEpoch) {
 		return errors.New("fresh SQLite installation reused its previous core-counter namespace")
 	}
+	if a.feedbackChecks != 3 {
+		return errors.New("installer feedback was not checked on all three real installations")
+	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"scope":   "empty-stream authenticated TLS/systemd/offline-rerun/fresh-reinstall; not PSP business or proxy-traffic acceptance",
 		"version": version, "architecture": runtime.GOARCH, "agent_id": a.agentID, "service_uid": uid,
 		"initial_reports": firstObservation.Reports, "reinstall_reports": a.fixture.snapshot().Reports,
 		"binary_sha256":            firstStatic[installationRoot+"/bin/passwall-node"].SHA256,
 		"offline_sqlite_unchanged": true, "fixed_identity_unchanged": true, "fresh_core_epoch": true,
+		"installer_feedback_checks": a.feedbackChecks, "installer_six_phases_ordered": true,
+		"installer_offline_skip_checked": true, "installer_startup_only_notice_checked": true,
 	})
 }
 

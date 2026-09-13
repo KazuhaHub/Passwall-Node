@@ -39,6 +39,19 @@ jobs:
         run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
       - name: Unit and integration tests
         run: go test ./...
+      - name: Require named Linux PTY transfer-meter test to run and pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go env GOHOSTOS)" = linux
+          command -v script > /dev/null
+          go test -v ./deployment -run '^TestLinuxInstallTransferMeterOnlyOnTTY$' -count=1 -timeout=1m \
+            | tee "$RUNNER_TEMP/install-pty-test.log"
+          awk '
+            /^--- PASS: TestLinuxInstallTransferMeterOnlyOnTTY / { passed++ }
+            /^[[:space:]]*--- (SKIP|FAIL):/ { rejected++ }
+            END { exit !(passed == 1 && rejected == 0) }
+          ' "$RUNNER_TEMP/install-pty-test.log"
       - name: Race detector
         run: go test -race ./...
       - name: Reachable vulnerability check
