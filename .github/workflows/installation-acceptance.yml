@@ -8,7 +8,7 @@ on:
       version:
         description: "Already published exact Node release"
         required: true
-        default: "v0.0.1-beta2"
+        default: "v0.0.1-beta4"
         type: string
 
 permissions:
