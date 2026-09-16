@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultPollInterval = 30 * time.Second
+	defaultPollInterval = time.Duration(protocol.DefaultNextPollSeconds) * time.Second
 	maxFailureBackoff   = 30 * time.Second
 )
 

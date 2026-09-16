@@ -14,6 +14,11 @@ const (
 )
 
 const (
+	// DefaultNextPollSeconds is the fail-safe cadence used when PSP does not
+	// provide a positive next-poll interval.
+	DefaultNextPollSeconds = 30
+	// DefaultFullReportSeconds is PSP's default requested enumeration cadence.
+	DefaultFullReportSeconds = 60
 	// MaxNextPollSeconds bounds the steady-state reconnect cadence. PSP exposes
 	// the same one-hour upper bound in settings.
 	MaxNextPollSeconds = 3600

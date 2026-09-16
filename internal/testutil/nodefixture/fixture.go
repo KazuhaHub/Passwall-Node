@@ -76,7 +76,7 @@ func fixtureSegment[T any](version protocol.Version, body T) protocol.Segment[T]
 }
 
 func conditionalFixtureSegment[T any](segment protocol.Segment[T], have protocol.StreamState) protocol.Segment[T] {
-	if have.ETag == segment.ETag {
+	if protocol.Converged(have.ETag, segment.ETag) {
 		segment.Unchanged, segment.Body = true, nil
 	}
 	return segment

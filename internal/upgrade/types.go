@@ -14,13 +14,10 @@ import (
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
 
-const TaskKind = "agent.upgrade.v1"
+const TaskKind = protocol.TaskKindAgentUpgradeV1
 const InstallRoot = "/opt/passwall-node"
 
-type Args struct {
-	Version         string `json:"version"`
-	ExpectedVersion string `json:"expected_version"`
-}
+type Args = protocol.AgentUpgradeArgs
 
 // A same-boot elapsed deadline prevents a stale filesystem request from becoming
 // a new upgrade authorization after restart, suspend, or wall-clock changes.
@@ -31,12 +28,7 @@ type Request struct {
 	AuthorizedUntilBoottimeNS int64         `json:"authorized_until_boottime_ns"`
 }
 
-type Result struct {
-	Version         string `json:"version"`
-	PreviousVersion string `json:"previous_version"`
-	BinarySHA256    string `json:"binary_sha256"`
-	Restarted       bool   `json:"restarted"`
-}
+type Result = protocol.AgentUpgradeResult
 
 type Receipt struct {
 	Request         Request `json:"request"`
@@ -137,12 +129,12 @@ func checkJSONShape(d *json.Decoder, t reflect.Type) error {
 }
 
 func ParseArgs(task protocol.Task) (Args, error) {
-	var args Args
 	if task.Kind != TaskKind || task.NotAfterMS <= 0 || protocol.ValidateTasks([]protocol.Task{task}) != nil {
-		return args, errors.New("upgrade requires a valid identity-bound task and start deadline")
+		return Args{}, errors.New("upgrade requires a valid identity-bound task and start deadline")
 	}
-	if err := DecodeStrict(task.Args, &args); err != nil {
-		return args, err
+	args, err := protocol.DecodeAgentUpgradeArgs(task.Args)
+	if err != nil {
+		return Args{}, err
 	}
 	if !deployment.ValidReleaseVersion(args.Version) || !deployment.ValidReleaseVersion(args.ExpectedVersion) ||
 		CompareVersions(args.Version, args.ExpectedVersion) <= 0 {
