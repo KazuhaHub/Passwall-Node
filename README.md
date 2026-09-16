@@ -243,8 +243,19 @@ download URL, shell command or additional public node endpoint.
 
 The daemon stays non-root with its original filesystem sandbox. A separate
 root-owned systemd path/oneshot controller downloads the official archive,
-checks SHA-256 and native build identity, then stops the agent gracefully and
-atomically replaces its binary, version metadata and bundled licence files.
+authenticates the release checksum manifest with the Ed25519 public key compiled
+into the agent, checks the selected archive's SHA-256 and native build identity,
+then stops the agent gracefully and atomically replaces its binary, version
+metadata and bundled licence files. The signature is verified before the
+archive is downloaded, extracted or executed; a replacement archive plus a
+matching replacement checksum file is therefore rejected without the separate
+release-signing key.
+
+Agents predating signed-manifest verification cannot authenticate the first
+signed release retroactively. Install that transition release through a
+manually verified maintenance path; every later native upgrade then fails
+closed unless the manifest has a valid release signature.
+
 Credential, endpoint, identity, SQLite state and desired core selection are
 retained. The helper confirms the new non-root MainPID/executable digest plus
 fresh local activation evidence after authenticated sync and **strict** core

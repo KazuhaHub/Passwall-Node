@@ -140,12 +140,23 @@ jobs:
     name: Publish GitHub release
     runs-on: ubuntu-latest
     needs: [setup, build]
+    # The private signing key is scoped to this protected environment. Approve
+    # only after reviewing the exact tag plus signing code/workflow diff;
+    # release assets remain unusable by native auto-upgrade until this job
+    # signs their manifest.
+    environment: release-signing
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.setup.outputs.sha }}
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Download binaries
         uses: actions/download-artifact@v8
         with:
@@ -179,6 +190,15 @@ jobs:
             fi
           done
           (cd dist && sha256sum * > SHA256SUMS.txt)
+      - name: Sign checksum manifest
+        shell: bash
+        env:
+          PN_RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.PN_RELEASE_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          go run ./deployment/cmd/sign-release \
+            -manifest dist/SHA256SUMS.txt \
+            -output dist/SHA256SUMS.txt.sig
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:

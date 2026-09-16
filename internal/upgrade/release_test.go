@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
 )
 
 type releaseRoundTrip func(*http.Request) (*http.Response, error)
@@ -72,12 +77,45 @@ func validReleaseEntries(version string) []releaseEntry {
 	}
 }
 
+var releaseTestSeed = sha256.Sum256([]byte("Passwall-Node upgrade release test key"))
+var releaseTestPrivateKey = ed25519.NewKeyFromSeed(releaseTestSeed[:])
+var releaseTestPublicKey = releaseTestPrivateKey.Public().(ed25519.PublicKey)
+
+func signTestManifest(manifest string) string {
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(releaseTestPrivateKey, []byte(manifest))) + "\n"
+}
+
+func verifyTestManifest(manifest, encodedSignature []byte) error {
+	signature, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(string(encodedSignature)))
+	if err != nil || !ed25519.Verify(releaseTestPublicKey, manifest, signature) {
+		return fmt.Errorf("test release manifest signature verification failed")
+	}
+	return nil
+}
+
+func newTestReleaseFetcher(t *testing.T, options ReleaseFetcherOptions) *ReleaseFetcher {
+	t.Helper()
+	options.verifyManifest = verifyTestManifest
+	fetcher, err := NewReleaseFetcher(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fetcher
+}
+
 func fakeReleaseClient(t *testing.T, version string, archive []byte, checksums string) *http.Client {
+	return fakeReleaseClientWithSignature(t, version, archive, checksums, "")
+}
+
+func fakeReleaseClientWithSignature(t *testing.T, version string, archive []byte, checksums, signature string) *http.Client {
 	t.Helper()
 	asset := "passwall-node_" + version + "_linux_" + runtime.GOARCH + ".tar.gz"
 	if checksums == "" {
 		digest := sha256.Sum256(archive)
 		checksums = hex.EncodeToString(digest[:]) + "  " + asset + "\n"
+	}
+	if signature == "" {
+		signature = signTestManifest(checksums)
 	}
 	return &http.Client{Transport: releaseRoundTrip(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.Host != "github.com" {
@@ -87,6 +125,8 @@ func fakeReleaseClient(t *testing.T, version string, archive []byte, checksums s
 		switch request.URL.String() {
 		case releaseDownloadBase + version + "/SHA256SUMS.txt":
 			content = []byte(checksums)
+		case releaseDownloadBase + version + "/" + releaseauth.SignatureAssetName:
+			content = []byte(signature)
 		case releaseDownloadBase + version + "/" + asset:
 			content = archive
 		default:
@@ -103,10 +143,7 @@ func TestReleaseFetchPrivateCandidate(t *testing.T) {
 	version := "v0.0.1-beta3"
 	archive := releaseArchive(t, validReleaseEntries(version))
 	root := filepath.Join(t.TempDir(), "staging")
-	fetcher, err := NewReleaseFetcher(ReleaseFetcherOptions{RootDir: root, HTTPClient: fakeReleaseClient(t, version, archive, "")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fetcher := newTestReleaseFetcher(t, ReleaseFetcherOptions{RootDir: root, HTTPClient: fakeReleaseClient(t, version, archive, "")})
 	candidate, err := fetcher.Fetch(context.Background(), version)
 	if err != nil {
 		t.Fatal(err)
@@ -163,10 +200,7 @@ func TestReleaseRejectsBadArchiveAndCleansStage(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			archive := releaseArchive(t, modify(validReleaseEntries(version)))
 			root := filepath.Join(t.TempDir(), "staging")
-			f, err := NewReleaseFetcher(ReleaseFetcherOptions{RootDir: root, HTTPClient: fakeReleaseClient(t, version, archive, "")})
-			if err != nil {
-				t.Fatal(err)
-			}
+			f := newTestReleaseFetcher(t, ReleaseFetcherOptions{RootDir: root, HTTPClient: fakeReleaseClient(t, version, archive, "")})
 			if _, err := f.Fetch(context.Background(), version); err == nil {
 				t.Fatal("unsafe archive accepted")
 			}
@@ -204,13 +238,54 @@ func TestReleaseDigestAndLimits(t *testing.T) {
 		{HTTPClient: fakeReleaseClient(t, version, archive, ""), MaxBinaryBytes: 1},
 	} {
 		options.RootDir = filepath.Join(t.TempDir(), "stage")
-		f, err := NewReleaseFetcher(options)
-		if err != nil {
-			t.Fatal(err)
-		}
+		f := newTestReleaseFetcher(t, options)
 		if _, err := f.Fetch(context.Background(), version); err == nil {
 			t.Fatal("corruption or limit violation accepted")
 		}
+	}
+}
+
+// The checksum and archive share one mutable release origin, so an attacker can
+// replace both and make their hashes agree. The independently pinned signature
+// must reject that pair before the archive is downloaded, extracted, or run.
+// Removing the manifest verification makes this fixture fetch and execute the
+// matching tampered archive, turning the test red on every asserted boundary.
+func TestReleaseRejectsMatchingTamperedArchiveAndChecksumBeforeExecution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native shell fixture requires Unix")
+	}
+	version := "v0.0.1-beta3"
+	marker := filepath.Join(t.TempDir(), "executed")
+	entries := validReleaseEntries(version)
+	entries[1].data = "#!/bin/sh\ntouch '" + marker + "'\nprintf '%s\\n' '" + version + " (dc5270c)'\n"
+	tamperedArchive := releaseArchive(t, entries)
+	asset := "passwall-node_" + version + "_linux_" + runtime.GOARCH + ".tar.gz"
+	tamperedDigest := sha256.Sum256(tamperedArchive)
+	tamperedChecksums := hex.EncodeToString(tamperedDigest[:]) + "  " + asset + "\n"
+
+	// The signature authenticates a different, legitimate manifest. Both
+	// attacker-controlled files agree with each other but not with this signature.
+	honestManifest := strings.Repeat("0", 64) + "  " + asset + "\n"
+	client := fakeReleaseClientWithSignature(t, version, tamperedArchive, tamperedChecksums, signTestManifest(honestManifest))
+	assetRequests := 0
+	transport := client.Transport
+	client.Transport = releaseRoundTrip(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == releaseDownloadBase+version+"/"+asset {
+			assetRequests++
+		}
+		return transport.RoundTrip(request)
+	})
+	fetcher := newTestReleaseFetcher(t, ReleaseFetcherOptions{
+		RootDir: filepath.Join(t.TempDir(), "stage"), HTTPClient: client,
+	})
+	if _, err := fetcher.Fetch(context.Background(), version); err == nil {
+		t.Fatal("matching tampered archive and checksum were accepted")
+	}
+	if assetRequests != 0 {
+		t.Fatalf("archive was downloaded before its manifest was authenticated: %d requests", assetRequests)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("untrusted downloaded content executed before signature verification: %v", err)
 	}
 }
 
@@ -234,10 +309,7 @@ func TestReleaseGzipTrailerAndStreamingLimit(t *testing.T) {
 			if name == "streaming-limit" {
 				options.MaxArchiveBytes = 1
 			}
-			f, err := NewReleaseFetcher(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			f := newTestReleaseFetcher(t, options)
 			if _, err := f.Fetch(context.Background(), version); err == nil {
 				t.Fatal("invalid gzip or overlong undeclared body accepted")
 			}

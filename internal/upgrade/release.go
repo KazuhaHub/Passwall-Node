@@ -22,11 +22,13 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/deployment"
+	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
 )
 
 const (
 	releaseDownloadBase = "https://github.com/KazuhaHub/Passwall-Node/releases/download/"
 	maxChecksumBytes    = 256 << 10
+	maxSignatureBytes   = 4 << 10
 	maxLicenseBytes     = 1 << 20
 	maxArchiveMembers   = 128
 	maxVersionOutput    = 4096
@@ -44,6 +46,7 @@ type ReleaseFetcherOptions struct {
 	MaxArchiveBytes int64
 	MaxBinaryBytes  int64
 	CommandTimeout  time.Duration
+	verifyManifest  func([]byte, []byte) error
 }
 
 // Candidate is verified but not activated. The caller owns Dir after success;
@@ -66,6 +69,7 @@ type ReleaseFetcher struct {
 	archiveLimit   int64
 	binaryLimit    int64
 	commandTimeout time.Duration
+	verifyManifest func([]byte, []byte) error
 }
 
 func NewReleaseFetcher(options ReleaseFetcherOptions) (*ReleaseFetcher, error) {
@@ -93,6 +97,9 @@ func NewReleaseFetcher(options ReleaseFetcherOptions) (*ReleaseFetcher, error) {
 	}
 	if options.CommandTimeout < 0 || options.CommandTimeout > defaultVerifyLimit {
 		return nil, errors.New("upgrade verification timeout must be positive and at most twenty seconds")
+	}
+	if options.verifyManifest == nil {
+		options.verifyManifest = releaseauth.VerifyManifest
 	}
 	client := http.Client{}
 	if options.HTTPClient != nil {
@@ -124,7 +131,7 @@ func NewReleaseFetcher(options ReleaseFetcherOptions) (*ReleaseFetcher, error) {
 	return &ReleaseFetcher{
 		rootDir: options.RootDir, client: &client, goarch: options.GOARCH,
 		archiveLimit: options.MaxArchiveBytes, binaryLimit: options.MaxBinaryBytes,
-		commandTimeout: options.CommandTimeout,
+		commandTimeout: options.CommandTimeout, verifyManifest: options.verifyManifest,
 	}, nil
 }
 
@@ -157,9 +164,20 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	if _, err := f.download(ctx, releaseDownloadBase+version+"/SHA256SUMS.txt", checksumsPath, maxChecksumBytes); err != nil {
 		return Candidate{}, err
 	}
+	signaturePath := filepath.Join(dir, releaseauth.SignatureAssetName)
+	if _, err := f.download(ctx, releaseDownloadBase+version+"/"+releaseauth.SignatureAssetName, signaturePath, maxSignatureBytes); err != nil {
+		return Candidate{}, err
+	}
 	checksums, err := os.ReadFile(checksumsPath)
 	if err != nil {
 		return Candidate{}, errors.New("read staged upgrade checksums failed")
+	}
+	signature, err := os.ReadFile(signaturePath)
+	if err != nil {
+		return Candidate{}, errors.New("read staged upgrade checksum signature failed")
+	}
+	if err := f.verifyManifest(checksums, signature); err != nil {
+		return Candidate{}, fmt.Errorf("authenticate upgrade release manifest: %w", err)
 	}
 	wantDigest, err := releaseChecksum(checksums, assetName)
 	if err != nil {
@@ -185,7 +203,7 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	if err := verifyReleaseBinary(ctx, candidate.BinaryPath, version, f.commandTimeout); err != nil {
 		return Candidate{}, err
 	}
-	for _, temporary := range []string{checksumsPath, archivePath} {
+	for _, temporary := range []string{checksumsPath, signaturePath, archivePath} {
 		if err := os.Remove(temporary); err != nil {
 			return Candidate{}, errors.New("remove temporary upgrade download failed")
 		}
