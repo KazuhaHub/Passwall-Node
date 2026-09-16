@@ -135,6 +135,15 @@ repairs only the persistent volume ownership, then drops permanently to UID/GID
 10001. The root filesystem is read-only and the service keeps only the three
 capabilities needed for that startup transition.
 
+The optional `passwall-node-updater` service enables PSP's authenticated remote
+upgrade task for Docker deployments. The network-facing Agent never receives
+the Docker socket. Only the isolated, network-disabled updater mounts it; Docker
+socket access is nevertheless root-equivalent on the host, so deploy this helper
+only on a trusted node host. It accepts official exact release tags, retains the
+stopped previous container, and commits only after the replacement Agent has
+authenticated to PSP and converged its core configuration. A failed or timed-out
+replacement is removed and the retained container is restored automatically.
+
 On Linux hosts where unprivileged processes cannot bind ports below 1024, use
 listener ports at or above 1024 or deliberately configure the host's
 `net.ipv4.ip_unprivileged_port_start`. The container does not retain root merely
@@ -283,14 +292,31 @@ published, preserving `/opt/passwall-node/config` and `data`, then run the
 installed binary as root with `--enable-remote-upgrade` and restart the agent.
 The private install script deliberately refuses cross-version replacement;
 do not delete state or recreate PSP server/node rows to bypass that guard.
-Docker containers and other operating systems use host-managed/manual updates;
-no privileged container or Docker socket is required.
+Generated Docker installations can use the separate updater sidecar described
+above. Existing single-container Docker installs and other operating systems use
+host-managed/manual updates until they are deliberately migrated; never add the
+Docker socket to the Agent container itself.
 
 The helper retains at most three completed managed-file backups; it never
 prunes live, indeterminate or foreign evidence. General terminal journals and
 small immutable receipts are not automatically garbage-collected.
 Keep disk monitoring and ordinary backups; lifecycle retention settings alone
 do not constitute a GC implementation or database-restore guarantee.
+
+### Panel / Node compatibility policy
+
+PSP and Passwall Node do not use a lockstep version requirement. Sync documents
+remain additive, and optional work is offered only when the Agent advertises the
+matching capability; upgrading PSP therefore does not itself replace or disable
+older connected Agents. A future incompatible wire change must ship as a new
+capability or parallel protocol before the old path is retired, with an explicit
+maintenance release for existing nodes.
+
+Automatic Agent upgrades are narrower: source and target must publish the same
+state-schema and upgrade-contract numbers. A release that changes either number
+is deliberately refused by both the systemd helper and Docker updater and must
+be migrated manually. Floating `latest` / `beta` image tags select an installation
+channel, but PSP always dispatches an audited exact release to the upgrade task.
 
 ## Licence
 

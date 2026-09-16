@@ -49,3 +49,23 @@ func TestBuildBaselinesStayAligned(t *testing.T) {
 		}
 	}
 }
+
+func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
+	workflow, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"type=raw,value=latest,enable=${{ startsWith(needs.setup.outputs.tag, 'v') && !contains(needs.setup.outputs.tag, '-') }}",
+		"type=raw,value=beta,enable=${{ startsWith(needs.setup.outputs.tag, 'v') }}",
+		"io.kazuhahub.passwall-node.state-schema=${{ needs.setup.outputs.state_schema }}",
+		"io.kazuhahub.passwall-node.upgrade-contract=${{ needs.setup.outputs.upgrade_contract }}",
+		"STATE_SCHEMA=${{ needs.setup.outputs.state_schema }}",
+		"UPGRADE_CONTRACT=${{ needs.setup.outputs.upgrade_contract }}",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("release workflow lost channel or Docker upgrade contract: %s", required)
+		}
+	}
+}

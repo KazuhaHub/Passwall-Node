@@ -27,7 +27,13 @@ RUN target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
 # daemon's required mode-0600 credential and to repair the state-volume owner.
 # It then execs the daemon through su-exec as an unprivileged numeric UID/GID.
 FROM alpine:3.24.1
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+ARG VERSION=dev
+ARG STATE_SCHEMA=9
+ARG UPGRADE_CONTRACT=1
+LABEL org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      io.kazuhahub.passwall-node.state-schema="${STATE_SCHEMA}" \
+      io.kazuhahub.passwall-node.upgrade-contract="${UPGRADE_CONTRACT}"
 RUN apk add --no-cache ca-certificates tzdata su-exec \
  && addgroup -g 10001 passwall-node \
  && adduser -D -H -u 10001 -G passwall-node passwall-node

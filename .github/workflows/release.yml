@@ -33,6 +33,8 @@ jobs:
       owner_lc: ${{ steps.identity.outputs.owner_lc }}
       sha: ${{ steps.identity.outputs.sha }}
       build_date: ${{ steps.identity.outputs.build_date }}
+      state_schema: ${{ steps.identity.outputs.state_schema }}
+      upgrade_contract: ${{ steps.identity.outputs.upgrade_contract }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -81,6 +83,11 @@ jobs:
           # Successful build-job retries reuse this stamp instead of changing
           # the daemon bytes by reading a fresh clock in every build job.
           echo "build_date=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
+          upgrade_info=$(go run ./cmd/node --upgrade-info)
+          state_schema=$(printf '%s' "$upgrade_info" | jq -er '.state_schema | select(type == "number" and . > 0)')
+          upgrade_contract=$(printf '%s' "$upgrade_info" | jq -er '.upgrade_contract | select(type == "number" and . > 0)')
+          echo "state_schema=${state_schema}" >> "$GITHUB_OUTPUT"
+          echo "upgrade_contract=${upgrade_contract}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -255,6 +262,8 @@ jobs:
             org.opencontainers.image.revision=${{ needs.setup.outputs.sha }}
             org.opencontainers.image.version=${{ needs.setup.outputs.tag }}
             org.opencontainers.image.licenses=Apache-2.0
+            io.kazuhahub.passwall-node.state-schema=${{ needs.setup.outputs.state_schema }}
+            io.kazuhahub.passwall-node.upgrade-contract=${{ needs.setup.outputs.upgrade_contract }}
       - name: Refuse an already published exact image tag
         env:
           IMAGE_REPOSITORY: ${{ needs.setup.outputs.owner_lc }}/passwall-node
@@ -269,4 +278,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.setup.outputs.tag }}
+            STATE_SCHEMA=${{ needs.setup.outputs.state_schema }}
+            UPGRADE_CONTRACT=${{ needs.setup.outputs.upgrade_contract }}
           provenance: false

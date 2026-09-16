@@ -59,11 +59,15 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if len(arguments) == 1 {
 		switch arguments[0] {
 		case "--upgrade-info":
-			return json.NewEncoder(stdout).Encode(upgrade.BuildInfo{Version: buildversion.Version, StateSchema: statesqlite.SupportedSchema, UpgradeContract: 1})
+			return json.NewEncoder(stdout).Encode(upgrade.BuildInfo{Version: buildversion.Version, StateSchema: statesqlite.SupportedSchema, UpgradeContract: upgrade.UpgradeContract})
 		case "--run-upgrade-helper":
 			ctx, stop := signalContext(context.Background())
 			defer stop()
 			return upgrade.RunHelper(ctx, upgrade.InstallRoot, statesqlite.SupportedSchema)
+		case "--run-docker-upgrade-helper":
+			ctx, stop := signalContext(context.Background())
+			defer stop()
+			return upgrade.RunDockerHelper(ctx, statesqlite.SupportedSchema, stderr)
 		case "--enable-remote-upgrade":
 			return enableRemoteUpgrade()
 		}
@@ -185,8 +189,10 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	var upgradeClient *upgrade.Client
 	handlers := map[string]agent.TaskHandler{}
-	if remoteUpgradeEnabled(parsed, buildversion.Version) && startClock != nil {
-		upgradeClient = &upgrade.Client{RootDir: upgrade.InstallRoot, Version: buildversion.Version, Clock: startClock, ConfirmConverged: coreRuntime.Converge}
+	if startClock != nil {
+		upgradeClient = remoteUpgradeClient(parsed, buildversion.Version, startClock, coreRuntime.Converge)
+	}
+	if upgradeClient != nil {
 		handlers[upgrade.TaskKind] = upgradeClient
 	}
 	taskRegistry, err := agent.NewTaskRegistry(handlers)

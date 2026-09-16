@@ -4,9 +4,15 @@
 # into a private tmpfs file before permanently dropping privileges.
 set -eu
 
-if [ "${1:-}" = "--version" ]; then
-    exec /usr/local/bin/passwall-node --version
-fi
+case "${1:-}" in
+    --version|--upgrade-info)
+        exec /usr/local/bin/passwall-node "$1"
+        ;;
+    --run-docker-upgrade-helper)
+        [ "$(id -u)" = 0 ] || { echo "passwall-node: Docker upgrade helper must run as root" >&2; exit 1; }
+        exec /usr/local/bin/passwall-node "$1"
+        ;;
+esac
 
 : "${PSP_NODE_ENDPOINT:?PSP_NODE_ENDPOINT is required}"
 : "${PSP_NODE_AGENT_ID:?PSP_NODE_AGENT_ID is required}"
@@ -43,6 +49,17 @@ if [ "$(id -u)" = "0" ]; then
     chmod 0600 "$CREDENTIAL_FILE"
     chown "$PUID:$PGID" "$CREDENTIAL_FILE"
     find "$DATA_DIR" \! -uid "$PUID" -exec chown "$PUID:$PGID" {} + 2>/dev/null || true
+
+    # The optional updater sidecar creates a root-owned control marker. Give it
+    # a short bounded startup window, but never make proxy startup depend on a
+    # privileged helper: an unavailable helper simply disables remote upgrade.
+    if [ "${PSP_NODE_DOCKER_REMOTE_UPGRADE:-false}" = "true" ]; then
+        wait_count=0
+        while [ "$wait_count" -lt 15 ] && [ ! -r /run/passwall-node-upgrades/enabled ]; do
+            wait_count=$((wait_count + 1))
+            sleep 1
+        done
+    fi
 
     if [ -n "$INSECURE_FLAG" ]; then
         exec su-exec "$PUID:$PGID" /usr/local/bin/passwall-node \

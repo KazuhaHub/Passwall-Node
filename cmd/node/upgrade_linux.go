@@ -11,8 +11,26 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/deployment"
+	"github.com/KazuhaHub/passwall-node/internal/state"
 	"github.com/KazuhaHub/passwall-node/internal/upgrade"
 )
+
+func remoteUpgradeClient(parsed options, version string, clock state.TaskStartClock, converge func(context.Context) error) *upgrade.Client {
+	if remoteUpgradeEnabled(parsed, version) {
+		return &upgrade.Client{RootDir: upgrade.InstallRoot, Version: version, Clock: clock, ConfirmConverged: converge}
+	}
+	if dockerRemoteUpgradeEnabled(parsed, version) {
+		return &upgrade.Client{
+			RequestDir: filepath.Join(upgrade.DockerControlDir, "requests"),
+			ReceiptDir: filepath.Join(upgrade.DockerControlDir, "receipts"),
+			ReadyDir:   filepath.Join(upgrade.DockerControlDir, "requests"),
+			BinaryPath: upgrade.DockerBinaryPath,
+			Version:    version, Clock: clock, ConfirmConverged: converge,
+			Available: validateDockerUpgradeControl,
+		}
+	}
+	return nil
+}
 
 func remoteUpgradeEnabled(parsed options, version string) bool {
 	if parsed.DataDir != filepath.Join(upgrade.InstallRoot, "data") || parsed.CredentialFile != filepath.Join(upgrade.InstallRoot, "config", "credential") || !deployment.ValidReleaseVersion(version) {
@@ -42,6 +60,60 @@ func remoteUpgradeEnabled(parsed options, version string) bool {
 	}
 	marker, err := os.ReadFile(filepath.Join(upgrade.InstallRoot, "upgrades", "enabled"))
 	return err == nil && string(marker) == "agent.upgrade.v1\n"
+}
+
+func dockerRemoteUpgradeEnabled(parsed options, version string) bool {
+	if os.Getenv("PSP_NODE_DOCKER_REMOTE_UPGRADE") != "true" || os.Geteuid() == 0 ||
+		parsed.DataDir != upgrade.DockerDataDir || parsed.CredentialFile != "/run/passwall-node/credential" ||
+		!deployment.ValidReleaseVersion(version) {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil || executable != upgrade.DockerBinaryPath {
+		return false
+	}
+	if _, err := os.Lstat("/.dockerenv"); err != nil {
+		return false
+	}
+	return validateDockerUpgradeControl() == nil
+}
+
+func validateDockerUpgradeControl() error {
+	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
+	if uid == 0 || gid == 0 {
+		return errors.New("Docker upgrade agent must run as its dedicated non-root identity")
+	}
+	checks := []struct {
+		path       string
+		uid, gid   uint32
+		permission os.FileMode
+		directory  bool
+	}{
+		{upgrade.DockerControlDir, 0, gid, 0750, true},
+		{filepath.Join(upgrade.DockerControlDir, "requests"), uid, gid, 0700, true},
+		{filepath.Join(upgrade.DockerControlDir, "receipts"), 0, gid, 0750, true},
+		{filepath.Join(upgrade.DockerControlDir, "enabled"), 0, gid, 0640, false},
+		{filepath.Join(upgrade.DockerControlDir, "heartbeat"), 0, gid, 0640, false},
+	}
+	for _, check := range checks {
+		info, err := os.Lstat(check.path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != check.permission || info.IsDir() != check.directory {
+			return errors.New("Docker upgrade control paths are unavailable or unsafe")
+		}
+		owner, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || owner.Uid != check.uid || owner.Gid != check.gid {
+			return errors.New("Docker upgrade control ownership is invalid")
+		}
+	}
+	marker, err := os.ReadFile(filepath.Join(upgrade.DockerControlDir, "enabled"))
+	if err != nil || string(marker) != upgrade.DockerMarker {
+		return errors.New("Docker upgrade helper marker is invalid")
+	}
+	heartbeat, err := os.Stat(filepath.Join(upgrade.DockerControlDir, "heartbeat"))
+	if err != nil || time.Since(heartbeat.ModTime()) < 0 || time.Since(heartbeat.ModTime()) > 30*time.Second {
+		return errors.New("Docker upgrade helper heartbeat is stale")
+	}
+	return nil
 }
 
 // Installing the helper is an explicit root maintenance operation. It never
