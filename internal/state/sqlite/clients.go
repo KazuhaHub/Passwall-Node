@@ -304,9 +304,10 @@ func (s *Store) ApplyScheduledQuota(ctx context.Context, key protocol.ClientKey,
 	return applied, nil
 }
 
-// ApplyScheduledQuotas is the efficient heartbeat form: one indexed due-row
-// scan and one transaction regardless of fleet size. Only due keys are read
-// back and updated; partial reports do not enumerate every client.
+// ApplyScheduledQuotas is the efficient heartbeat form: one indexed candidate
+// scan and one transaction regardless of fleet size. The SQL predicate is only
+// a prefilter; applyScheduledQuotaTx uses protocol.QuotaEntry.RefreshDue as the
+// authoritative rule before changing state.
 func (s *Store) ApplyScheduledQuotas(ctx context.Context, now time.Time) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -361,7 +362,11 @@ func applyScheduledQuotaTx(ctx context.Context, tx *sql.Tx, key protocol.ClientK
 	if err != nil {
 		return false, fmt.Errorf("read client %s for scheduled quota update: %w", key, err)
 	}
-	if current.PeriodEndsAtMS <= 0 || current.NextPeriodHeadroomBytes == nil || now.UnixMilli() < current.PeriodEndsAtMS {
+	grant := protocol.QuotaEntry{
+		PeriodEndsAtMS:          current.PeriodEndsAtMS,
+		NextPeriodHeadroomBytes: current.NextPeriodHeadroomBytes,
+	}
+	if !grant.RefreshDue(now.UnixMilli()) {
 		return false, nil
 	}
 	baseline, ok := addBytes(current.UpBytes, current.DownBytes)

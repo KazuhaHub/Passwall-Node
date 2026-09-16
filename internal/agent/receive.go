@@ -130,7 +130,7 @@ func receiveSegment[T any](
 		if doc.Version.Newer(segment.Version) {
 			return fail(fmt.Errorf("response version %s is behind applied %s", segment.Version, doc.Version))
 		}
-		if doc.ETag != segment.ETag {
+		if !protocol.Converged(doc.ETag, segment.ETag) {
 			return fail(fmt.Errorf("unchanged etag %q differs from applied %q", segment.ETag, doc.ETag))
 		}
 		return current, false, false, nil, nil

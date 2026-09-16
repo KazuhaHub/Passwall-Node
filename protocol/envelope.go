@@ -143,6 +143,24 @@ func ShouldSendFull(env Envelope, sinceLastFullSeconds int) bool {
 	return sinceLastFullSeconds >= env.FullReportSeconds
 }
 
+// EffectiveFullReportPeriod returns the actual wall-clock cadence produced by
+// polling at nextPollSeconds. A requested interval that falls between polls
+// takes effect on the first poll at or after that interval.
+func EffectiveFullReportPeriod(fullReportSeconds, nextPollSeconds int) int {
+	if nextPollSeconds <= 0 {
+		nextPollSeconds = DefaultNextPollSeconds
+	}
+	envelope := Envelope{FullReportSeconds: fullReportSeconds}
+	if ShouldSendFull(envelope, nextPollSeconds) {
+		return nextPollSeconds
+	}
+	cycles := fullReportSeconds / nextPollSeconds
+	if fullReportSeconds%nextPollSeconds != 0 {
+		cycles++
+	}
+	return cycles * nextPollSeconds
+}
+
 // Task is a call turned into state. ID is lowercase canonical ASCII so its
 // identity is byte-equivalent across SQLite, PostgreSQL, and case-folding
 // MySQL collations.
