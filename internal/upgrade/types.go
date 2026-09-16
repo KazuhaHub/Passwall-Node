@@ -1,5 +1,6 @@
-// Package upgrade owns the narrow Linux/systemd agent upgrade contract.
-// Proxy-core selection remains declarative configuration, not an upgrade task.
+// Package upgrade owns the narrow managed-agent upgrade contract for supported
+// Linux/systemd and Docker layouts. Proxy-core selection remains declarative
+// configuration, not an agent upgrade task.
 package upgrade
 
 import (
@@ -16,6 +17,20 @@ import (
 
 const TaskKind = protocol.TaskKindAgentUpgradeV1
 const InstallRoot = "/opt/passwall-node"
+
+const (
+	UpgradeContract            = 1
+	DockerControlDir           = "/run/passwall-node-upgrades"
+	DockerBinaryPath           = "/usr/local/bin/passwall-node"
+	DockerDataDir              = "/var/lib/passwall-node"
+	DockerMarker               = "agent.upgrade.v1 docker.v1\n"
+	DockerImageRepository      = "ghcr.io/kazuhahub/passwall-node"
+	DockerLabelManaged         = "io.kazuhahub.passwall-node.managed"
+	DockerLabelRole            = "io.kazuhahub.passwall-node.role"
+	DockerLabelAgentID         = "io.kazuhahub.passwall-node.agent-id"
+	DockerLabelStateSchema     = "io.kazuhahub.passwall-node.state-schema"
+	DockerLabelUpgradeContract = "io.kazuhahub.passwall-node.upgrade-contract"
+)
 
 type Args = protocol.AgentUpgradeArgs
 

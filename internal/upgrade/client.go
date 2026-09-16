@@ -16,15 +16,25 @@ import (
 
 type Client struct {
 	RootDir          string
+	RequestDir       string
+	ReceiptDir       string
+	ReadyDir         string
+	BinaryPath       string
 	Version          string
 	Clock            state.TaskStartClock
 	PollInterval     time.Duration
 	WaitTimeout      time.Duration
 	ConfirmConverged func(context.Context) error
+	Available        func() error
 	bootClock        func() (string, int64, error)
 }
 
 func (c *Client) Execute(ctx context.Context, task protocol.Task) ([]byte, error) {
+	if c.Available != nil {
+		if err := c.Available(); err != nil {
+			return nil, &agent.TaskError{Code: "agent_upgrade_helper_unavailable", Err: err}
+		}
+	}
 	args, err := ParseArgs(task)
 	if err != nil {
 		return nil, err
@@ -60,7 +70,7 @@ func (c *Client) Execute(ctx context.Context, task protocol.Task) ([]byte, error
 		return nil, errors.New("upgrade elapsed authorization overflow")
 	}
 	request := Request{Task: task, Args: args, BootID: bootID, AuthorizedUntilBoottimeNS: elapsed + remaining*int64(time.Millisecond)}
-	dir := filepath.Join(c.RootDir, "data", "upgrades")
+	dir := c.requestDir()
 	if err := EnsurePrivateDirectory(dir); err != nil {
 		return nil, err
 	}
@@ -95,7 +105,7 @@ func (c *Client) wait(ctx context.Context, task protocol.Task) ([]byte, error) {
 	defer ticker.Stop()
 	for {
 		var receipt Receipt
-		err := ReadDocument(filepath.Join(c.RootDir, "upgrades"), task.ID+".json", &receipt)
+		err := ReadDocument(c.receiptDir(), task.ID+".json", &receipt)
 		if err == nil {
 			if !sameTask(receipt.Request.Task, task) {
 				return nil, indeterminate("upgrade receipt does not match the immutable task identity")
@@ -109,7 +119,7 @@ func (c *Client) wait(ctx context.Context, task protocol.Task) ([]byte, error) {
 				if c.Version != args.Version {
 					return nil, indeterminate("success receipt was not recovered by the target agent release")
 				}
-				digest, err := BinaryDigest(filepath.Join(c.RootDir, "bin", "passwall-node"))
+				digest, err := BinaryDigest(c.binaryPath())
 				if err != nil || digest != receipt.Result.BinarySHA256 {
 					return nil, indeterminate("installed target binary no longer matches the activation receipt")
 				}
@@ -148,7 +158,7 @@ func (c *Client) RecordReady(ctx context.Context, store state.Store) error {
 			continue
 		}
 		var receipt Receipt
-		if err := ReadDocument(filepath.Join(c.RootDir, "upgrades"), task.ID+".json", &receipt); errors.Is(err, os.ErrNotExist) {
+		if err := ReadDocument(c.receiptDir(), task.ID+".json", &receipt); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
 			return err
@@ -166,7 +176,7 @@ func (c *Client) RecordReady(ctx context.Context, store state.Store) error {
 		if err := c.ConfirmConverged(ctx); err != nil {
 			return err
 		}
-		digest, err := BinaryDigest(filepath.Join(c.RootDir, "bin", "passwall-node"))
+		digest, err := BinaryDigest(c.binaryPath())
 		if err != nil {
 			return err
 		}
@@ -174,11 +184,39 @@ func (c *Client) RecordReady(ctx context.Context, store state.Store) error {
 			return errors.New("upgrade activation nonce is absent")
 		}
 		ready := Ready{TaskID: task.ID, InputSHA256: task.InputSHA256, Version: c.Version, BinarySHA256: digest, ActivationNonce: receipt.ActivationNonce, PID: os.Getpid()}
-		if err := AtomicDocument(filepath.Join(c.RootDir, "data", "upgrades"), task.ID+".ready.json", ready, 0600); err != nil {
+		if err := AtomicDocument(c.readyDir(), task.ID+".ready.json", ready, 0600); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *Client) requestDir() string {
+	if c.RequestDir != "" {
+		return c.RequestDir
+	}
+	return filepath.Join(c.RootDir, "data", "upgrades")
+}
+
+func (c *Client) receiptDir() string {
+	if c.ReceiptDir != "" {
+		return c.ReceiptDir
+	}
+	return filepath.Join(c.RootDir, "upgrades")
+}
+
+func (c *Client) readyDir() string {
+	if c.ReadyDir != "" {
+		return c.ReadyDir
+	}
+	return c.requestDir()
+}
+
+func (c *Client) binaryPath() string {
+	if c.BinaryPath != "" {
+		return c.BinaryPath
+	}
+	return filepath.Join(c.RootDir, "bin", "passwall-node")
 }
 
 func sameTask(a, b protocol.Task) bool {

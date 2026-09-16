@@ -74,6 +74,9 @@ jobs:
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$REQUESTED_VERSION"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image")" = Apache-2.0
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image")" = "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          upgrade_info="$(docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges "$image" --upgrade-info)"
+          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
+          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
           digest="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$image")"
           case "$digest" in
             "$IMAGE_REPOSITORY"@sha256:*) ;;

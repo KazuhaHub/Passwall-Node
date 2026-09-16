@@ -2,8 +2,15 @@
 # produces the binaries once; buildx selects the matching Linux artifact here,
 # so the image contains the same bytes published in the GitHub release archive.
 FROM alpine:3.24.1
-LABEL org.opencontainers.image.licenses="Apache-2.0"
 ARG TARGETARCH
+ARG VERSION
+ARG STATE_SCHEMA
+ARG UPGRADE_CONTRACT
+RUN test -n "$VERSION" && test -n "$STATE_SCHEMA" && test -n "$UPGRADE_CONTRACT"
+LABEL org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      io.kazuhahub.passwall-node.state-schema="${STATE_SCHEMA}" \
+      io.kazuhahub.passwall-node.upgrade-contract="${UPGRADE_CONTRACT}"
 
 RUN apk add --no-cache ca-certificates tzdata su-exec \
  && addgroup -g 10001 passwall-node \

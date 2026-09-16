@@ -1,7 +1,11 @@
 services:
   passwall-node:
+    container_name: passwall-node-agent
     image: ghcr.io/kazuhahub/passwall-node:${NODE_VERSION:?set an explicit published release version such as v1.0.0}
     restart: unless-stopped
+    depends_on:
+      passwall-node-updater:
+        condition: service_started
     # The listener set is controlled dynamically by PSP, so fixed bridge-mode
     # port mappings cannot describe it. Host networking exposes exactly the
     # ports in the PSP-owned listener configuration.
@@ -9,12 +13,18 @@ services:
     environment:
       PSP_NODE_ENDPOINT: ${PSP_NODE_ENDPOINT:?set the registered PSP HTTPS sync endpoint}
       PSP_NODE_AGENT_ID: ${PSP_NODE_AGENT_ID:?set the PSP agent id}
+      PSP_NODE_DOCKER_REMOTE_UPGRADE: "true"
       # Development only, for an explicitly HTTP PSP endpoint:
       PSP_NODE_ALLOW_INSECURE_HTTP: ${PSP_NODE_ALLOW_INSECURE_HTTP:-false}
     secrets:
       - node_credential
     volumes:
       - passwall-node-data:/var/lib/passwall-node
+      - passwall-node-upgrades:/run/passwall-node-upgrades
+    labels:
+      io.kazuhahub.passwall-node.managed: "true"
+      io.kazuhahub.passwall-node.role: agent
+      io.kazuhahub.passwall-node.agent-id: ${PSP_NODE_AGENT_ID:?set the PSP agent id}
     read_only: true
     tmpfs:
       - /run/passwall-node:size=64k,mode=0700
@@ -31,9 +41,34 @@ services:
       - no-new-privileges:true
     stop_grace_period: 30s
 
+  passwall-node-updater:
+    container_name: passwall-node-updater
+    image: ghcr.io/kazuhahub/passwall-node:${NODE_VERSION:?set an explicit published release version such as v1.0.0}
+    command: ["--run-docker-upgrade-helper"]
+    restart: unless-stopped
+    environment:
+      PSP_NODE_UPGRADE_TARGET_CONTAINER: passwall-node-agent
+      PSP_NODE_UPGRADE_TARGET_AGENT_ID: ${PSP_NODE_AGENT_ID:?set the PSP agent id}
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
+    volumes:
+      # The updater is intentionally isolated from the network-facing agent.
+      # Docker socket access is root-equivalent; never add it to passwall-node.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - passwall-node-upgrades:/run/passwall-node-upgrades
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+
 secrets:
   node_credential:
     file: ./secrets/node-credential
 
 volumes:
   passwall-node-data:
+  passwall-node-upgrades:

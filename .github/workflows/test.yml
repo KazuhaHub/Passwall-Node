@@ -169,6 +169,10 @@ jobs:
       - name: Verify image entrypoint, build identity and project license
         run: |
           docker run --rm passwall-node:test --version
+          upgrade_info="$(docker run --rm passwall-node:test --upgrade-info)"
           docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
           docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' passwall-node:test)" = "Apache-2.0"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .version)"
+          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
+          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"

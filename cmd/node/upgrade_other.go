@@ -2,9 +2,18 @@
 
 package main
 
-import "errors"
+import (
+	"context"
+	"errors"
+
+	"github.com/KazuhaHub/passwall-node/internal/state"
+	"github.com/KazuhaHub/passwall-node/internal/upgrade"
+)
 
 func remoteUpgradeEnabled(options, string) bool { return false }
+func remoteUpgradeClient(options, string, state.TaskStartClock, func(context.Context) error) *upgrade.Client {
+	return nil
+}
 func enableRemoteUpgrade() error {
-	return errors.New("remote agent upgrade requires Linux/systemd; update Docker images on the host")
+	return errors.New("remote agent upgrade requires a supported Linux installation")
 }
