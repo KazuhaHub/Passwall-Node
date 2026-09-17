@@ -120,8 +120,8 @@ cover Linux, macOS and Windows on both architectures.
 
 ```bash
 cp compose.example.yaml compose.yaml
-install -d -m 0700 secrets
-install -m 0600 /private/path/to/credential secrets/node-credential
+install -d -m 0700 config data upgrades
+install -m 0600 /private/path/to/credential config/node-credential.txt
 export PSP_NODE_ENDPOINT=https://panel.example/v1/node/sync
 export PSP_NODE_AGENT_ID=agt_REPLACE_WITH_THE_ASSIGNED_ID
 export NODE_VERSION=vREPLACE_WITH_AN_EXPLICIT_PUBLISHED_RELEASE
@@ -130,16 +130,19 @@ docker compose up -d
 
 The example uses host networking because PSP can change the listener set and
 ports dynamically; a fixed bridge-mode port list cannot represent that. The
-entrypoint copies Docker's commonly mode-0444 secret into a private tmpfs file,
-repairs only the persistent volume ownership, then drops permanently to UID/GID
+entrypoint copies the read-only credential into a private tmpfs file, repairs
+only the persistent data-directory ownership, then drops permanently to UID/GID
 10001. The root filesystem is read-only and the service keeps only the three
 capabilities needed for that startup transition. Keep the credential mount
 read-only: the Agent never needs to modify it. The data mount must be writable.
-The generated/default Compose uses a Docker named data volume to avoid NAS bind
-directory ownership mismatches. If you replace it with `./data`, set `PUID` and
-`PGID` to that directory's owner or change its ownership before startup. A
-missing credential bind source can be created by Docker as a directory, so
-create the regular credential file before the first `docker compose up`.
+The generated/default Compose consistently mounts explicit project directories:
+`./config` read-only, `./data` read-write, and `./upgrades` for the optional
+updater. The root entrypoint repairs the bind-directory owner before dropping
+privileges; on storage that forbids ownership changes, set `PUID` and `PGID` to
+the directory owner. Create the regular `./config/node-credential.txt` before
+the first `docker compose up`. Mounting the directory instead of an individual
+host file prevents NAS Compose implementations from turning a missing file bind
+source into a directory.
 
 Agent-owned log lines use an RFC 3339 UTC timestamp, component, severity and
 quoted message. The Compose example also bounds Docker's `json-file` logs to

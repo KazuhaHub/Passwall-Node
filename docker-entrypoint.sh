@@ -59,10 +59,10 @@ if [ "$(id -u)" = "0" ]; then
     chmod 0600 "$CREDENTIAL_FILE" || fatal "cannot protect the runtime credential"
     chown "$PUID:$PGID" "$CREDENTIAL_FILE" || fatal "cannot set runtime credential ownership"
     if ! find "$DATA_DIR" \( \! -uid "$PUID" -o \! -gid "$PGID" \) -exec chown "$PUID:$PGID" {} +; then
-        fatal "cannot make $DATA_DIR owned by PUID=$PUID PGID=$PGID; use a Docker named volume or set PUID/PGID to the bind-directory owner"
+        fatal "cannot make $DATA_DIR owned by PUID=$PUID PGID=$PGID; allow ownership changes or set PUID/PGID to the bind-directory owner"
     fi
     if ! su-exec "$PUID:$PGID" test -w "$DATA_DIR"; then
-        fatal "$DATA_DIR is not writable by PUID=$PUID PGID=$PGID; use a Docker named volume or fix the bind-directory ownership"
+        fatal "$DATA_DIR is not writable by PUID=$PUID PGID=$PGID; fix the bind-directory ownership or set matching PUID/PGID"
     fi
 
     # The optional updater sidecar creates a root-owned control marker. Give it
