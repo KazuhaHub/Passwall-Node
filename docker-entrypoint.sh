@@ -4,18 +4,26 @@
 # into a private tmpfs file before permanently dropping privileges.
 set -eu
 
+log_error() {
+    printf '%s passwall-node level=error message=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >&2
+}
+fatal() {
+    log_error "$1"
+    exit 1
+}
+
 case "${1:-}" in
     --version|--upgrade-info)
         exec /usr/local/bin/passwall-node "$1"
         ;;
     --run-docker-upgrade-helper)
-        [ "$(id -u)" = 0 ] || { echo "passwall-node: Docker upgrade helper must run as root" >&2; exit 1; }
+        [ "$(id -u)" = 0 ] || fatal "Docker upgrade helper must run as root"
         exec /usr/local/bin/passwall-node "$1"
         ;;
 esac
 
-: "${PSP_NODE_ENDPOINT:?PSP_NODE_ENDPOINT is required}"
-: "${PSP_NODE_AGENT_ID:?PSP_NODE_AGENT_ID is required}"
+[ -n "${PSP_NODE_ENDPOINT:-}" ] || fatal "PSP_NODE_ENDPOINT is required"
+[ -n "${PSP_NODE_AGENT_ID:-}" ] || fatal "PSP_NODE_AGENT_ID is required"
 
 PUID="${PUID:-10001}"
 PGID="${PGID:-10001}"
@@ -25,30 +33,37 @@ XRAY_API_LISTEN="${PSP_NODE_XRAY_API_LISTEN:-127.0.0.1:10085}"
 SING_BOX_API_LISTEN="${PSP_NODE_SING_BOX_API_LISTEN:-127.0.0.1:10086}"
 CREDENTIAL_FILE="$SECRET_SOURCE"
 
-case "$PUID" in ''|*[!0-9]*|0) echo "passwall-node: PUID must be a non-zero numeric ID" >&2; exit 1 ;; esac
-case "$PGID" in ''|*[!0-9]*|0) echo "passwall-node: PGID must be a non-zero numeric ID" >&2; exit 1 ;; esac
+case "$PUID" in ''|*[!0-9]*|0) fatal "PUID must be a non-zero numeric ID" ;; esac
+case "$PGID" in ''|*[!0-9]*|0) fatal "PGID must be a non-zero numeric ID" ;; esac
 
 case "${PSP_NODE_ALLOW_INSECURE_HTTP:-false}" in
     true|1|yes) INSECURE_FLAG="--allow-insecure-http" ;;
     false|0|no|'') INSECURE_FLAG="" ;;
-    *) echo "passwall-node: PSP_NODE_ALLOW_INSECURE_HTTP must be true or false" >&2; exit 1 ;;
+    *) fatal "PSP_NODE_ALLOW_INSECURE_HTTP must be true or false" ;;
 esac
 
 if [ "$(id -u)" = "0" ]; then
     if [ ! -f "$SECRET_SOURCE" ]; then
-        echo "passwall-node: credential secret is not a regular file: $SECRET_SOURCE" >&2
-        exit 1
+        if [ -d "$SECRET_SOURCE" ]; then
+            fatal "credential path is a directory, not a file: $SECRET_SOURCE; create the credential file before starting Docker and verify the mounted filename"
+        fi
+        fatal "credential secret is missing or is not a regular file: $SECRET_SOURCE"
     fi
 
-    mkdir -p "$DATA_DIR" /run/passwall-node
-    chown "$PUID:$PGID" /run/passwall-node
-    chmod 0700 /run/passwall-node
+    mkdir -p "$DATA_DIR" /run/passwall-node || fatal "cannot create the data or runtime directory"
+    chown "$PUID:$PGID" /run/passwall-node || fatal "cannot set runtime directory ownership"
+    chmod 0700 /run/passwall-node || fatal "cannot protect the runtime directory"
     CREDENTIAL_FILE=/run/passwall-node/credential
     umask 077
-    cp "$SECRET_SOURCE" "$CREDENTIAL_FILE"
-    chmod 0600 "$CREDENTIAL_FILE"
-    chown "$PUID:$PGID" "$CREDENTIAL_FILE"
-    find "$DATA_DIR" \! -uid "$PUID" -exec chown "$PUID:$PGID" {} + 2>/dev/null || true
+    cp "$SECRET_SOURCE" "$CREDENTIAL_FILE" || fatal "cannot copy the credential into private runtime storage"
+    chmod 0600 "$CREDENTIAL_FILE" || fatal "cannot protect the runtime credential"
+    chown "$PUID:$PGID" "$CREDENTIAL_FILE" || fatal "cannot set runtime credential ownership"
+    if ! find "$DATA_DIR" \( \! -uid "$PUID" -o \! -gid "$PGID" \) -exec chown "$PUID:$PGID" {} +; then
+        fatal "cannot make $DATA_DIR owned by PUID=$PUID PGID=$PGID; use a Docker named volume or set PUID/PGID to the bind-directory owner"
+    fi
+    if ! su-exec "$PUID:$PGID" test -w "$DATA_DIR"; then
+        fatal "$DATA_DIR is not writable by PUID=$PUID PGID=$PGID; use a Docker named volume or fix the bind-directory ownership"
+    fi
 
     # The optional updater sidecar creates a root-owned control marker. Give it
     # a short bounded startup window, but never make proxy startup depend on a

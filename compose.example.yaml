@@ -3,6 +3,11 @@ services:
     container_name: passwall-node-agent
     image: ghcr.io/kazuhahub/passwall-node:${NODE_VERSION:?set an explicit published release version such as v1.0.0}
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       passwall-node-updater:
         condition: service_started
@@ -46,6 +51,11 @@ services:
     image: ghcr.io/kazuhahub/passwall-node:${NODE_VERSION:?set an explicit published release version such as v1.0.0}
     command: ["--run-docker-upgrade-helper"]
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       PSP_NODE_UPGRADE_TARGET_CONTAINER: passwall-node-agent
       PSP_NODE_UPGRADE_TARGET_AGENT_ID: ${PSP_NODE_AGENT_ID:?set the PSP agent id}

@@ -1,15 +1,28 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
+
+func TestNodeLoggerUsesUTCStructuredSingleLineOutput(t *testing.T) {
+	var output bytes.Buffer
+	logger := newNodeLogger(&output)
+	logger.now = func() time.Time { return time.Date(2026, 9, 16, 3, 4, 5, 600, time.FixedZone("local", -7*60*60)) }
+	logger.Warnf("sync failed: %s", "line one\nline two")
+	want := "2026-09-16T10:04:05.0000006Z passwall-node level=warn message=\"sync failed: line one\\nline two\"\n"
+	if output.String() != want {
+		t.Fatalf("log output = %q, want %q", output.String(), want)
+	}
+}
 
 func TestValidateOptionsRequiresCanonicalIdentityAndAbsolutePrivatePaths(t *testing.T) {
 	valid := options{

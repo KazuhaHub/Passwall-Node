@@ -133,7 +133,17 @@ ports dynamically; a fixed bridge-mode port list cannot represent that. The
 entrypoint copies Docker's commonly mode-0444 secret into a private tmpfs file,
 repairs only the persistent volume ownership, then drops permanently to UID/GID
 10001. The root filesystem is read-only and the service keeps only the three
-capabilities needed for that startup transition.
+capabilities needed for that startup transition. Keep the credential mount
+read-only: the Agent never needs to modify it. The data mount must be writable.
+The generated/default Compose uses a Docker named data volume to avoid NAS bind
+directory ownership mismatches. If you replace it with `./data`, set `PUID` and
+`PGID` to that directory's owner or change its ownership before startup. A
+missing credential bind source can be created by Docker as a directory, so
+create the regular credential file before the first `docker compose up`.
+
+Agent-owned log lines use an RFC 3339 UTC timestamp, component, severity and
+quoted message. The Compose example also bounds Docker's `json-file` logs to
+three 10 MiB files. Core subprocesses retain their upstream log format.
 
 The optional `passwall-node-updater` service enables PSP's authenticated remote
 upgrade task for Docker deployments. The network-facing Agent never receives
@@ -152,9 +162,9 @@ to make port 443 convenient.
 ## Linux systemd installation
 
 For a credential-free GitHub installation, run the public bootstrap on the
-target Linux/systemd host. It asks for the Stable or Beta channel, installs the
-latest published release from that channel, and then opens `pn connect` to enter
-the endpoint, agent ID and credential shown by PSP:
+target Linux/systemd host. With no arguments it installs the newest Stable
+release and opens `pn connect` to enter the endpoint, agent ID and credential
+shown by PSP:
 
 ```bash
 curl --disable --fail --silent --show-error --location --proto '=https' \
@@ -163,9 +173,50 @@ curl --disable --fail --silent --show-error --location --proto '=https' \
 
 The credential is read from the terminal without echo and is never embedded in
 that command. If setup is interrupted after the program is installed, resume
-with `sudo pn connect`. Set `PN_CHANNEL=stable` or `PN_CHANNEL=beta` before
-`sh` for a non-interactive channel choice. The public installer never replaces
-an existing installation or an unrelated `pn` command.
+with `sudo pn connect`. The public installer never replaces an existing
+installation or an unrelated `pn` command.
+
+Prefer the explicit channel option in automation. Arguments after a shell pipe
+must be passed after `sh -s --`:
+
+```bash
+curl --disable --fail --silent --show-error --location --proto '=https' \
+  https://raw.githubusercontent.com/KazuhaHub/Passwall-Node/main/install.sh | \
+  sudo sh -s -- --channel beta
+```
+
+Use `--channel stable` to state the default explicitly. With no channel
+argument, both interactive and non-interactive runs use Stable. `PN_CHANNEL`
+remains supported for compatibility, but the command-line option takes
+precedence.
+
+To install the program and `pn` command without configuring or starting the
+Agent, pass `--install-only`; connect it later with `sudo pn connect`:
+
+```bash
+curl --disable --fail --silent --show-error --location --proto '=https' \
+  https://raw.githubusercontent.com/KazuhaHub/Passwall-Node/main/install.sh | \
+  sudo sh -s -- --install-only
+```
+
+For a host that cannot reach GitHub, download the exact Linux archive and
+`SHA256SUMS.txt` on a connected administrator device, verify the archive there,
+and transfer the archive to the target through a trusted channel. Extract it
+without renaming the generated package directory, enter that directory, then
+run the bundled public installer in offline mode:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS.txt
+tar -xzf passwall-node_vVERSION_linux_ARCH.tar.gz
+cd passwall-node_vVERSION_linux_ARCH
+sudo ./install.sh --offline
+```
+
+`--offline` reads only the binary, LICENSE and NOTICE beside the script and
+does not contact GitHub. Combine it with `--install-only` when the PSP endpoint,
+Agent ID or credential is not yet available. The PSP manual-install view lists
+the exact archive/checksum links and all three connection values for the
+selected server.
 
 PSP also offers a private one-click path for an already registered identity.
 That path remains version-pinned and preconfigured:
