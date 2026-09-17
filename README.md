@@ -151,6 +151,25 @@ to make port 443 convenient.
 
 ## Linux systemd installation
 
+For a credential-free GitHub installation, run the public bootstrap on the
+target Linux/systemd host. It asks for the Stable or Beta channel, installs the
+latest published release from that channel, and then opens `pn connect` to enter
+the endpoint, agent ID and credential shown by PSP:
+
+```bash
+curl --disable --fail --silent --show-error --location --proto '=https' \
+  https://raw.githubusercontent.com/KazuhaHub/Passwall-Node/main/install.sh | sudo sh
+```
+
+The credential is read from the terminal without echo and is never embedded in
+that command. If setup is interrupted after the program is installed, resume
+with `sudo pn connect`. Set `PN_CHANNEL=stable` or `PN_CHANNEL=beta` before
+`sh` for a non-interactive channel choice. The public installer never replaces
+an existing installation or an unrelated `pn` command.
+
+PSP also offers a private one-click path for an already registered identity.
+That path remains version-pinned and preconfigured:
+
 The public Go package `deployment` renders a **private** installer for an
 already registered PSP identity and an explicitly selected, already published
 Node release. PSP can generate it with `deployment.RenderLinux(Options{Endpoint,
@@ -190,6 +209,39 @@ Failed downloads do not publish a partial identity. A systemd failure
 retains the complete installation and state so the same private script can be
 retried. Back up the matching private config and data before any manually
 planned upgrade or migration; never erase the database to work around a rebind.
+
+### Local management with `pn`
+
+Both installation paths create `/usr/local/bin/pn` as a managed link to the
+installed Passwall Node binary, so the menu and daemon always upgrade together.
+Run `pn` for the interactive menu or use direct commands in automation:
+
+```text
+pn status
+pn start | stop | restart
+pn logs --follow
+pn doctor
+pn connect
+pn config
+pn rebind
+pn backup
+pn repair
+```
+
+`pn connect` configures only an unconfigured installation. `pn rebind` is a
+separate, explicit operation: it stops the service, retains the old identity
+and runtime state in a private backup, starts with fresh runtime state, and
+requires typing `REBIND`. Neither command prints the credential. If a different
+program already owns the `pn` name, the installers and repair command fail
+closed instead of replacing it.
+
+`pn backup` briefly stops an active service, copies the private `config/` and
+`data/` trees plus the installed service definition into a root-only snapshot
+under `/opt/passwall-node/backups/`, and then restarts the service even when a
+copy fails. It rejects symlinks and special files instead of following them.
+Automatic restore is deliberately not offered: restoring identity and runtime
+state is a maintenance operation that should be inspected and performed while
+the service is stopped.
 
 ## Development and release gates
 

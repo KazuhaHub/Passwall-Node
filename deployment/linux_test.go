@@ -86,7 +86,7 @@ func newShellFixture(t *testing.T) *shellFixture {
 	f := &shellFixture{t: t, dir: t.TempDir(), options: installationOptions(), architecture: "amd64"}
 	f.root = filepath.Join(f.dir, "opt", "passwall-node")
 	f.bin = filepath.Join(f.dir, "commands")
-	for _, directory := range []string{f.bin, filepath.Join(f.dir, "opt"), filepath.Join(f.dir, "etc", "systemd", "system"), filepath.Join(f.dir, "run", "systemd", "system")} {
+	for _, directory := range []string{f.bin, filepath.Join(f.dir, "opt"), filepath.Join(f.dir, "etc", "systemd", "system"), filepath.Join(f.dir, "run", "systemd", "system"), filepath.Join(f.dir, "usr", "local", "bin")} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -212,7 +212,7 @@ func (f *shellFixture) runTerminal(tty bool, extraEnvironment ...string) (string
 	}
 	// Substitute only fixed system paths in this test copy. The production
 	// installer has no prefix override, sudo bypass or mock-execution option.
-	script = strings.NewReplacer("/opt/", filepath.Join(f.dir, "opt")+"/", "/run/systemd/system", filepath.Join(f.dir, "run", "systemd", "system"), "/etc/systemd/system", filepath.Join(f.dir, "etc", "systemd", "system")).Replace(script)
+	script = strings.NewReplacer("/opt/", filepath.Join(f.dir, "opt")+"/", "/run/systemd/system", filepath.Join(f.dir, "run", "systemd", "system"), "/etc/systemd/system", filepath.Join(f.dir, "etc", "systemd", "system"), "/usr/local/bin", filepath.Join(f.dir, "usr", "local", "bin")).Replace(script)
 	path := filepath.Join(f.dir, "private-install.sh")
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 		f.t.Fatal(err)
@@ -342,6 +342,19 @@ func TestLinuxInstallDoesNotReplaceForeignInstallationOrUnit(t *testing.T) {
 			t.Fatal("foreign unit was replaced")
 		}
 	})
+	t.Run("foreign-pn-command", func(t *testing.T) {
+		f := newShellFixture(t)
+		path := filepath.Join(f.dir, "usr", "local", "bin", "pn")
+		if err := os.WriteFile(path, []byte("foreign command"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.run(); err == nil || f.networkCalls() != 0 {
+			t.Fatal("foreign pn command did not stop before networking")
+		}
+		if data, _ := os.ReadFile(path); string(data) != "foreign command" {
+			t.Fatal("foreign pn command was replaced")
+		}
+	})
 }
 
 func TestLinuxInstallRejectsAmbiguousChecksumAndLinks(t *testing.T) {
@@ -388,6 +401,10 @@ func TestLinuxInstallPreservesIdentityAndStateOnRerun(t *testing.T) {
 	f.options.Credential = "pspn_'\"$(id);`id`{}" + strings.Repeat("x", 32)
 	if output, err := f.run(); err != nil {
 		t.Fatalf("install failed: %v %s", err, output)
+	}
+	pnTarget, err := os.Readlink(filepath.Join(f.dir, "usr", "local", "bin", "pn"))
+	if err != nil || pnTarget != filepath.Join(f.root, "bin", "passwall-node") {
+		t.Fatalf("pn command link = %q, %v", pnTarget, err)
 	}
 	if f.networkCalls() != 2 {
 		t.Fatal("installation did not download exactly the pinned archive and checksums")
