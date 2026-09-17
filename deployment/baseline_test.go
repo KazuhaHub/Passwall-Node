@@ -18,12 +18,16 @@ func TestDockerEntrypointTimestampsAndDiagnosesPermanentMountErrors(t *testing.T
 		"%Y-%m-%dT%H:%M:%SZ",
 		"level=error",
 		"credential path is a directory, not a file",
+		`chown -R "$PUID:$PGID" "$DATA_DIR"`,
 		"allow ownership changes or set PUID/PGID",
 		"is not writable by PUID=",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("entrypoint lost actionable Docker logging: %q", required)
 		}
+	}
+	if regexp.MustCompile(`(?m)^[^#\n]*\bfind\b[^\n]*\s-(?:uid|gid)\b`).MatchString(text) {
+		t.Fatal("entrypoint uses a GNU find ownership predicate unavailable in Alpine BusyBox")
 	}
 	if output, err := exec.Command("sh", "-n", "../docker-entrypoint.sh").CombinedOutput(); err != nil {
 		t.Fatalf("docker-entrypoint.sh syntax: %v\n%s", err, output)
