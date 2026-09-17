@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -19,9 +18,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: test, vet, format
+  checks:
+    name: regular tests and static checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -39,7 +39,7 @@ jobs:
       - name: Verify pinned build toolchain
         run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
       - name: Unit and integration tests
-        run: go test ./...
+        run: go test -count=1 -timeout=10m ./...
       - name: Require named Linux PTY transfer-meter test to run and pass
         shell: bash
         run: |
@@ -53,18 +53,49 @@ jobs:
             /^[[:space:]]*--- (SKIP|FAIL):/ { rejected++ }
             END { exit !(passed == 1 && rejected == 0) }
           ' "$RUNNER_TEMP/install-pty-test.log"
-      - name: Race detector
-        run: go test -race ./...
       - name: Reachable vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - name: Validate container entrypoint
         run: sh -n docker-entrypoint.sh
       - name: Validate immutable image publishing check
         run: node --test deployment/check_image_test.mjs
 
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run race detector
+        run: go test -race -count=1 -timeout=15m ./...
+
+  verify:
+    name: test, vet, format
+    if: ${{ always() }}
+    needs: [checks, race]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every verification job to pass
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          RACE_RESULT: ${{ needs.race.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          test "$RACE_RESULT" = success
+
   cross-compile:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -155,6 +186,7 @@ jobs:
   container:
     name: container
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
@@ -207,5 +239,9 @@ jobs:
           done
           test -f "$fixture/data/entrypoint-ready"
           test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
-          ! docker logs "$container" 2>&1 | grep -F 'find: unrecognized: -uid'
+          docker logs "$container" > "$RUNNER_TEMP/passwall-node-container.log" 2>&1
+          if grep -Fq 'find: unrecognized: -uid' "$RUNNER_TEMP/passwall-node-container.log"; then
+            cat "$RUNNER_TEMP/passwall-node-container.log" >&2
+            exit 1
+          fi
           test "$(stat -c %u:%g "$fixture/data")" = 10001:10001
