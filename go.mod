@@ -7,6 +7,7 @@ toolchain go1.26.8
 require (
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	google.golang.org/grpc v1.83.2
 	modernc.org/sqlite v1.46.1
 )

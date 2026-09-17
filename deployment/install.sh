@@ -27,7 +27,7 @@ case "$(uname -m)" in
     aarch64|arm64) arch=arm64 ;;
     *) fail 'only amd64 and arm64 are supported' ;;
 esac
-for tool in curl sha256sum tar awk mktemp install getent useradd chown cmp mv mkdir chmod rm rmdir systemctl timeout sleep; do
+for tool in curl sha256sum tar awk mktemp install getent useradd chown cmp mv mkdir chmod rm rmdir systemctl timeout sleep ln readlink; do
     command -v "$tool" >/dev/null 2>&1 || fail "required installation command is unavailable: $tool"
 done
 [ -d /run/systemd/system ] || fail 'a running systemd host is required'
@@ -40,6 +40,7 @@ environment=@@ENVIRONMENT@@
 case "$version" in @@*) fail 'render this template with the control plane before installation' ;; esac
 root=/opt/passwall-node
 unit=/etc/systemd/system/passwall-node.service
+pn_link=/usr/local/bin/pn
 lock=/opt/.passwall-node-install.lock
 stage=
 unit_tmp=
@@ -64,6 +65,15 @@ unset credential
 
 if { [ -e "$unit" ] || [ -L "$unit" ]; } && [ ! -e "$root" ] && [ ! -L "$root" ]; then
     fail 'existing systemd unit has no matching installation; manual migration is required'
+fi
+existing_pn=$(command -v pn 2>/dev/null || true)
+if [ -n "$existing_pn" ]; then
+    [ "$existing_pn" = "$pn_link" ] && [ -L "$pn_link" ] && [ "$(readlink "$pn_link")" = "$root/bin/passwall-node" ] || \
+        fail "the pn command already exists at $existing_pn and is not managed by Passwall Node"
+fi
+if [ -e "$pn_link" ] || [ -L "$pn_link" ]; then
+    [ -L "$pn_link" ] && [ "$(readlink "$pn_link")" = "$root/bin/passwall-node" ] || \
+        fail 'the pn command path already exists and is not managed by Passwall Node'
 fi
 
 # No source/eval, no rebind or upgrade. Even an incomplete/foreign installation
@@ -180,6 +190,9 @@ unit_tmp=$(mktemp /etc/systemd/system/.passwall-node.service.XXXXXX)
 install -m 0644 "$root/passwall-node.service" "$unit_tmp"
 mv -f "$unit_tmp" "$unit"
 unit_tmp=
+if [ ! -e "$pn_link" ] && [ ! -L "$pn_link" ]; then
+    ln -s "$root/bin/passwall-node" "$pn_link" || fail 'cannot create the pn command link'
+fi
 # Older published binaries keep their original installation behavior. New
 # binaries explicitly install the separate root helper, without changing the
 # non-root agent unit or exposing an unauthenticated network upgrade endpoint.
@@ -212,5 +225,6 @@ timeout --kill-after=1s 30s sh -c '
     done
 ' || fail 'agent did not reach active/running with a nonzero PID within 30s; installed identity and data were retained'
 printf '%s\n' 'Passwall Node installed; identity and state retained under /opt/passwall-node.'
+printf '%s\n' 'Local management is available through: pn'
 printf '%s\n' 'Agent startup confirmed only. PSP sync, core and proxy readiness are not confirmed by this installer.'
 printf '%s\n' 'Next: verify the server connection, core state and configured nodes in PSP, then test proxy traffic. Delete this private installation script securely.'

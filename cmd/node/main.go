@@ -27,6 +27,8 @@ import (
 	"github.com/KazuhaHub/passwall-node/internal/core/singbox"
 	"github.com/KazuhaHub/passwall-node/internal/core/xray"
 	"github.com/KazuhaHub/passwall-node/internal/lifecycle"
+	"github.com/KazuhaHub/passwall-node/internal/manage"
+	"github.com/KazuhaHub/passwall-node/internal/nodeconfig"
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-node/internal/upgrade"
@@ -49,6 +51,13 @@ type options struct {
 }
 
 func main() {
+	if filepath.Base(os.Args[0]) == "pn" {
+		if err := manage.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "pn:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "passwall-node:", err)
 		os.Exit(1)
@@ -288,7 +297,7 @@ func validateOptions(options options) error {
 	if !filepath.IsAbs(options.CredentialFile) || !filepath.IsAbs(options.DataDir) {
 		return errors.New("credential-file and data-dir must be absolute paths")
 	}
-	if len(options.AgentID) > 64 || !validAgentID(options.AgentID) {
+	if !nodeconfig.ValidAgentID(options.AgentID) {
 		return errors.New("agent-id must be 1..64 canonical ASCII characters")
 	}
 	if strings.TrimSpace(options.Endpoint) != options.Endpoint || strings.TrimSpace(options.XrayAPIListen) != options.XrayAPIListen ||
@@ -296,20 +305,6 @@ func validateOptions(options options) error {
 		return errors.New("endpoint and core API listen addresses must be canonical")
 	}
 	return nil
-}
-
-func validAgentID(value string) bool {
-	for index := 0; index < len(value); index++ {
-		character := value[index]
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
-			continue
-		}
-		if index > 0 && (character == '_' || character == '-' || character == '.' || character == ':') {
-			continue
-		}
-		return false
-	}
-	return value != ""
 }
 
 func readCredential(path string) (string, error) {
