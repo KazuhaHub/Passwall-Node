@@ -19,13 +19,16 @@ services:
       PSP_NODE_ENDPOINT: ${PSP_NODE_ENDPOINT:?set the registered PSP HTTPS sync endpoint}
       PSP_NODE_AGENT_ID: ${PSP_NODE_AGENT_ID:?set the PSP agent id}
       PSP_NODE_DOCKER_REMOTE_UPGRADE: "true"
+      PSP_NODE_CREDENTIAL_FILE: /run/secrets/passwall-node/node-credential.txt
       # Development only, for an explicitly HTTP PSP endpoint:
       PSP_NODE_ALLOW_INSECURE_HTTP: ${PSP_NODE_ALLOW_INSECURE_HTTP:-false}
-    secrets:
-      - node_credential
     volumes:
-      - passwall-node-data:/var/lib/passwall-node
-      - passwall-node-upgrades:/run/passwall-node-upgrades
+      # Mount directories rather than individual host files. This avoids NAS
+      # Compose implementations turning an absent file bind source into a
+      # directory. Create ./config/node-credential.txt before first start.
+      - ./config:/run/secrets/passwall-node:ro
+      - ./data:/var/lib/passwall-node
+      - ./upgrades:/run/passwall-node-upgrades
     labels:
       io.kazuhahub.passwall-node.managed: "true"
       io.kazuhahub.passwall-node.role: agent
@@ -65,7 +68,7 @@ services:
       # The updater is intentionally isolated from the network-facing agent.
       # Docker socket access is root-equivalent; never add it to passwall-node.
       - /var/run/docker.sock:/var/run/docker.sock
-      - passwall-node-upgrades:/run/passwall-node-upgrades
+      - ./upgrades:/run/passwall-node-upgrades
     read_only: true
     tmpfs:
       - /tmp:size=4m,mode=1777
@@ -74,11 +77,3 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 15s
-
-secrets:
-  node_credential:
-    file: ./secrets/node-credential
-
-volumes:
-  passwall-node-data:
-  passwall-node-upgrades:

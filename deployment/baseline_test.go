@@ -18,7 +18,7 @@ func TestDockerEntrypointTimestampsAndDiagnosesPermanentMountErrors(t *testing.T
 		"%Y-%m-%dT%H:%M:%SZ",
 		"level=error",
 		"credential path is a directory, not a file",
-		"use a Docker named volume or set PUID/PGID",
+		"allow ownership changes or set PUID/PGID",
 		"is not writable by PUID=",
 	} {
 		if !strings.Contains(text, required) {
@@ -27,6 +27,29 @@ func TestDockerEntrypointTimestampsAndDiagnosesPermanentMountErrors(t *testing.T
 	}
 	if output, err := exec.Command("sh", "-n", "../docker-entrypoint.sh").CombinedOutput(); err != nil {
 		t.Fatalf("docker-entrypoint.sh syntax: %v\n%s", err, output)
+	}
+}
+
+func TestComposeExampleUsesOnlyExplicitProjectDirectoryMounts(t *testing.T) {
+	compose, err := os.ReadFile("../compose.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(compose)
+	for _, required := range []string{
+		"PSP_NODE_CREDENTIAL_FILE: /run/secrets/passwall-node/node-credential.txt",
+		"./config:/run/secrets/passwall-node:ro",
+		"./data:/var/lib/passwall-node",
+		"./upgrades:/run/passwall-node-upgrades",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Compose example lost project-directory mount %q", required)
+		}
+	}
+	for _, forbidden := range []string{"./node-credential:", "secrets:\n", "passwall-node-data:", "passwall-node-upgrades:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("Compose example still uses a file or named-volume mount: %q", forbidden)
+		}
 	}
 }
 
