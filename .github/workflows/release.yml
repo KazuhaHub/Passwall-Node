@@ -28,6 +28,7 @@ jobs:
   setup:
     name: Resolve release identity
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       tag: ${{ steps.identity.outputs.tag }}
       owner_lc: ${{ steps.identity.outputs.owner_lc }}
@@ -77,21 +78,25 @@ jobs:
             exit 1
           fi
           owner_lc=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
-          echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
           # Successful build-job retries reuse this stamp instead of changing
           # the daemon bytes by reading a fresh clock in every build job.
-          echo "build_date=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
+          build_date=$(date -u +%FT%TZ)
           upgrade_info=$(go run ./cmd/node --upgrade-info)
           state_schema=$(printf '%s' "$upgrade_info" | jq -er '.state_schema | select(type == "number" and . > 0)')
           upgrade_contract=$(printf '%s' "$upgrade_info" | jq -er '.upgrade_contract | select(type == "number" and . > 0)')
-          echo "state_schema=${state_schema}" >> "$GITHUB_OUTPUT"
-          echo "upgrade_contract=${upgrade_contract}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=${tag}"
+            echo "owner_lc=${owner_lc}"
+            echo "sha=${release_sha}"
+            echo "build_date=${build_date}"
+            echo "state_schema=${state_schema}"
+            echo "upgrade_contract=${upgrade_contract}"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: setup
     strategy:
       fail-fast: false
@@ -146,6 +151,7 @@ jobs:
   release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [setup, build]
     # The private signing key is scoped to this protected environment. Approve
     # only after reviewing the exact tag plus signing code/workflow diff;
@@ -196,7 +202,7 @@ jobs:
               tar -C build -czf "dist/${package}.tar.gz" "$package"
             fi
           done
-          (cd dist && sha256sum * > SHA256SUMS.txt)
+          (cd dist && sha256sum -- * > SHA256SUMS.txt)
       - name: Sign checksum manifest
         shell: bash
         env:
@@ -222,6 +228,7 @@ jobs:
   docker:
     name: Publish container image
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [setup, build]
     permissions:
       contents: read

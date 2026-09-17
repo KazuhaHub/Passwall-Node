@@ -64,7 +64,8 @@ jobs:
           command -v docker > /dev/null
           # Isolate this client's authentication without modifying/logging out
           # any existing Docker configuration. No registry token is supplied.
-          export DOCKER_CONFIG="$(mktemp -d "$RUNNER_TEMP/passwall-container-auth.XXXXXX")"
+          docker_config=$(mktemp -d "$RUNNER_TEMP/passwall-container-auth.XXXXXX")
+          export DOCKER_CONFIG="$docker_config"
           test ! -e "$DOCKER_CONFIG/config.json"
           docker info > /dev/null
           image="${IMAGE_REPOSITORY}:${REQUESTED_VERSION}"
