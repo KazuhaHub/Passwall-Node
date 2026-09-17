@@ -2,10 +2,33 @@ package deployment
 
 import (
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
 )
+
+func TestDockerEntrypointTimestampsAndDiagnosesPermanentMountErrors(t *testing.T) {
+	entrypoint, err := os.ReadFile("../docker-entrypoint.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(entrypoint)
+	for _, required := range []string{
+		"%Y-%m-%dT%H:%M:%SZ",
+		"level=error",
+		"credential path is a directory, not a file",
+		"use a Docker named volume or set PUID/PGID",
+		"is not writable by PUID=",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("entrypoint lost actionable Docker logging: %q", required)
+		}
+	}
+	if output, err := exec.Command("sh", "-n", "../docker-entrypoint.sh").CombinedOutput(); err != nil {
+		t.Fatalf("docker-entrypoint.sh syntax: %v\n%s", err, output)
+	}
+}
 
 // Keep the source-build image aligned with the CI compiler (go.mod's
 // preferred toolchain), and both container paths on the same patched base.

@@ -11,11 +11,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/corecatalog"
@@ -50,6 +50,27 @@ type options struct {
 	ShowVersion       bool
 }
 
+type nodeLogger struct {
+	mu  sync.Mutex
+	out io.Writer
+	now func() time.Time
+}
+
+func newNodeLogger(out io.Writer) *nodeLogger {
+	return &nodeLogger{out: out, now: time.Now}
+}
+
+func (l *nodeLogger) printf(level, format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, _ = fmt.Fprintf(l.out, "%s passwall-node level=%s message=%q\n",
+		l.now().UTC().Format(time.RFC3339Nano), level, fmt.Sprintf(format, args...))
+}
+
+func (l *nodeLogger) Infof(format string, args ...any)  { l.printf("info", format, args...) }
+func (l *nodeLogger) Warnf(format string, args ...any)  { l.printf("warn", format, args...) }
+func (l *nodeLogger) Errorf(format string, args ...any) { l.printf("error", format, args...) }
+
 func main() {
 	if filepath.Base(os.Args[0]) == "pn" {
 		if err := manage.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -59,7 +80,7 @@ func main() {
 		return
 	}
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "passwall-node:", err)
+		newNodeLogger(os.Stderr).Errorf("%v", err)
 		os.Exit(1)
 	}
 }
@@ -103,7 +124,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 
 	ctx, stop := signalContext(context.Background())
 	defer stop()
-	logger := log.New(stderr, "passwall-node ", log.Ldate|log.Ltime|log.Lmicroseconds|log.LUTC|log.Lmsgprefix)
+	logger := newNodeLogger(stderr)
 	if err := os.MkdirAll(parsed.DataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
@@ -168,7 +189,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	singBoxTelemetry, err := singbox.NewTelemetry(singbox.TelemetryOptions{
 		Store: store, Status: supervisor.Status, APIListen: parsed.SingBoxAPIListen,
-		APISecret: singBoxAPISecret, OnError: func(err error) { logger.Printf("%v", err) },
+		APISecret: singBoxAPISecret, OnError: func(err error) { logger.Errorf("%v", err) },
 	})
 	if err != nil {
 		return err
@@ -192,7 +213,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	})
 	var startClock state.TaskStartClock
 	if clockErr != nil {
-		logger.Printf("task start clock unavailable; expiry tasks stay disabled: %v", clockErr)
+		logger.Warnf("task start clock unavailable; expiry tasks stay disabled: %v", clockErr)
 	} else {
 		startClock = taskClock
 	}
@@ -239,32 +260,32 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 			Capabilities: taskWorker.Capabilities(),
 		},
 		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
-		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Printf("task start authorization held: %v", err) },
+		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
 	}
 	if upgradeClient != nil {
 		synchronizer.OnSynced = func(ctx context.Context) error { return upgradeClient.RecordReady(ctx, store) }
 	}
 	runner, err := agent.NewRunner(synchronizer, agent.RunnerOptions{OnError: func(err error) {
-		logger.Printf("sync failed; retrying: %v", err)
+		logger.Warnf("sync failed; retrying: %v", err)
 	}})
 	if err != nil {
 		return err
 	}
 	taskWorker.SetResultNotifier(runner.Wake)
 
-	logger.Printf("starting agent_id=%s version=%s endpoint=%s", parsed.AgentID, buildversion.String(), parsed.Endpoint)
+	logger.Infof("starting agent_id=%s version=%s endpoint=%s", parsed.AgentID, buildversion.String(), parsed.Endpoint)
 	err = lifecycle.Run(ctx,
 		lifecycle.Service{Name: "core supervisor", Run: supervisor.Run},
 		lifecycle.Service{Name: "sing-box telemetry", Run: singBoxTelemetry.Run},
 		lifecycle.Service{Name: "local expiry", Run: func(ctx context.Context) error {
-			return coreRuntime.RunExpiryLoop(ctx, func(err error) { logger.Printf("%v", err) })
+			return coreRuntime.RunExpiryLoop(ctx, func(err error) { logger.Errorf("%v", err) })
 		}},
 		lifecycle.Service{Name: "task worker", Run: taskWorker.Run},
 		lifecycle.Service{Name: "control-plane sync", Run: runner.Run},
 	)
 	if err == nil {
-		logger.Printf("stopped")
+		logger.Infof("stopped")
 	}
 	return err
 }
