@@ -176,3 +176,35 @@ jobs:
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .version)"
           test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
           test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
+      - name: Verify BusyBox entrypoint with directory bind mounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/passwall-node-container"
+          mkdir -p "$fixture/config" "$fixture/data"
+          printf 'pspn_%064d\n' 0 > "$fixture/config/node-credential.txt"
+          cat > "$fixture/fake-node" <<'SCRIPT'
+          #!/bin/sh
+          test "$(id -u):$(id -g)" = 10001:10001
+          test -w /var/lib/passwall-node
+          touch /var/lib/passwall-node/entrypoint-ready
+          exec sleep 30
+          SCRIPT
+          chmod 0755 "$fixture/fake-node"
+          container="$(docker run -d --network none \
+            -e PSP_NODE_ENDPOINT=https://panel.invalid/v1/node/sync \
+            -e PSP_NODE_AGENT_ID=agt_container_entrypoint \
+            -e PSP_NODE_CREDENTIAL_FILE=/run/secrets/passwall-node/node-credential.txt \
+            -v "$fixture/config:/run/secrets/passwall-node:ro" \
+            -v "$fixture/data:/var/lib/passwall-node" \
+            -v "$fixture/fake-node:/usr/local/bin/passwall-node:ro" \
+            passwall-node:test)"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          for _ in {1..10}; do
+            test -f "$fixture/data/entrypoint-ready" && break
+            sleep 1
+          done
+          test -f "$fixture/data/entrypoint-ready"
+          test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+          ! docker logs "$container" 2>&1 | grep -F 'find: unrecognized: -uid'
+          test "$(stat -c %u:%g "$fixture/data")" = 10001:10001
