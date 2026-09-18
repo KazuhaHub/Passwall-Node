@@ -89,7 +89,42 @@ type Supervisor interface {
 	Apply(context.Context, Artifact) error
 	Deploy(context.Context, Deployment) error
 	Status() Status
+	// ProcessHandle reports the identity of the core currently running under
+	// this supervisor. False means no core is running — a business state that a
+	// collector reports as stopped, never as an unreadable process.
+	//
+	// It is on the interface rather than inferred from Status because a handle
+	// has to come from whoever STARTED the child: only the supervisor knows
+	// which process is the core, and a collector that went looking for a PID by
+	// itself would be reading an arbitrary process.
+	ProcessHandle() (ProcessHandle, bool)
 }
+
+// ProcessHandle is a VERIFIABLE reference to the core process a supervisor
+// started.
+//
+// A BARE PID WOULD NOT BE ENOUGH, and that is why this is a type rather than an
+// int. The kernel recycles PIDs — the core is spawned as its own process-group
+// leader, so its number is available for reuse the moment it dies — and a
+// collector holding only a number can read a DIFFERENT process's counters and
+// report them as the core's. The supervisor therefore records the kernel's
+// per-process start time at spawn, and the collector re-reads it from the same
+// file it takes the counters from. A disagreement means the PID was reused, and
+// the sample is discarded rather than attributed.
+//
+// StartTicks is zero on a platform that cannot supply it or when the read
+// failed. ZERO MEANS UNVERIFIABLE, NOT MATCHING: a collector must discard the
+// core section rather than trust a handle it cannot check. That is the same rule
+// as everywhere else in host telemetry — an unreadable value is reported as
+// unavailable, never as a plausible-looking number.
+type ProcessHandle struct {
+	PID        int
+	StartTicks uint64
+}
+
+// Verifiable reports whether the handle carries an identity a collector can
+// re-check before consuming any of the process's counters.
+func (h ProcessHandle) Verifiable() bool { return h.PID > 0 && h.StartTicks > 0 }
 
 // Counters are the core's current cumulative observations. Epoch changes when
 // the core's counter namespace is reset, such as after a process replacement.

@@ -57,6 +57,9 @@ func (s *supervisorStub) Apply(context.Context, agentcore.Artifact) error {
 	return errors.New("unexpected Apply call")
 }
 func (s *supervisorStub) Status() agentcore.Status { return s.status }
+func (s *supervisorStub) ProcessHandle() (agentcore.ProcessHandle, bool) {
+	return agentcore.ProcessHandle{}, false
+}
 func (s *supervisorStub) Deploy(_ context.Context, deployment agentcore.Deployment) error {
 	s.deployCalls++
 	s.deployment = deployment
