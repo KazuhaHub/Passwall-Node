@@ -111,6 +111,30 @@ const mountTableAllExt4 = "36 35 98:0 / / rw,relatime shared:1 - ext4 /dev/sda1 
 // mountTableAllOverlay is a container's writable layer.
 const mountTableAllOverlay = "36 35 98:0 / / rw,relatime shared:1 - overlay overlay rw\n"
 
+// netDevTable is a host with loopback, one physical interface and one veth.
+//
+// The loopback entry is here on purpose: it must be excluded, and the exclusion
+// is by its own IFF_LOOPBACK flag rather than by the conventional name.
+const netDevTable = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 1000 10 0 0 0 0 0 0 1000 10 0 0 0 0 0 0
+  eth0: 5000000 40000 3 1 0 0 0 0 9000000 30000 0 2 0 0 0 0
+ veth1: 100 1 0 0 0 0 0 0 200 2 0 0 0 0 0 0
+`
+
+// snmpTable is the header/value pair shape the kernel writes.
+const snmpTable = `Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts InCsumErrors
+Tcp: 1 200 120000 -1 100 200 1 2 42 5000 6000 30 0 0 0
+`
+
+const sockstatTable = `sockets: used 500
+TCP: inuse 42 orphan 0 tw 7 alloc 50 mem 10
+UDP: inuse 3 mem 1
+UDPLITE: inuse 0
+RAW: inuse 0
+FRAG: inuse 0 memory 0
+`
+
 // systemdHostFixture is a plain Linux host running the agent under systemd.
 //
 // The cgroup files are laid out for v2 with the agent in its own systemd slice,
@@ -142,6 +166,29 @@ func systemdHostFixture(t *testing.T) *fixture {
 		sys(slice+"memory.swap.current", "0\n").
 		sys(slice+"memory.swap.max", "0\n").
 		sys(slice+"memory.events", "low 0\nhigh 0\nmax 0\noom 2\noom_kill 1\n").
+		proc("net/dev", netDevTable).
+		proc("net/snmp", snmpTable).
+		proc("net/sockstat", sockstatTable).
+		proc("net/route", "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"+
+			"eth0\t00000000\t0100000A\t0003\t0\t0\t100\t00000000\t0\t0\t0\n").
+		proc("net/ipv6_route", "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "+
+			"00000000000000000000000000000000 00000100 00000001 00000000 00000003 eth0\n").
+		sys("class/net/lo/flags", "0x9\n").
+		sys("class/net/lo/ifindex", "1\n").
+		sys("class/net/lo/mtu", "65536\n").
+		sys("class/net/eth0/flags", "0x1003\n").
+		sys("class/net/eth0/ifindex", "2\n").
+		sys("class/net/eth0/mtu", "1500\n").
+		sys("class/net/eth0/operstate", "up\n").
+		sys("class/net/eth0/speed", "10000\n").
+		// A veth in a bridge: administratively up but with no carrier, and no
+		// negotiated speed to read.
+		sys("class/net/veth1/flags", "0x1002\n").
+		sys("class/net/veth1/ifindex", "3\n").
+		sys("class/net/veth1/mtu", "1500\n").
+		sys("class/net/veth1/operstate", "lowerlayerdown\n").
+		proc("sys/net/netfilter/nf_conntrack_count", "1200\n").
+		proc("sys/net/netfilter/nf_conntrack_max", "65536\n").
 		etc("os-release", "NAME=\"Debian GNU/Linux\"\nID=debian\nVERSION_ID=\"12\"\n")
 }
 

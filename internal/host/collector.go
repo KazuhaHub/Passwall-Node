@@ -153,6 +153,9 @@ func (c *collector) Collect(ctx context.Context) (protocol.HostObservation, erro
 	c.collectLoad(collected)
 	c.collectMemory(collected, bootID)
 	c.collectFilesystem(collected)
+	c.collectNetwork(collected, bootID)
+	c.collectTCP(collected, bootID)
+	c.collectSockets(collected)
 
 	collected.observation.CollectedAtMS = c.options.now().UTC().UnixMilli()
 	collected.observation.Unavailable = collected.unavailableTokens()
@@ -223,13 +226,7 @@ func (c *collector) collectCPU(collected *sample, bootID string) {
 	var cpu protocol.CPUObservation
 	if raw, err := c.readProc("stat"); err == nil {
 		if system, parseErr := parseSystemCPU(raw); parseErr == nil {
-			// Prefer the boot id: it survives an agent restart, so the panel can
-			// keep differencing across one. The process-scoped epoch is the
-			// fallback.
-			system.CounterEpoch = bootID
-			if system.CounterEpoch == "" {
-				system.CounterEpoch = c.processEpoch
-			}
+			system.CounterEpoch = c.counterEpoch(bootID)
 			cpu.System = &system
 		}
 	}
