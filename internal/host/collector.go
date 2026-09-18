@@ -64,6 +64,11 @@ func newCollector(options Options, statFS func(string) (filesystemUsage, error))
 		processEpoch: mintEpoch(), pageSize: os.Getpagesize(),
 	}
 	collector.cgroupVersion = collector.detectCgroupVersion()
+	// AT_CLKTCK is read ONCE, at construction. It is a property of the kernel,
+	// not of a sample, and reading it per collection would mean mutating the
+	// collector during a collect — which is exactly the kind of shared state a
+	// concurrent caller would race on.
+	collector.cpuTicksPerSecond = collector.readClockTicks()
 	return collector
 }
 
@@ -156,6 +161,8 @@ func (c *collector) Collect(ctx context.Context) (protocol.HostObservation, erro
 	c.collectNetwork(collected, bootID)
 	c.collectTCP(collected, bootID)
 	c.collectSockets(collected)
+	c.collectProcesses(collected, bootID)
+	c.collectTuning(collected)
 
 	collected.observation.CollectedAtMS = c.options.now().UTC().UnixMilli()
 	collected.observation.Unavailable = collected.unavailableTokens()

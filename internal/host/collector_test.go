@@ -92,7 +92,7 @@ func TestCollectedSamplesSatisfyTheProtocolValidator(t *testing.T) {
 
 // mountTableAllOverlay is applied to the container fixture, whose data directory
 // therefore sits on the container's writable layer rather than the host's disk.
-func dockerContainerFixture(t *testing.T) *fixture {
+func dockerContainerFixture(t testing.TB) *fixture {
 	return newFixture(t).
 		proc("uptime", "3600.10 120.50\n").
 		proc("stat", "cpu  40 5 10 400 8 2 3 0 0 0\n").
@@ -122,7 +122,7 @@ func dockerContainerFixture(t *testing.T) *fixture {
 
 // oldKernelFixture predates MemAvailable, which is the case where an estimate
 // would be tempting and wrong.
-func oldKernelFixture(t *testing.T) *fixture {
+func oldKernelFixture(t testing.TB) *fixture {
 	return newFixture(t).
 		proc("uptime", "900.00 300.00\n").
 		proc("stat", "cpu  10 2 3 80 1 0 1 0\n").
@@ -367,7 +367,7 @@ func containsToken(tokens []string, want string) bool {
 // removeFixtureFile deletes one file from an already-materialised fixture, so a
 // test can ask what the collector does when a single kernel interface is absent
 // without rebuilding the whole tree.
-func removeFixtureFile(t *testing.T, root, relative string) {
+func removeFixtureFile(t testing.TB, root, relative string) {
 	t.Helper()
 	if err := os.Remove(filepath.Join(root, relative)); err != nil {
 		t.Fatal(err)

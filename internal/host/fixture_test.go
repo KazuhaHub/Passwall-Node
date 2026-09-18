@@ -1,10 +1,21 @@
 package host
 
 import (
+	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+)
+
+// Fixture identifiers shared by the process tests, so an assertion never has to
+// repeat a magic number that the fixture generator also holds.
+const (
+	agentPID       = 1234
+	agentStartTick = 500000
+	clockTicks     = 100
 )
 
 // fixture materialises a synthetic /proc, /sys and /etc tree so the collector
@@ -15,20 +26,67 @@ import (
 // exactly the ones a developer's host does not have, so a collector that read
 // the real filesystem could not be tested for any of them.
 type fixture struct {
-	t     *testing.T
+	t     testing.TB
 	files map[string]string
+	bytes map[string][]byte
 	dirs  map[string]struct{}
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t testing.TB) *fixture {
 	t.Helper()
-	return &fixture{t: t, files: map[string]string{}, dirs: map[string]struct{}{}}
+	return &fixture{
+		t: t, files: map[string]string{}, bytes: map[string][]byte{}, dirs: map[string]struct{}{},
+	}
 }
 
 // proc writes a file described by a path relative to /proc.
 func (f *fixture) proc(relative, content string) *fixture {
 	f.files["proc/"+relative] = content
 	return f
+}
+
+// fdEntries creates count entries under a /proc directory.
+//
+// Open file descriptors are observed by counting a directory's entries, not by
+// reading a counter, so a fixture has to materialise them.
+func (f *fixture) fdEntries(relative string, count int) *fixture {
+	for index := 0; index < count; index++ {
+		f.files["proc/"+relative+"/"+strconv.Itoa(index)] = ""
+	}
+	return f
+}
+
+// procBytes writes a binary file under /proc, which auxv requires.
+func (f *fixture) procBytes(relative string, content []byte) *fixture {
+	f.bytes["proc/"+relative] = content
+	return f
+}
+
+// auxvClockTicks builds a minimal auxiliary vector carrying AT_CLKTCK.
+//
+// The word size follows the parsing host so the fixture matches whichever layout
+// the collector will look for — auxv does not describe its own width.
+func auxvClockTicks(ticks uint64) []byte {
+	buffer := make([]byte, 0, 32)
+	appendPair := func(kind, value uint64) {
+		var pair [16]byte
+		binary.NativeEndian.PutUint64(pair[0:8], kind)
+		binary.NativeEndian.PutUint64(pair[8:16], value)
+		buffer = append(buffer, pair[:]...)
+	}
+	appendPair(17, ticks)
+	appendPair(0, 0) // AT_NULL terminator
+	return buffer
+}
+
+// procStatLine builds a /proc/<pid>/stat line with every column this protocol
+// reads in its correct position.
+//
+// The comm is a parameter because the kernel does not escape what goes inside
+// the parentheses, which is the case the parser has to survive.
+func procStatLine(pid int, comm string, utime, stime, threads, startTicks, rssPages uint64) string {
+	return fmt.Sprintf("%d (%s) S 1 1234 1234 0 -1 4194560 100 0 0 0 %d %d 0 0 20 0 %d 0 %d 123456 %d\n",
+		pid, comm, utime, stime, threads, startTicks, rssPages)
 }
 
 // sys writes a file described by a path relative to /sys.
@@ -62,6 +120,15 @@ func (f *fixture) options() Options {
 			f.t.Fatal(err)
 		}
 	}
+	for relative, content := range f.bytes {
+		location := filepath.Join(root, relative)
+		if err := os.MkdirAll(filepath.Dir(location), 0o700); err != nil {
+			f.t.Fatal(err)
+		}
+		if err := os.WriteFile(location, content, 0o600); err != nil {
+			f.t.Fatal(err)
+		}
+	}
 	for relative := range f.dirs {
 		if err := os.MkdirAll(filepath.Join(root, relative), 0o700); err != nil {
 			f.t.Fatal(err)
@@ -78,7 +145,7 @@ func (f *fixture) options() Options {
 
 // writeFixtureFile overwrites one file in an already-materialised fixture, so a
 // test can vary a single kernel value without rebuilding the tree.
-func writeFixtureFile(t *testing.T, root, relative, content string) {
+func writeFixtureFile(t testing.TB, root, relative, content string) {
 	t.Helper()
 	location := filepath.Join(root, relative)
 	if err := os.MkdirAll(filepath.Dir(location), 0o700); err != nil {
@@ -139,7 +206,7 @@ FRAG: inuse 0 memory 0
 //
 // The cgroup files are laid out for v2 with the agent in its own systemd slice,
 // which is what a real systemd deployment looks like.
-func systemdHostFixture(t *testing.T) *fixture {
+func systemdHostFixture(t testing.TB) *fixture {
 	// Relative to /sys — the sys() helper supplies that prefix, so repeating it
 	// here would write the files to a path nothing ever reads.
 	const slice = "fs/cgroup/system.slice/passwall-node.service/"
@@ -189,13 +256,23 @@ func systemdHostFixture(t *testing.T) *fixture {
 		sys("class/net/veth1/operstate", "lowerlayerdown\n").
 		proc("sys/net/netfilter/nf_conntrack_count", "1200\n").
 		proc("sys/net/netfilter/nf_conntrack_max", "65536\n").
+		procBytes("self/auxv", auxvClockTicks(clockTicks)).
+		proc("self/stat", procStatLine(agentPID, "passwall-node", 900, 100, 12, agentStartTick, 12000)).
+		proc("self/limits", "Limit                     Soft Limit           Hard Limit           Units\n"+
+			"Max open files            1024                 1048576              files\n").
+		fdEntries("self/fd", 24).
+		// Deliberately unsorted and with a repeat: the list must come out sorted
+		// and deduplicated so an unchanged host encodes to the same bytes.
+		proc("sys/net/ipv4/tcp_available_congestion_control", "reno cubic bbr cubic\n").
+		proc("sys/net/ipv4/tcp_congestion_control", "cubic\n").
+		proc("sys/net/core/default_qdisc", "fq_codel\n").
 		etc("os-release", "NAME=\"Debian GNU/Linux\"\nID=debian\nVERSION_ID=\"12\"\n")
 }
 
 // cgroupV1HostFixture is the older hierarchy: one mount per controller, byte
 // limits that express "unlimited" as a page-aligned LONG_MAX sentinel, and no
 // OOM counter at all.
-func cgroupV1HostFixture(t *testing.T) *fixture {
+func cgroupV1HostFixture(t testing.TB) *fixture {
 	const group = "docker/9f1c0f5e1b1c"
 	return newFixture(t).
 		proc("uptime", "7200.00 1200.00\n").
