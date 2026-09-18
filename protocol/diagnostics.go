@@ -252,6 +252,9 @@ func ValidateDiagnosticsResult(result DiagnosticsResult) error {
 		}
 	}
 	if result.State != nil {
+		if result.State.SQLiteQuickCheck == "" {
+			return fmt.Errorf("diagnostics state has no integrity verdict")
+		}
 		if result.State.OutboxPending < 0 || result.State.TasksQueued < 0 {
 			return fmt.Errorf("diagnostics state counts must not be negative")
 		}

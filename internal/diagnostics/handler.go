@@ -25,6 +25,29 @@ const (
 	ErrCodeTooLarge = "diagnostics_result_too_large"
 )
 
+// Collection is what one pass of the local checks produced.
+//
+// THE HOST SECTION AND THE collector.host CHECK COME FROM THE SAME PASS ON
+// PURPOSE. Section 7's doctor already collects the host once and reports
+// whether that collection worked; running the collector a second time for the
+// host section would put two different samples in one diagnostic, and a reader
+// has no way to tell that the check and the observation describe different
+// instants.
+type Collection struct {
+	Checks []protocol.DiagnosticsCheck
+	// Host is the observation that pass already took. It is nil when the
+	// collector could not run, which the collector.host check reports — so a
+	// requested host section fails rather than arriving empty.
+	Host *protocol.HostObservation
+	// QuickCheck is the verdict that pass reached for state.sqlite_quick_check.
+	//
+	// THE STATE SECTION TAKES ITS VERDICT FROM HERE rather than scanning again:
+	// an integrity check is the expensive part of the pass, and running it twice
+	// would let the two answers disagree in one diagnostic. The detail behind a
+	// non-ok verdict is in the check's summary, which the result carries too.
+	QuickCheck string
+}
+
 // Handler answers diagnostics.collect.v1.
 //
 // EVERY DEPENDENCY IS A FUNCTION, so the read-only promise is visible in the
@@ -35,16 +58,15 @@ type Handler struct {
 	// Ring is the agent's own recent events. A nil ring reports none, which is
 	// what a build without the recorder should say rather than inventing events.
 	Ring *Ring
-	// Checks produces section 7's ten results. It is required: the check set is
-	// the diagnostic's conclusion and the result cannot be built without it.
-	Checks func(context.Context) ([]protocol.DiagnosticsCheck, error)
-	// Host reuses the collector the agent already runs, so a diagnostic cannot
-	// read something the ordinary telemetry path does not.
-	Host func(context.Context) (*protocol.HostObservation, error)
+	// Collect produces section 7's ten results, and with them the host
+	// observation they were taken from. It is required: the check set is the
+	// diagnostic's conclusion and the result cannot be built without it.
+	Collect func(context.Context) (Collection, error)
 	// Runtime reports the core's posture.
 	Runtime func(context.Context) (*protocol.DiagnosticsRuntime, error)
-	// State counts the agent's own durable rows.
-	State func(context.Context) (*protocol.DiagnosticsState, error)
+	// State counts the agent's own durable rows, and takes the integrity verdict
+	// from the pass rather than scanning a second time.
+	State func(context.Context, Collection) (*protocol.DiagnosticsState, error)
 	// Now is the collection timestamp. A nil clock takes the wall clock.
 	Now func() int64
 }
@@ -76,10 +98,10 @@ func (h *Handler) collect(ctx context.Context, task protocol.Task, recovered boo
 	if err := protocol.ValidateDiagnosticsArgs(args); err != nil {
 		return nil, &agent.TaskError{Code: ErrCodeInvalidArgs, Err: err}
 	}
-	if h.Checks == nil {
+	if h.Collect == nil {
 		return nil, &agent.TaskError{Code: ErrCodeCollect, Err: errors.New("no check producer is configured")}
 	}
-	checks, err := h.Checks(ctx)
+	collection, err := h.Collect(ctx)
 	if err != nil {
 		return nil, &agent.TaskError{Code: ErrCodeCollect, Err: fmt.Errorf("checks: %w", err)}
 	}
@@ -87,31 +109,27 @@ func (h *Handler) collect(ctx context.Context, task protocol.Task, recovered boo
 		SchemaVersion: protocol.DiagnosticsSchemaVersion,
 		CollectedAtMS: h.now(),
 		Recovered:     recovered,
-		Checks:        checks,
+		Checks:        collection.Checks,
 	}
 	for _, section := range args.Sections {
 		// A REQUESTED SECTION THAT CANNOT BE READ FAILS THE TASK rather than
 		// arriving as an absent field. Absent already means "not requested", and
 		// letting the two collapse would let a caller read a collection that
 		// silently skipped a section as a complete one.
-		if err := h.fill(ctx, section, args.MaxEvents, &result); err != nil {
+		if err := h.fill(ctx, section, args.MaxEvents, collection, &result); err != nil {
 			return nil, &agent.TaskError{Code: ErrCodeCollect, Err: fmt.Errorf("section %s: %w", section, err)}
 		}
 	}
 	return h.fit(result)
 }
 
-func (h *Handler) fill(ctx context.Context, section string, maxEvents int, result *protocol.DiagnosticsResult) error {
+func (h *Handler) fill(ctx context.Context, section string, maxEvents int, collection Collection, result *protocol.DiagnosticsResult) error {
 	switch section {
 	case protocol.DiagnosticsSectionHost:
-		if h.Host == nil {
-			return errors.New("no host collector is configured")
+		if collection.Host == nil {
+			return errors.New("the host collector did not run; the collector.host check says why")
 		}
-		observation, err := h.Host(ctx)
-		if err != nil {
-			return err
-		}
-		result.Host = observation
+		result.Host = collection.Host
 	case protocol.DiagnosticsSectionRuntime:
 		if h.Runtime == nil {
 			return errors.New("no runtime reader is configured")
@@ -125,7 +143,7 @@ func (h *Handler) fill(ctx context.Context, section string, maxEvents int, resul
 		if h.State == nil {
 			return errors.New("no state reader is configured")
 		}
-		state, err := h.State(ctx)
+		state, err := h.State(ctx, collection)
 		if err != nil {
 			return err
 		}
