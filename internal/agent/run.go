@@ -87,7 +87,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			partial = !protocol.ShouldSendFull(lastEnvelope, since)
 		}
-		result, err := r.synchronizer.SyncOnce(ctx, partial)
+		// The telemetry decision is made from the PREVIOUS envelope, which is the
+		// only one that has arrived. It rides on either report shape, so it is
+		// resolved separately from partial and passed alongside it.
+		includeHost := r.synchronizer.Host != nil && r.synchronizer.Host.Due(lastEnvelope, now)
+		result, err := r.synchronizer.SyncOnce(ctx, partial, includeHost)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil

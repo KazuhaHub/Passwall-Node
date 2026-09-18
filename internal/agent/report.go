@@ -36,9 +36,13 @@ type ReportBuilder struct {
 type BuiltReport struct {
 	Report    protocol.NodeReport
 	OutboxIDs []int64
+	// HostDropped says the telemetry sample was removed to fit the wire. The
+	// cadence must NOT advance for such a round — nothing was delivered — so the
+	// caller retries on the next one and records the episode.
+	HostDropped bool
 }
 
-func (b ReportBuilder) Build(ctx context.Context, partial bool) (BuiltReport, error) {
+func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.HostObservation) (BuiltReport, error) {
 	if b.AgentID == "" {
 		return BuiltReport{}, fmt.Errorf("agent id is required")
 	}
@@ -118,40 +122,75 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool) (BuiltReport, er
 	}
 	report.Issues = batch.Issues
 	report.TaskResults = batch.TaskResults
-	if err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit()); err != nil {
+	// The telemetry sample is attached LAST, after the control content is
+	// settled, so the wire-size check below sees the report it is actually
+	// deciding about.
+	report.Host = host
+	droppedHost, err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit())
+	if err != nil {
 		return BuiltReport{}, err
 	}
-	return BuiltReport{Report: report, OutboxIDs: batch.IDs}, nil
+	return BuiltReport{Report: report, OutboxIDs: batch.IDs, HostDropped: droppedHost}, nil
 }
 
-func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64) error {
-	body, err := json.Marshal(report)
+// fitReportToWire shrinks a report to fit, in a FIXED degradation order, and
+// reports whether the telemetry sample was the casualty.
+//
+// TELEMETRY GOES FIRST, and that order is the whole point. It is the only
+// content in a report that is regenerated every interval, so losing it costs a
+// visible gap rather than an unreported side effect. Letting it hold back a
+// control report would mean an observation the panel can live without is
+// delaying a roster or a quota decision the node needs — which is exactly the
+// coupling this feature is forbidden to introduce.
+func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64) (bool, error) {
+	body, err := encodeReport(report)
 	if err != nil {
-		return fmt.Errorf("encode node report for wire-size check: %w", err)
+		return false, err
 	}
 	if int64(len(body)) <= maxBytes {
-		return nil
+		return false, nil
+	}
+
+	droppedHost := false
+	if report.Host != nil {
+		report.Host = nil
+		droppedHost = true
+		body, err = encodeReport(report)
+		if err != nil {
+			return droppedHost, err
+		}
+		if int64(len(body)) <= maxBytes {
+			return droppedHost, nil
+		}
 	}
 	if report.Partial || !hasOutbox {
-		return fmt.Errorf("node report exceeds %d bytes", maxBytes)
+		return droppedHost, fmt.Errorf("node report exceeds %d bytes", maxBytes)
 	}
-	// Do not let a terminal result become trapped behind a large full
-	// enumeration forever. Flush the outbox in a partial report; the next
-	// successful full report remains due because Runner records the actual
-	// shape sent, not the shape originally requested.
+	// Only now the durable-outbox path: a terminal result must not become
+	// trapped behind a large full enumeration forever. Flush the outbox in a
+	// partial report; the next successful full report remains due because Runner
+	// records the actual shape sent, not the shape originally requested.
 	report.Partial = true
 	report.Objects = nil
 	report.ListenerCounters = nil
 	report.Clients = nil
 	report.Subjects = nil
-	body, err = json.Marshal(report)
+	body, err = encodeReport(report)
 	if err != nil {
-		return fmt.Errorf("encode partial outbox flush for wire-size check: %w", err)
+		return droppedHost, err
 	}
 	if int64(len(body)) > maxBytes {
-		return fmt.Errorf("partial node report exceeds %d bytes", maxBytes)
+		return droppedHost, fmt.Errorf("partial node report exceeds %d bytes", maxBytes)
 	}
-	return nil
+	return droppedHost, nil
+}
+
+func encodeReport(report *protocol.NodeReport) ([]byte, error) {
+	body, err := json.Marshal(report)
+	if err != nil {
+		return nil, fmt.Errorf("encode node report for wire-size check: %w", err)
+	}
+	return body, nil
 }
 
 func (b ReportBuilder) bodyLimit() int64 {

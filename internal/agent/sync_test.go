@@ -53,10 +53,10 @@ func TestSyncOnceObservesOnlyBeforeFullReport(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(ctx, false); err != nil {
+	if _, err := synchronizer.SyncOnce(ctx, false, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := synchronizer.SyncOnce(ctx, true); err != nil {
+	if _, err := synchronizer.SyncOnce(ctx, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if observations != 1 || reports != 2 {
@@ -93,7 +93,7 @@ func TestUpgradeReadinessOnlyAfterValidResponseAndLocalConvergence(t *testing.T)
 					ready = true
 					return nil
 				}}
-			_, err := s.SyncOnce(t.Context(), true)
+			_, err := s.SyncOnce(t.Context(), true, false)
 			if name == "success" {
 				if err != nil || !ready {
 					t.Fatalf("ready=%v err=%v", ready, err)
@@ -126,7 +126,7 @@ func TestSyncOnceConvergesClosedGateBeforeNetwork(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(t.Context(), false); err != nil {
+	if _, err := synchronizer.SyncOnce(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(order, ","); got != "observe,converge,network" {
@@ -168,7 +168,7 @@ func TestSyncOnceAcknowledgesOutboxOnlyAfterResponse(t *testing.T) {
 			return ProcessResult{ReportImmediately: true}, nil
 		}),
 	}
-	result, err := synchronizer.SyncOnce(ctx, true)
+	result, err := synchronizer.SyncOnce(ctx, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestSyncOncePreservesOutboxOnTransportFailure(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(ctx, true); err == nil {
+	if _, err := synchronizer.SyncOnce(ctx, true, false); err == nil {
 		t.Fatal("transport failure was hidden")
 	}
 	pending, err := store.PendingOutbox(ctx, 10)
@@ -219,7 +219,7 @@ func TestSyncOnceConvergesDurableStateWhenTransportFails(t *testing.T) {
 			return nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(t.Context(), false); err == nil || !strings.Contains(err.Error(), "network down") {
+	if _, err := synchronizer.SyncOnce(t.Context(), false, false); err == nil || !strings.Contains(err.Error(), "network down") {
 		t.Fatalf("sync error = %v", err)
 	}
 	if converged != 1 {
@@ -244,7 +244,7 @@ func TestSyncOnceValidatesLocalReportBeforeTransport(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(context.Background(), true); err == nil {
+	if _, err := synchronizer.SyncOnce(context.Background(), true, false); err == nil {
 		t.Fatal("invalid local report was sent")
 	}
 	if called {
@@ -269,7 +269,7 @@ func TestSyncOncePreservesOutboxOnInvalidResponseEnvelope(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(ctx, true); err == nil {
+	if _, err := synchronizer.SyncOnce(ctx, true, false); err == nil {
 		t.Fatal("invalid response envelope was accepted")
 	}
 	if processorCalled {
@@ -300,7 +300,7 @@ func TestSyncOncePreservesOutboxOnInvalidResponseTask(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(ctx, true); err == nil {
+	if _, err := synchronizer.SyncOnce(ctx, true, false); err == nil {
 		t.Fatal("invalid response task was accepted")
 	}
 	if processorCalled {
@@ -334,7 +334,7 @@ func TestSyncOnceReportsActualPartialFallbackShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	builder := ReportBuilder{AgentID: "agent-1", Store: store}
-	baseline, err := builder.Build(ctx, false)
+	baseline, err := builder.Build(ctx, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestSyncOnceReportsActualPartialFallbackShape(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	result, err := synchronizer.SyncOnce(ctx, false)
+	result, err := synchronizer.SyncOnce(ctx, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

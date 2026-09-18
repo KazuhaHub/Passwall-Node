@@ -58,6 +58,10 @@ type HTTPOptions struct {
 	MaxResponseBytes  int64
 	AllowInsecureHTTP bool
 	UserAgent         string
+	// Stats observes request and response sizes and the round-trip time. It is
+	// recorded HERE rather than at the caller because this is the only layer
+	// that knows the encoded bytes and the instant the response completed.
+	Stats *RuntimeStats
 }
 
 type HTTPSyncer struct {
@@ -66,6 +70,7 @@ type HTTPSyncer struct {
 	signer           RequestSigner
 	maxResponseBytes int64
 	userAgent        string
+	stats            *RuntimeStats
 }
 
 func NewHTTPSyncer(endpoint string, options HTTPOptions) (*HTTPSyncer, error) {
@@ -106,6 +111,7 @@ func NewHTTPSyncer(endpoint string, options HTTPOptions) (*HTTPSyncer, error) {
 	return &HTTPSyncer{
 		endpoint: u, client: client, signer: options.Signer,
 		maxResponseBytes: maxResponseBytes, userAgent: userAgent,
+		stats: options.Stats,
 	}, nil
 }
 
@@ -116,6 +122,11 @@ func (s *HTTPSyncer) Sync(ctx context.Context, report protocol.NodeReport) (prot
 	}
 	if int64(len(body)) > protocol.MaxSyncBodyBytes {
 		return protocol.SyncResponse{}, fmt.Errorf("node report exceeds %d bytes", protocol.MaxSyncBodyBytes)
+	}
+	// Recorded after encoding, so it describes what was about to go on the wire
+	// rather than what was intended.
+	if s.stats != nil {
+		s.stats.RecordRequestBytes(int64(len(body)))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint.String(), bytes.NewReader(body))
 	if err != nil {
@@ -130,6 +141,10 @@ func (s *HTTPSyncer) Sync(ctx context.Context, report protocol.NodeReport) (prot
 		}
 	}
 
+	// The round trip is measured across the whole request/response interval, not
+	// just the dial: what an operator is watching for is "how long does one sync
+	// exchange take", which includes the peer's own processing time.
+	requestStarted := time.Now()
 	response, err := s.client.Do(req)
 	if err != nil {
 		return protocol.SyncResponse{}, fmt.Errorf("send sync request: %w", err)
@@ -147,6 +162,12 @@ func (s *HTTPSyncer) Sync(ctx context.Context, report protocol.NodeReport) (prot
 	}
 	if int64(len(responseBody)) > s.maxResponseBytes {
 		return protocol.SyncResponse{}, fmt.Errorf("sync response exceeds %d bytes", s.maxResponseBytes)
+	}
+	// Recorded only once the body has been read IN FULL. A partial read is a
+	// failure, and recording its size would describe a response that never
+	// arrived.
+	if s.stats != nil {
+		s.stats.RecordResponse(int64(len(responseBody)), time.Since(requestStarted))
 	}
 	var syncResponse protocol.SyncResponse
 	decoder := json.NewDecoder(bytes.NewReader(responseBody))

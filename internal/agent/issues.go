@@ -24,8 +24,13 @@ const (
 	LocalIssueObjectRejectedTimeout     LocalIssueKind = "object_rejected_timeout"
 	LocalIssueCoreConvergenceFailed     LocalIssueKind = "core_convergence_failed"
 	LocalIssueCoreTelemetryFailed       LocalIssueKind = "core_telemetry_failed"
-	LocalIssueTaskIdentityConflict      LocalIssueKind = LocalIssueKind(protocol.IssueTaskIdentityConflict)
-	LocalIssueTaskReplayFenced          LocalIssueKind = LocalIssueKind(protocol.IssueTaskReplayFenced)
+	// LocalIssueHostTelemetryFailed reports a whole-collection failure. A single
+	// unreadable SECTION is not this: it is an Unavailable token on the sample
+	// itself, because a container that can never read conntrack would otherwise
+	// produce this issue every minute forever.
+	LocalIssueHostTelemetryFailed  LocalIssueKind = LocalIssueKind(protocol.IssueHostTelemetryFailed)
+	LocalIssueTaskIdentityConflict LocalIssueKind = LocalIssueKind(protocol.IssueTaskIdentityConflict)
+	LocalIssueTaskReplayFenced     LocalIssueKind = LocalIssueKind(protocol.IssueTaskReplayFenced)
 )
 
 type LocalIssue struct {

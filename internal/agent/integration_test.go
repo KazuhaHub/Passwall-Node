@@ -64,10 +64,10 @@ func TestB2ReportReceivePersistApplyReportRoundTrip(t *testing.T) {
 		Reports: ReportBuilder{AgentID: "agent-1", Store: store},
 		Syncer:  httpSyncer, Store: store, Processor: processor,
 	}
-	if _, err := synchronizer.SyncOnce(ctx, false); err != nil {
+	if _, err := synchronizer.SyncOnce(ctx, false, false); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
-	if _, err := synchronizer.SyncOnce(ctx, false); err != nil {
+	if _, err := synchronizer.SyncOnce(ctx, false, false); err != nil {
 		t.Fatalf("second sync: %v", err)
 	}
 	if round != 2 || len(issues.issues) != 0 {
