@@ -360,17 +360,25 @@ func (c *collector) buildNetworkInterface(counter netDevCounters) (protocol.Netw
 }
 
 // defaultInterface resolves one address family's default route.
+//
+// A FAMILY WITH NO DEFAULT ROUTE IS A FACT, NOT A FAILURE. Flagging it would
+// mark every IPv4-only or IPv6-only host permanently, which is the same rule
+// that keeps a speedless veth from flagging the whole machine: a token is for
+// "could not determine", and a table with no default route in it determines the
+// answer perfectly well. It is emitted only when the table could not be read,
+// or when several routes tie on the lowest metric and point somewhere different.
 func (c *collector) defaultInterface(path string, parse func([]byte) []routeCandidate, collected *sample) string {
 	raw, err := c.readProc(path)
 	if err != nil {
 		collected.markUnavailable(protocol.UnavailableNetDefaultRoute)
 		return ""
 	}
-	selected, ok := selectDefaultInterface(parse(raw))
+	candidates := parse(raw)
+	if len(candidates) == 0 {
+		return ""
+	}
+	selected, ok := selectDefaultInterface(candidates)
 	if !ok {
-		// Either no default route, or several at the same metric pointing at
-		// different interfaces. Both mean the same thing downstream: the host's
-		// total throughput cannot be attributed.
 		collected.markUnavailable(protocol.UnavailableNetDefaultRoute)
 		return ""
 	}

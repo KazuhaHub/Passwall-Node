@@ -34,14 +34,67 @@ func mintSampleID() string {
 // goes stale against every new orchestrator.
 var containerMarkers = []string{"docker", "containerd", "kubepods", "libpod", "podman", "lxc"}
 
+// detectContainer reports whether this process is running inside a container.
+//
+// TWO SIGNALS, BECAUSE ONE IS NOT ENOUGH, and a real container proved it. The
+// cgroup path carries the runtime's name only when the cgroup namespace is
+// SHARED — with a private one, which is now the default in several runtimes,
+// /proc/self/cgroup reads "0::/" and names nothing at all. An agent in that
+// container was reporting itself as a plain manual host with HOST resource
+// scope, which is exactly the confusion this field exists to prevent.
+//
+// So the root filesystem is checked too: a container's root is an overlay in
+// almost every runtime, and that survives a private namespace.
+func (c *collector) detectContainer() bool {
+	if len(c.containerPathMarkers()) > 0 {
+		return true
+	}
+	return c.rootFilesystemType() == "overlay"
+}
+
+// containerPathMarkers reports the runtime names found in this process's cgroup
+// path AND PID 1's.
+//
+// Both are read because they disagree in the cases that matter: a container with
+// its own cgroup namespace shows "/" for itself while PID 1 still records the
+// runtime's path, and a host running containerised workloads shows markers in
+// neither. Reading only one of them is how a container gets reported as a host.
+func (c *collector) containerPathMarkers() []string {
+	var found []string
+	for _, relative := range []string{"self/cgroup", "1/cgroup"} {
+		raw, err := c.readProc(relative)
+		if err != nil {
+			continue
+		}
+		content := strings.ToLower(string(raw))
+		for _, marker := range containerMarkers {
+			if strings.Contains(content, marker) {
+				found = append(found, marker)
+			}
+		}
+	}
+	return found
+}
+
+func (c *collector) rootFilesystemType() string {
+	raw, err := c.readProc("self/mountinfo")
+	if err != nil {
+		return ""
+	}
+	return parseMountInfo(string(raw))["/"]
+}
+
 // detectScope classifies what this sample's numbers describe.
 func (c *collector) detectScope() protocol.HostScope {
-	markers := c.detectContainerMarkers()
+	// Resolved once and passed down: the same answer decides the deployment, the
+	// resource scope and what a memory-backed data filesystem means, and
+	// re-deriving it three times would let the three disagree.
+	inContainer := c.detectContainer()
 	return protocol.HostScope{
-		Deployment:          c.detectDeployment(markers),
-		ResourceScope:       c.detectResourceScope(markers),
+		Deployment:          c.detectDeployment(inContainer),
+		ResourceScope:       c.detectResourceScope(inContainer),
 		CgroupVersion:       c.cgroupVersion,
-		DataFilesystemScope: c.detectDataFilesystemScope(),
+		DataFilesystemScope: c.detectDataFilesystemScope(inContainer),
 	}
 }
 
@@ -80,35 +133,13 @@ func (c *collector) procEntryExists(relative string) bool {
 	return err == nil
 }
 
-// detectContainerMarkers reports the markers found in this process's cgroup
-// path AND in PID 1's.
-//
-// Both are read because they disagree in the cases that matter: a container with
-// its own cgroup namespace shows "/" for itself while PID 1 still records the
-// runtime's path, and a host running containerised workloads shows markers in
-// neither. Reading only one of them is how a container gets reported as a host.
-func (c *collector) detectContainerMarkers() []string {
-	var found []string
-	for _, relative := range []string{"self/cgroup", "1/cgroup"} {
-		raw, err := c.readProc(relative)
-		if err != nil {
-			continue
-		}
-		content := strings.ToLower(string(raw))
-		for _, marker := range containerMarkers {
-			if strings.Contains(content, marker) {
-				found = append(found, marker)
-			}
-		}
-	}
-	return found
-}
-
-func (c *collector) detectDeployment(markers []string) protocol.Deployment {
+func (c *collector) detectDeployment(inContainer bool) protocol.Deployment {
 	// A container is reported before systemd, because a container commonly runs
 	// systemd as PID 1 — checking systemd first would label every such
-	// container a plain systemd host.
-	if len(markers) > 0 {
+	// container a plain systemd host. The protocol's enumeration has no separate
+	// value for a non-Docker runtime, so any container is reported as the one it
+	// does have.
+	if inContainer {
 		return protocol.DeploymentDocker
 	}
 	if raw, err := c.readProc("1/comm"); err == nil && strings.TrimSpace(string(raw)) == "systemd" {
@@ -130,8 +161,8 @@ func (c *collector) detectDeployment(markers []string) protocol.Deployment {
 // that rounds this down to "host" draws a 512 MiB container against the host's
 // RAM; one that rounds it up to "container" presents host-wide CPU as the
 // container's usage. Neither is recoverable once the label is lost.
-func (c *collector) detectResourceScope(markers []string) protocol.ResourceScope {
-	if len(markers) > 0 {
+func (c *collector) detectResourceScope(inContainer bool) protocol.ResourceScope {
+	if inContainer {
 		return protocol.ScopeMixed
 	}
 	if !c.procEntryExists("self/status") {
@@ -148,7 +179,13 @@ func (c *collector) detectResourceScope(markers []string) protocol.ResourceScope
 // and calling that container-local would understate the capacity the operator is
 // watching. The longest matching mount point wins, so a bind mount nested inside
 // a larger one is classified by its own entry.
-func (c *collector) detectDataFilesystemScope() protocol.DataFilesystemScope {
+//
+// THE FILESYSTEM TYPE ALONE IS NOT THE ANSWER, which a real host makes obvious:
+// /tmp and /run are tmpfs on a bare machine, so mapping tmpfs to
+// "container_mount" would tell the panel that a plain host's figures describe
+// somewhere else entirely. An overlay is a container layer wherever it is found;
+// a memory-backed filesystem is a container's only when the agent is IN one.
+func (c *collector) detectDataFilesystemScope(inContainer bool) protocol.DataFilesystemScope {
 	if c.options.DataDir == "" {
 		return protocol.FilesystemScopeUnknown
 	}
@@ -161,11 +198,15 @@ func (c *collector) detectDataFilesystemScope() protocol.DataFilesystemScope {
 		return protocol.FilesystemScopeUnknown
 	}
 	switch {
-	case filesystem == "overlay", filesystem == "tmpfs", filesystem == "ramfs":
-		// A writable layer or an in-memory filesystem: the capacity is not the
-		// host's disk, and reporting it as one is what makes a panel claim a
-		// node has terabytes free when the container has a 10 GiB layer.
+	case filesystem == "overlay":
+		// Nothing runs an overlay as its own root filesystem except a container
+		// runtime building a writable layer.
 		return protocol.FilesystemScopeContainerMount
+	case filesystem == "tmpfs", filesystem == "ramfs":
+		if inContainer {
+			return protocol.FilesystemScopeContainerMount
+		}
+		return protocol.FilesystemScopeHostMount
 	case strings.HasPrefix(filesystem, "fuse"), strings.HasPrefix(filesystem, "nfs"), strings.HasPrefix(filesystem, "cifs"):
 		// A network or FUSE mount is a host-level mount even when a container
 		// uses it: its capacity belongs to whatever serves it, not to the

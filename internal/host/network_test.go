@@ -238,6 +238,152 @@ func TestCollectOmitsConntrackAsAPairWhenItCannotBeRead(t *testing.T) {
 	}
 }
 
+// A FAMILY WITH NO DEFAULT ROUTE IS NOT A FAILURE. This is the real table from
+// an IPv4-only Linux guest: every all-zero-destination entry is a loopback route
+// whose flags are not UP, so there is genuinely no IPv6 default. Flagging the
+// machine for that would mark every single-stack host permanently.
+func TestCollectDoesNotFlagAFamilyWithNoDefaultRoute(t *testing.T) {
+	// Captured verbatim from a real host, trailing padding included.
+	const ipv6Table = `fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     eth0
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo
+00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000006 00000000 80200001       lo
+fe80000000000000505555fffee8e14f 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000002 00000000 80200001     eth0
+ff000000000000000000000000000000 08 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000004 00000000 00000001     eth0
+`
+	// The real IPv4 table too: three routes, exactly one of them a default.
+	const ipv4Table = `Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
+eth0	00000000	0205A8C0	0003	0	0	200	00000000	0	0	0
+eth0	0005A8C0	00000000	0001	0	0	200	00FFFFFF	0	0	0
+eth0	0205A8C0	00000000	0005	0	0	200	FFFFFFFF	0	0	0
+`
+	options := systemdHostFixture(t).options()
+	writeFixtureFile(t, options.ProcRoot, "net/route", ipv4Table)
+	writeFixtureFile(t, options.ProcRoot, "net/ipv6_route", ipv6Table)
+
+	observation, err := newFixtureCollector(options).Collect(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Network.DefaultIPv4Interface != "eth0" {
+		t.Fatalf("default ipv4 interface = %q", observation.Network.DefaultIPv4Interface)
+	}
+	if observation.Network.DefaultIPv6Interface != "" {
+		t.Fatalf("an ipv6 default was invented as %q", observation.Network.DefaultIPv6Interface)
+	}
+	if containsToken(observation.Unavailable, protocol.UnavailableNetDefaultRoute) {
+		t.Fatal("a family with no default route flagged the machine as unable to determine one")
+	}
+}
+
+// An ambiguous tie on the OTHER hand is a genuine "could not determine", and it
+// still has to be reported.
+func TestCollectFlagsAnAmbiguousDefaultRoute(t *testing.T) {
+	options := systemdHostFixture(t).options()
+	writeFixtureFile(t, options.ProcRoot, "net/route",
+		"Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"+
+			"eth0\t00000000\t0205A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"+
+			"eth1\t00000000\t0205A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n")
+
+	observation, err := newFixtureCollector(options).Collect(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsToken(observation.Unavailable, protocol.UnavailableNetDefaultRoute) {
+		t.Fatalf("unavailable = %v, want %s", observation.Unavailable, protocol.UnavailableNetDefaultRoute)
+	}
+}
+
+// A CONTAINER WITH A PRIVATE CGROUP NAMESPACE NAMES NO RUNTIME ANYWHERE. This is
+// real output from such a container: /proc/self/cgroup is "0::/" and PID 1's is
+// the same, so the cgroup path carries no marker at all. Before the overlay
+// signal was added, an agent in here reported itself as a plain manual host with
+// HOST resource scope — telling the panel that host-wide CPU was the container's
+// own usage.
+func TestAContainerWithAPrivateCgroupNamespaceIsStillAContainer(t *testing.T) {
+	fixture := newFixture(t).
+		proc("uptime", "600.00 200.00\n").
+		proc("stat", "cpu  20 2 5 200 3 1 1 0\n").
+		proc("loadavg", "0.05 0.04 0.03 1/50 4321\n").
+		proc("meminfo", "MemTotal:  524288 kB\nMemAvailable: 400000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n").
+		proc("sys/kernel/random/boot_id", "aaaa1111-bbbb-2222-cccc-333344445555\n").
+		proc("sys/kernel/osrelease", "6.8.0-generic\n").
+		proc("1/comm", "sh\n").
+		// Both cgroup files are the namespace root: no runtime name anywhere.
+		proc("1/cgroup", "0::/\n").
+		proc("self/cgroup", "0::/\n").
+		proc("self/status", "Name:\tsh\n").
+		// The root filesystem is the signature that survives the namespace.
+		proc("self/mountinfo", "36 35 98:0 / / rw,relatime shared:1 - overlay overlay rw\n").
+		sysDir("fs/cgroup").
+		sys("fs/cgroup/cgroup.controllers", "cpuset cpu io memory pids\n").
+		etc("os-release", "ID=alpine\nVERSION_ID=3.21\n")
+
+	observation, err := newFixtureCollector(fixture.options()).Collect(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Scope.Deployment != protocol.DeploymentDocker {
+		t.Fatalf("deployment = %q, want a container", observation.Scope.Deployment)
+	}
+	if observation.Scope.ResourceScope != protocol.ScopeMixed {
+		t.Fatalf("resource scope = %q, want mixed", observation.Scope.ResourceScope)
+	}
+}
+
+// A REAL HOST MADE THIS OBVIOUS. /tmp and /run are tmpfs on a bare machine, so
+// mapping tmpfs to "container_mount" told the panel that a plain host's figures
+// described a container — which is the opposite of the mistake the field exists
+// to prevent.
+func TestBareHostTmpfsIsNotAContainerMount(t *testing.T) {
+	options := systemdHostFixture(t).options()
+	writeFixtureFile(t, options.ProcRoot, "self/mountinfo",
+		"32 49 0:38 / /tmp rw,nosuid,nodev shared:15 - tmpfs tmpfs rw,size=1994416k\n")
+	// Point the data directory at the tmpfs so the longest-match rule picks it.
+	options.DataDir = "/tmp"
+
+	observation, err := newFixtureCollector(options).Collect(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Scope.Deployment == protocol.DeploymentDocker {
+		t.Fatal("the fixture is not a container")
+	}
+	if observation.Scope.DataFilesystemScope != protocol.FilesystemScopeHostMount {
+		t.Fatalf("a bare host's tmpfs was classified as %q", observation.Scope.DataFilesystemScope)
+	}
+}
+
+// The same filesystem inside a container IS the container's own.
+func TestContainerTmpfsIsAContainerMount(t *testing.T) {
+	options := dockerContainerFixture(t).options()
+	writeFixtureFile(t, options.ProcRoot, "self/mountinfo",
+		"32 49 0:38 / /tmp rw,nosuid,nodev shared:15 - tmpfs tmpfs rw,size=1994416k\n")
+	options.DataDir = "/tmp"
+
+	observation, err := newFixtureCollector(options).Collect(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Scope.DataFilesystemScope != protocol.FilesystemScopeContainerMount {
+		t.Fatalf("a container's tmpfs was classified as %q", observation.Scope.DataFilesystemScope)
+	}
+}
+
+// An overlay is a container's writable layer wherever it is found.
+func TestOverlayIsAlwaysAContainerMount(t *testing.T) {
+	options := systemdHostFixture(t).options()
+	writeFixtureFile(t, options.ProcRoot, "self/mountinfo",
+		"36 35 98:0 / / rw,relatime shared:1 - overlay overlay rw\n")
+
+	observation, err := newFixtureCollector(options).Collect(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Scope.DataFilesystemScope != protocol.FilesystemScopeContainerMount {
+		t.Fatalf("an overlay was classified as %q", observation.Scope.DataFilesystemScope)
+	}
+}
+
 // An interface with no readable ifindex has no stable identity to chart it
 // under, and emitting one with a fabricated index would collide with a real
 // interface on the next round.
