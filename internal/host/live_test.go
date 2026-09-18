@@ -23,7 +23,22 @@ import (
 // contradict that belief.
 //
 // It writes the observation to PSP_HOST_LIVE_OUT when set, so the parsed values
-// can be held against the raw kernel files by eye.
+// can be held against the raw kernel files by eye. Pair it with
+// deployment/capture-host-interfaces.sh, which dumps exactly those files.
+//
+// RUNNING IT OFF THIS MACHINE: cross-compile and copy the binary in, rather than
+// installing a toolchain on the target. On an Apple host, for example:
+//
+//	GOOS=linux GOARCH=arm64 go test -c -o /tmp/host.test ./internal/host/
+//	scp /tmp/host.test host:/tmp/ && ssh host 'PSP_HOST_LIVE=1 /tmp/host.test \
+//	    -test.run TestCollectOnTheRealHost -test.v'
+//
+// The same binary runs inside a container with the host's kernel, which is how
+// the container scope is exercised:
+//
+//	docker run --rm --cap-drop ALL --memory 512m \
+//	    -e PSP_HOST_LIVE=1 -v /tmp/host.test:/host.test:ro \
+//	    alpine:3.21 /host.test -test.run TestCollectOnTheRealHost -test.v
 func TestCollectOnTheRealHost(t *testing.T) {
 	if os.Getenv("PSP_HOST_LIVE") == "" {
 		t.Skip("set PSP_HOST_LIVE=1 to collect from the host kernel")
