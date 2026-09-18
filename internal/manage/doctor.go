@@ -51,17 +51,20 @@ const maxSummaryBytes = 512
 
 // Stable check codes. They are output surface, and a consumer may key on them,
 // so a published code is never renamed — a changed meaning gets a new code.
+//
+// THE VALUES LIVE IN protocol BECAUSE THE SAME CODES CROSS THE WIRE in a
+// diagnostics result. Two copies of one vocabulary drift; these are aliases.
 const (
-	CheckInstallationLayout        = "installation.layout"
-	CheckCredentialPermissions     = "credential.permissions"
-	CheckDataDirAccess             = "data_dir.access"
-	CheckStateSQLiteOpen           = "state.sqlite_open"
-	CheckStateSQLiteQuickCheck     = "state.sqlite_quick_check"
-	CheckCoreSelection             = "core.selection"
-	CheckCoreBinaryDigest          = "core.binary_digest"
-	CheckCoreConfirmedConfigDigest = "core.confirmed_config_digest"
-	CheckCollectorHost             = "collector.host"
-	CheckCollectorProcess          = "collector.process"
+	CheckInstallationLayout        = protocol.CheckCodeInstallationLayout
+	CheckCredentialPermissions     = protocol.CheckCodeCredentialPermissions
+	CheckDataDirAccess             = protocol.CheckCodeDataDirAccess
+	CheckStateSQLiteOpen           = protocol.CheckCodeStateSQLiteOpen
+	CheckStateSQLiteQuickCheck     = protocol.CheckCodeStateSQLiteQuickCheck
+	CheckCoreSelection             = protocol.CheckCodeCoreSelection
+	CheckCoreBinaryDigest          = protocol.CheckCodeCoreBinaryDigest
+	CheckCoreConfirmedConfigDigest = protocol.CheckCodeCoreConfirmedConfigDigest
+	CheckCollectorHost             = protocol.CheckCodeCollectorHost
+	CheckCollectorProcess          = protocol.CheckCodeCollectorProcess
 )
 
 // DoctorCheck is one check's result.

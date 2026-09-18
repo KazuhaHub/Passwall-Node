@@ -47,9 +47,27 @@ func DecodeAgentUpgradeResult(data []byte) (AgentUpgradeResult, error) {
 }
 
 func decodeExactObject(data []byte, target any) error {
+	return decodeExactObjectMayOmit(data, target, nil)
+}
+
+// decodeExactObjectMayOmit is decodeExactObject for a document that is allowed
+// to leave the named fields out.
+//
+// A MISSING FIELD IS STILL AN ERROR BY DEFAULT, because accepting an absent one
+// lets the two peers assign different meaning to the same bytes — the reason
+// this decoder is exact at all. The exception exists for fields whose absence is
+// itself a statement: a diagnostics result omits a section it was not asked to
+// collect, and "not asked" must stay distinguishable from "asked, found
+// nothing". Unknown fields, duplicates and trailing values are refused either
+// way.
+func decodeExactObjectMayOmit(data []byte, target any, optional []string) error {
 	targetType := reflect.TypeOf(target)
 	if targetType == nil || targetType.Kind() != reflect.Pointer || targetType.Elem().Kind() != reflect.Struct {
-		return errors.New("upgrade decoder target must point to a struct")
+		return errors.New("decoder target must point to a struct")
+	}
+	mayOmit := make(map[string]struct{}, len(optional))
+	for _, name := range optional {
+		mayOmit[name] = struct{}{}
 	}
 	fields := make([]string, 0, targetType.Elem().NumField())
 	allowed := make(map[string]struct{}, targetType.Elem().NumField())
@@ -68,7 +86,7 @@ func decodeExactObject(data []byte, target any) error {
 		return errors.New("invalid JSON object")
 	}
 	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
-		return errors.New("upgrade document must be a JSON object")
+		return errors.New("document must be a JSON object")
 	}
 	for decoder.More() {
 		token, err = decoder.Token()
@@ -95,15 +113,19 @@ func decodeExactObject(data []byte, target any) error {
 		return errors.New("invalid JSON object")
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return errors.New("upgrade document must contain one JSON value")
+		return errors.New("document must contain one JSON value")
 	}
 	for _, field := range fields {
-		if _, ok := seen[field]; !ok {
-			return fmt.Errorf("missing field %q", field)
+		if _, ok := seen[field]; ok {
+			continue
 		}
+		if _, ok := mayOmit[field]; ok {
+			continue
+		}
+		return fmt.Errorf("missing field %q", field)
 	}
 	if err := json.Unmarshal(data, target); err != nil {
-		return errors.New("invalid upgrade document")
+		return errors.New("invalid document")
 	}
 	return nil
 }
