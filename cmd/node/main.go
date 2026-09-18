@@ -82,11 +82,20 @@ func main() {
 	}
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		newNodeLogger(os.Stderr).Errorf("%v", err)
-		os.Exit(1)
+		// Most failures exit 1. The doctor distinguishes "a check failed" from
+		// "the doctor could not run" with 2, and a caller scripting it has to be
+		// able to tell those apart.
+		os.Exit(exitCodeFor(err))
 	}
 }
 
 func run(arguments []string, stdout, stderr io.Writer) error {
+	// Subcommands are recognised BEFORE the daemon's flag parsing, so a daemon
+	// flag can never be silently applied to a command that must not start
+	// anything. Each one owns its own FlagSet.
+	if len(arguments) > 0 && arguments[0] == "doctor" {
+		return runDoctor(arguments[1:], stdout, stderr)
+	}
 	if len(arguments) == 1 {
 		switch arguments[0] {
 		case "--upgrade-info":
