@@ -85,6 +85,26 @@ func TestValidateDiagnosticsResultRequiresTheWholeCheckSet(t *testing.T) {
 	}
 }
 
+// A state section with no integrity verdict says nothing: that field is the
+// section's reason to exist, and an empty string would read as a scan that
+// found nothing worth reporting.
+func TestValidateDiagnosticsResultRequiresAnIntegrityVerdict(t *testing.T) {
+	result := validDiagnosticsResult()
+	result.State = &DiagnosticsState{OutboxPending: 0, TasksQueued: 0}
+	if err := ValidateDiagnosticsResult(result); err == nil {
+		t.Fatal("a state section with no quick_check verdict was accepted")
+	}
+	result.State.SQLiteQuickCheck = "ok"
+	if err := ValidateDiagnosticsResult(result); err != nil {
+		t.Fatalf("a complete state section was rejected: %v", err)
+	}
+	// And a negative count is not a smaller number, it is a broken reader.
+	result.State.TasksQueued = -1
+	if err := ValidateDiagnosticsResult(result); err == nil {
+		t.Fatal("a negative task count was accepted")
+	}
+}
+
 func TestValidateDiagnosticsResultRejectsEventsOutsideTheContract(t *testing.T) {
 	withEvent := func(mutate func(*DiagnosticsEvent)) DiagnosticsResult {
 		result := validDiagnosticsResult()

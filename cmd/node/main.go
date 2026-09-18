@@ -240,7 +240,14 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		startClock = taskClock
 	}
 	var upgradeClient *upgrade.Client
+	// WP10's redacted remote diagnostic. Registering it here is what advertises
+	// the capability, so it cannot wait for the collector below: it reaches that
+	// through a closure instead.
+	var hostCollector host.Collector
 	handlers := map[string]agent.TaskHandler{}
+	handlers[protocol.TaskKindDiagnosticsCollectV1] = newDiagnosticsHandler(
+		parsed, store, supervisor, func() host.Collector { return hostCollector }, now,
+	)
 	if startClock != nil {
 		upgradeClient = remoteUpgradeClient(parsed, buildversion.Version, startClock, coreRuntime.Converge)
 	}
@@ -285,13 +292,17 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	// will never send any, and "old node" would stop being distinguishable from
 	// "node that stopped collecting".
 	var hostReporter *agent.HostReporter
-	collector, err := host.New(host.Options{
+	hostCollector, err = host.New(host.Options{
 		DataDir: parsed.DataDir, Core: supervisor.ProcessHandle, Runtime: runtimeStats.Observation,
 	})
 	if err != nil {
+		// A platform with no collector is a legitimate build, not a failure: the
+		// diagnostic reports the same thing through collector.host, and the
+		// closure above sees nil.
+		hostCollector = nil
 		logger.Warnf("host telemetry is unavailable on this platform: %v", err)
 	} else if hostReporter, err = agent.NewHostReporter(agent.HostReporterOptions{
-		Collector: collector, Issues: issues, Now: now,
+		Collector: hostCollector, Issues: issues, Now: now,
 	}); err != nil {
 		return err
 	}

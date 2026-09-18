@@ -25,9 +25,11 @@ func checkSet() []protocol.DiagnosticsCheck {
 
 func testHandler(ring *Ring) *Handler {
 	return &Handler{
-		Ring:   ring,
-		Checks: func(context.Context) ([]protocol.DiagnosticsCheck, error) { return checkSet(), nil },
-		Now:    func() int64 { return 1_789_000_000_000 },
+		Ring: ring,
+		Collect: func(context.Context) (Collection, error) {
+			return Collection{Checks: checkSet()}, nil
+		},
+		Now: func() int64 { return 1_789_000_000_000 },
 	}
 }
 
@@ -120,7 +122,7 @@ func TestHandlerRejectsArgsOutsideSection131(t *testing.T) {
 // read a collection that skipped a section as a complete one.
 func TestHandlerFailsWhenARequestedSectionCannotBeRead(t *testing.T) {
 	handler := testHandler(nil)
-	handler.State = func(context.Context) (*protocol.DiagnosticsState, error) {
+	handler.State = func(context.Context, Collection) (*protocol.DiagnosticsState, error) {
 		return nil, errors.New("state database is locked")
 	}
 	_, err := handler.Execute(context.Background(), protocol.Task{
@@ -129,6 +131,28 @@ func TestHandlerFailsWhenARequestedSectionCannotBeRead(t *testing.T) {
 	var taskErr *agent.TaskError
 	if !errors.As(err, &taskErr) || taskErr.Code != ErrCodeCollect {
 		t.Fatalf("error = %v, want %s", err, ErrCodeCollect)
+	}
+}
+
+// A host section the check pass could not take is a failure, not an empty
+// object: collector.host already says why it could not run, and a caller who
+// asked for the section has to be able to tell that from a host that reported
+// nothing.
+func TestHandlerFailsWhenTheCheckPassTookNoHostObservation(t *testing.T) {
+	handler := testHandler(nil) // its Collect returns checks with no host
+	_, err := handler.Execute(context.Background(), protocol.Task{
+		Args: encodeArgs(t, []string{protocol.DiagnosticsSectionHost}, 0),
+	})
+	var taskErr *agent.TaskError
+	if !errors.As(err, &taskErr) || taskErr.Code != ErrCodeCollect {
+		t.Fatalf("error = %v, want %s", err, ErrCodeCollect)
+	}
+	// The same handler answers fine when the section was not asked for, which is
+	// what keeps a build without a collector usable for the checks alone.
+	if _, err := handler.Execute(context.Background(), protocol.Task{
+		Args: encodeArgs(t, nil, 0),
+	}); err != nil {
+		t.Fatalf("a checks-only diagnostic failed: %v", err)
 	}
 }
 
@@ -262,12 +286,14 @@ func TestHandlerOutputAlwaysValidates(t *testing.T) {
 		ring.Record(protocol.DiagnosticsEventCoreRestarted, protocol.DiagnosticsSeverityError, "core restart")
 	}
 	handler := testHandler(ring)
-	handler.Host = func(context.Context) (*protocol.HostObservation, error) { return nil, nil }
+	handler.Collect = func(context.Context) (Collection, error) {
+		return Collection{Checks: checkSet(), Host: &protocol.HostObservation{}, QuickCheck: "ok"}, nil
+	}
 	handler.Runtime = func(context.Context) (*protocol.DiagnosticsRuntime, error) {
 		return &protocol.DiagnosticsRuntime{CoreState: "running", CoreConfigDigest: "abc"}, nil
 	}
-	handler.State = func(context.Context) (*protocol.DiagnosticsState, error) {
-		return &protocol.DiagnosticsState{SQLiteQuickCheck: "ok"}, nil
+	handler.State = func(_ context.Context, collection Collection) (*protocol.DiagnosticsState, error) {
+		return &protocol.DiagnosticsState{SQLiteQuickCheck: collection.QuickCheck}, nil
 	}
 	encoded, err := handler.Execute(context.Background(), protocol.Task{
 		Args: encodeArgs(t, []string{
