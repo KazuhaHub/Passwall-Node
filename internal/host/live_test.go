@@ -4,6 +4,7 @@ package host
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,6 +115,14 @@ func TestCollectOnTheRealHost(t *testing.T) {
 		}
 		t.Logf("wrote %s/observation.json", out)
 	}
-	t.Logf("scope=%#v interfaces=%d unavailable=%v",
-		observation.Scope, len(observation.Network.Interfaces), observation.Unavailable)
+	// The network section is guarded because a host CAN legitimately produce
+	// none: a container without /sys mounted has no /sys/class/net to read, which
+	// the assertions above already report. Dereferencing it here turned that
+	// reported failure into a panic that named this line instead.
+	interfaces := "none"
+	if observation.Network != nil {
+		interfaces = fmt.Sprintf("%d", len(observation.Network.Interfaces))
+	}
+	t.Logf("scope=%#v interfaces=%s unavailable=%v",
+		observation.Scope, interfaces, observation.Unavailable)
 }
