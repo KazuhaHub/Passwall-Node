@@ -76,6 +76,19 @@ func (f *fixture) options() Options {
 	}
 }
 
+// writeFixtureFile overwrites one file in an already-materialised fixture, so a
+// test can vary a single kernel value without rebuilding the tree.
+func writeFixtureFile(t *testing.T, root, relative, content string) {
+	t.Helper()
+	location := filepath.Join(root, relative)
+	if err := os.MkdirAll(filepath.Dir(location), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(location, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // newFixtureCollector builds a collector over a fixture.
 //
 // The filesystem probe is replaced rather than left to the real syscall: a test
@@ -99,7 +112,13 @@ const mountTableAllExt4 = "36 35 98:0 / / rw,relatime shared:1 - ext4 /dev/sda1 
 const mountTableAllOverlay = "36 35 98:0 / / rw,relatime shared:1 - overlay overlay rw\n"
 
 // systemdHostFixture is a plain Linux host running the agent under systemd.
+//
+// The cgroup files are laid out for v2 with the agent in its own systemd slice,
+// which is what a real systemd deployment looks like.
 func systemdHostFixture(t *testing.T) *fixture {
+	// Relative to /sys — the sys() helper supplies that prefix, so repeating it
+	// here would write the files to a path nothing ever reads.
+	const slice = "fs/cgroup/system.slice/passwall-node.service/"
 	return newFixture(t).
 		proc("uptime", "86400.53 345678.90\n").
 		proc("stat", "cpu  100 20 30 800 15 5 10 20 40 5\ncpu0 50 10 15 400 7 2 5 10 20 2\n").
@@ -113,5 +132,53 @@ func systemdHostFixture(t *testing.T) *fixture {
 		proc("self/mountinfo", mountTableAllExt4).
 		sysDir("fs/cgroup").
 		sys("fs/cgroup/cgroup.controllers", "cpuset cpu io memory pids\n").
+		// No quota: "max" is how the kernel says the controller is not limiting
+		// anything, and it must stay nil rather than becoming a number.
+		sys(slice+"cpu.max", "max 100000\n").
+		sys(slice+"cpu.stat", "usage_usec 120000000\nuser_usec 90000000\nsystem_usec 30000000\nnr_periods 20000\nnr_throttled 40\nthrottled_usec 900000\n").
+		sys(slice+"cpuset.cpus.effective", "0-3\n").
+		sys(slice+"memory.current", "268435456\n").
+		sys(slice+"memory.max", "536870912\n").
+		sys(slice+"memory.swap.current", "0\n").
+		sys(slice+"memory.swap.max", "0\n").
+		sys(slice+"memory.events", "low 0\nhigh 0\nmax 0\noom 2\noom_kill 1\n").
 		etc("os-release", "NAME=\"Debian GNU/Linux\"\nID=debian\nVERSION_ID=\"12\"\n")
+}
+
+// cgroupV1HostFixture is the older hierarchy: one mount per controller, byte
+// limits that express "unlimited" as a page-aligned LONG_MAX sentinel, and no
+// OOM counter at all.
+func cgroupV1HostFixture(t *testing.T) *fixture {
+	const group = "docker/9f1c0f5e1b1c"
+	return newFixture(t).
+		proc("uptime", "7200.00 1200.00\n").
+		proc("stat", "cpu  60 8 12 600 10 3 4 0\n").
+		proc("loadavg", "0.30 0.28 0.25 1/200 54321\n").
+		proc("meminfo", "MemTotal:       16384000 kB\nMemAvailable:    8000000 kB\nSwapTotal:       0 kB\nSwapFree:        0 kB\n").
+		proc("sys/kernel/random/boot_id", "11112222-3333-4444-5555-666677778888\n").
+		proc("sys/kernel/osrelease", "4.19.0-27-amd64\n").
+		proc("1/comm", "systemd\n").
+		proc("1/cgroup", "11:memory:/"+group+"\n5:cpu,cpuacct:/"+group+"\n3:cpuset:/"+group+"\n").
+		proc("self/status", "Name:\tpasswall-node\n").
+		proc("self/cgroup", "11:memory:/"+group+"\n5:cpu,cpuacct:/"+group+"\n3:cpuset:/"+group+"\n").
+		proc("self/mountinfo", mountTableAllOverlay).
+		sysDir("fs/cgroup/memory").
+		sysDir("fs/cgroup/cpu").
+		sysDir("fs/cgroup/cpuacct").
+		sysDir("fs/cgroup/cpuset").
+		sys("fs/cgroup/cpu/"+group+"/cpu.cfs_quota_us", "200000\n").
+		sys("fs/cgroup/cpu/"+group+"/cpu.cfs_period_us", "100000\n").
+		sys("fs/cgroup/cpuset/"+group+"/cpuset.cpus", "0-1\n").
+		// Nanoseconds, which the collector converts to the microseconds the
+		// protocol carries.
+		sys("fs/cgroup/cpuacct/"+group+"/cpuacct.usage", "120000000000\n").
+		sys("fs/cgroup/cpuacct/"+group+"/cpuacct.stat", "user 900\nsystem 300\n").
+		sys("fs/cgroup/memory/"+group+"/memory.usage_in_bytes", "268435456\n").
+		sys("fs/cgroup/memory/"+group+"/memory.limit_in_bytes", "536870912\n").
+		sys("fs/cgroup/memory/"+group+"/memory.memsw.usage_in_bytes", "300000000\n").
+		sys("fs/cgroup/memory/"+group+"/memory.memsw.limit_in_bytes", "600000000\n").
+		// memory.failcnt exists but is NOT an OOM counter, and the collector must
+		// not pass it off as one.
+		sys("fs/cgroup/memory/"+group+"/memory.failcnt", "7\n").
+		etc("os-release", "ID=debian\nVERSION_ID=10\n")
 }

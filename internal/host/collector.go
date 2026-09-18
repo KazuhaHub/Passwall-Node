@@ -35,6 +35,18 @@ type collector struct {
 	// difference the panel takes, so it is created here rather than at the
 	// call site where the mistake would be easy to make again.
 	processEpoch string
+
+	// cgroupVersion and pageSize are detected once. The version decides which
+	// controller layout every cgroup read uses, and the page size is needed to
+	// recognise v1's "unlimited" sentinel, which is a page-aligned LONG_MAX.
+	cgroupVersion int
+	pageSize      int
+
+	// cpuTicksPerSecond is AT_CLKTCK, read once from the agent's own auxv. It is
+	// what turns USER_HZ-denominated counters — cgroup v1's cpuacct.stat and the
+	// process CPU time — into seconds. ZERO MEANS UNKNOWN, and every consumer
+	// must then omit its derived field rather than report ticks as microseconds.
+	cpuTicksPerSecond uint64
 }
 
 // filesystemUsage is what a capacity probe has to answer.
@@ -47,7 +59,12 @@ type filesystemUsage struct {
 }
 
 func newCollector(options Options, statFS func(string) (filesystemUsage, error)) *collector {
-	return &collector{options: options, statFS: statFS, processEpoch: mintEpoch()}
+	collector := &collector{
+		options: options, statFS: statFS,
+		processEpoch: mintEpoch(), pageSize: os.Getpagesize(),
+	}
+	collector.cgroupVersion = collector.detectCgroupVersion()
+	return collector
 }
 
 // mintEpoch produces a fresh counter epoch for a process-scoped counter.
@@ -134,7 +151,8 @@ func (c *collector) Collect(ctx context.Context) (protocol.HostObservation, erro
 	collected.observation.Scope = c.detectScope()
 	c.collectCPU(collected, bootID)
 	c.collectLoad(collected)
-	c.collectMemory(collected)
+	c.collectMemory(collected, bootID)
+	c.collectFilesystem(collected)
 
 	collected.observation.CollectedAtMS = c.options.now().UTC().UnixMilli()
 	collected.observation.Unavailable = collected.unavailableTokens()
@@ -202,23 +220,35 @@ func (c *collector) collectPlatform(collected *sample) {
 }
 
 func (c *collector) collectCPU(collected *sample, bootID string) {
-	raw, err := c.readProc("stat")
-	if err != nil {
+	var cpu protocol.CPUObservation
+	if raw, err := c.readProc("stat"); err == nil {
+		if system, parseErr := parseSystemCPU(raw); parseErr == nil {
+			// Prefer the boot id: it survives an agent restart, so the panel can
+			// keep differencing across one. The process-scoped epoch is the
+			// fallback.
+			system.CounterEpoch = bootID
+			if system.CounterEpoch == "" {
+				system.CounterEpoch = c.processEpoch
+			}
+			cpu.System = &system
+		}
+	}
+	if cpu.System == nil {
 		collected.markUnavailable(protocol.UnavailableCPUSystem)
-		return
 	}
-	system, err := parseSystemCPU(raw)
-	if err != nil {
-		collected.markUnavailable(protocol.UnavailableCPUSystem)
-		return
+	// The cgroup half is collected independently: a deployment can make
+	// /proc/stat unreadable while the cgroup files stay readable, and reporting
+	// nothing because one source failed would be the wrong trade.
+	if cgroup := c.collectCgroupCPU(collected, bootID); cgroup != nil {
+		cpu.Cgroup = cgroup
+	} else {
+		collected.markUnavailable(protocol.UnavailableCPUCgroup)
 	}
-	// Prefer the boot id: it survives an agent restart, so the panel can keep
-	// differencing across one. The process-scoped epoch is the fallback.
-	system.CounterEpoch = bootID
-	if system.CounterEpoch == "" {
-		system.CounterEpoch = c.processEpoch
+	// The protocol requires at least one of the two, so a section where neither
+	// could be read is omitted entirely rather than emitted empty.
+	if cpu.System != nil || cpu.Cgroup != nil {
+		collected.observation.CPU = &cpu
 	}
-	collected.observation.CPU = &protocol.CPUObservation{System: &system}
 }
 
 func (c *collector) collectLoad(collected *sample) {
@@ -235,24 +265,30 @@ func (c *collector) collectLoad(collected *sample) {
 	collected.observation.Load = &load
 }
 
-func (c *collector) collectMemory(collected *sample) {
-	raw, err := c.readProc("meminfo")
-	if err != nil {
+func (c *collector) collectMemory(collected *sample, bootID string) {
+	var memory protocol.MemoryObservation
+	if raw, err := c.readProc("meminfo"); err == nil {
+		if system, ok := parseMeminfo(raw); ok {
+			if system.AvailableBytes == nil {
+				// Old kernel. Everything else about memory is still reported,
+				// and the panel renders the used percentage as null rather than
+				// substituting an estimate that diverges most under load.
+				collected.markUnavailable(protocol.UnavailableMemoryAvailable)
+			}
+			memory.System = &system
+		}
+	}
+	if memory.System == nil {
 		collected.markUnavailable(protocol.UnavailableMemorySystem)
-		return
 	}
-	memory, ok := parseMeminfo(raw)
-	if !ok {
-		collected.markUnavailable(protocol.UnavailableMemorySystem)
-		return
+	if cgroup := c.collectCgroupMemory(collected, bootID); cgroup != nil {
+		memory.Cgroup = cgroup
+	} else {
+		collected.markUnavailable(protocol.UnavailableMemoryCgroup)
 	}
-	if memory.AvailableBytes == nil {
-		// Old kernel. The node can still report everything else about memory,
-		// and the panel renders the used percentage as null rather than
-		// substituting an estimate that diverges most under load.
-		collected.markUnavailable(protocol.UnavailableMemoryAvailable)
+	if memory.System != nil || memory.Cgroup != nil {
+		collected.observation.Memory = &memory
 	}
-	collected.observation.Memory = &protocol.MemoryObservation{System: &memory}
 }
 
 // resolve joins a path onto a root, refusing anything that would climb out of it.

@@ -75,6 +75,7 @@ func TestCollectedSamplesSatisfyTheProtocolValidator(t *testing.T) {
 		"systemd host":     systemdHostFixture(t),
 		"docker container": dockerContainerFixture(t),
 		"old kernel":       oldKernelFixture(t),
+		"cgroup v1 host":   cgroupV1HostFixture(t),
 	}
 	for name, fixture := range fixtures {
 		t.Run(name, func(t *testing.T) {
@@ -105,6 +106,17 @@ func dockerContainerFixture(t *testing.T) *fixture {
 		proc("self/mountinfo", mountTableAllOverlay).
 		sysDir("fs/cgroup").
 		sys("fs/cgroup/cgroup.controllers", "cpuset cpu io memory pids\n").
+		// This container has its own cgroup namespace, so ITS path is the root
+		// while PID 1 still records the runtime's path. Reading only one of the
+		// two is how a container gets reported as a host.
+		sys("fs/cgroup/cpu.max", "200000 100000\n").
+		sys("fs/cgroup/cpu.stat", "usage_usec 40000000\nuser_usec 30000000\nsystem_usec 10000000\nnr_periods 5000\nnr_throttled 900\nthrottled_usec 12000000\n").
+		sys("fs/cgroup/cpuset.cpus.effective", "0\n").
+		sys("fs/cgroup/memory.current", "53687091\n").
+		sys("fs/cgroup/memory.max", "536870912\n").
+		sys("fs/cgroup/memory.swap.current", "0\n").
+		sys("fs/cgroup/memory.swap.max", "0\n").
+		sys("fs/cgroup/memory.events", "low 0\nhigh 0\nmax 12\noom 0\noom_kill 0\n").
 		etc("os-release", "ID=alpine\nVERSION_ID=3.21\n")
 }
 
@@ -195,8 +207,27 @@ func TestCollectDegradesASingleUnreadableSectionToAToken(t *testing.T) {
 			t.Fatalf("unavailable = %v, want %s", observation.Unavailable, token)
 		}
 	}
-	if observation.CPU != nil {
-		t.Fatalf("an unreadable cpu section was reported as %#v", observation.CPU)
+	// The CPU section survives because HALF of it is still readable: the cgroup
+	// controller answered even though /proc/stat did not, and the protocol
+	// accepts a section with either source. Dropping the whole section would
+	// throw away a measurement this host did provide.
+	if observation.CPU == nil {
+		t.Fatal("the cpu section was dropped even though its cgroup half was readable")
+	}
+	if observation.CPU.System != nil {
+		t.Fatalf("an unreadable system cpu was reported as %#v", observation.CPU.System)
+	}
+	if observation.CPU.Cgroup == nil {
+		t.Fatal("the readable cgroup half was dropped with the unreadable one")
+	}
+	if observation.Memory == nil {
+		t.Fatal("the memory section was dropped even though its cgroup half was readable")
+	}
+	if observation.Memory.System != nil {
+		t.Fatalf("an unreadable system memory was reported as %#v", observation.Memory.System)
+	}
+	if observation.Memory.Cgroup == nil {
+		t.Fatal("the readable cgroup half was dropped with the unreadable one")
 	}
 	// The sections that COULD be read are still there.
 	if observation.Load == nil {

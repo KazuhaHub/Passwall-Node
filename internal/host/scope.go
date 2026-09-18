@@ -36,12 +36,11 @@ var containerMarkers = []string{"docker", "containerd", "kubepods", "libpod", "p
 
 // detectScope classifies what this sample's numbers describe.
 func (c *collector) detectScope() protocol.HostScope {
-	cgroupVersion := c.detectCgroupVersion()
 	markers := c.detectContainerMarkers()
 	return protocol.HostScope{
 		Deployment:          c.detectDeployment(markers),
 		ResourceScope:       c.detectResourceScope(markers),
-		CgroupVersion:       cgroupVersion,
+		CgroupVersion:       c.cgroupVersion,
 		DataFilesystemScope: c.detectDataFilesystemScope(),
 	}
 }
