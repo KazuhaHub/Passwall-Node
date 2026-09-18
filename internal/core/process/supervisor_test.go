@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,53 @@ func TestSupervisorAppliesIdempotentlyAndRestartsOnce(t *testing.T) {
 	}
 	assertCurrentConfig(t, supervisor.options.StateDir, second.Config)
 	shutdownSupervisor(t, cancel, runDone)
+}
+
+// A collector asks the supervisor which process the core is. The answer has to
+// be tied to the child's actual lifetime rather than set once and never
+// cleared: a handle that outlives its process sends the collector looking for a
+// PID the kernel is free to recycle, and a handle that lags a replacement sends
+// it to the process the core used to be.
+func TestSupervisorPublishesAProcessHandleForTheRunningCoreOnly(t *testing.T) {
+	supervisor, cancel, runDone := startTestSupervisor(t)
+
+	if _, running := supervisor.ProcessHandle(); running {
+		t.Fatal("a handle was published before any core was applied")
+	}
+
+	first := testArtifact("good-one")
+	if err := supervisor.Apply(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	handle, running := supervisor.ProcessHandle()
+	if !running {
+		t.Fatal("no handle was published for a running core")
+	}
+	if handle.PID <= 0 {
+		t.Fatalf("handle carries no process identity: %#v", handle)
+	}
+	// The start time is what makes the handle checkable, and it does not exist
+	// off Linux — so this asserts the platform's own contract rather than a
+	// number only one platform can produce.
+	if goruntime.GOOS == "linux" && !handle.Verifiable() {
+		t.Fatalf("a Linux handle must be verifiable: %#v", handle)
+	}
+
+	if err := supervisor.Apply(t.Context(), testArtifact("good-two")); err != nil {
+		t.Fatal(err)
+	}
+	replaced, running := supervisor.ProcessHandle()
+	if !running {
+		t.Fatal("no handle was published after a core replacement")
+	}
+	if replaced.PID == handle.PID {
+		t.Fatalf("the handle still names the replaced process %d", handle.PID)
+	}
+
+	shutdownSupervisor(t, cancel, runDone)
+	if _, running := supervisor.ProcessHandle(); running {
+		t.Fatal("the handle outlived the core it named")
+	}
 }
 
 func TestSupervisorValidationFailureLeavesCurrentProcessUntouched(t *testing.T) {

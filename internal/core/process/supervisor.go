@@ -88,6 +88,15 @@ type Supervisor struct {
 	apply        chan applyRequest
 	activeEngine string
 	activeBinary string
+	// handle names the running core for host telemetry. It is set once a start
+	// has survived its grace period and cleared wherever the child is known to
+	// be gone.
+	//
+	// A STALE COPY WOULD STILL BE SAFE — the whole point of carrying StartTicks
+	// is that a reused PID is detectable by the reader — but publishing a handle
+	// for a core this supervisor already reaped would tell a collector to go
+	// looking for something that is not there.
+	handle agentcore.ProcessHandle
 }
 
 func NewSupervisor(options Options) (*Supervisor, error) {
@@ -157,6 +166,45 @@ func (s *Supervisor) Status() agentcore.Status {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.status
+}
+
+// ProcessHandle reports the identity of the running core.
+//
+// The two return values answer different questions and must not be collapsed: a
+// false means NO CORE IS RUNNING, which is a business state, while a true with
+// an unverifiable handle means a core IS running but this platform cannot prove
+// which process it is. A collector renders the first as stopped and the second
+// as unavailable — neither as a working core with zero resource usage.
+func (s *Supervisor) ProcessHandle() (agentcore.ProcessHandle, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.handle.PID == 0 {
+		return agentcore.ProcessHandle{}, false
+	}
+	return s.handle, true
+}
+
+// recordHandle captures the identity of a child that has survived its grace
+// period.
+//
+// A failed start-time read is NOT an error here. The handle is still recorded
+// with a zero start time so that ProcessHandle can say "a core is running" while
+// Verifiable reports that it cannot be checked; the collector then drops the
+// core section instead of reading counters it cannot attribute.
+func (s *Supervisor) recordHandle(pid int) {
+	startTicks, err := processStartTicks(pid)
+	if err != nil {
+		startTicks = 0
+	}
+	s.mu.Lock()
+	s.handle = agentcore.ProcessHandle{PID: pid, StartTicks: startTicks}
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) clearHandle() {
+	s.mu.Lock()
+	s.handle = agentcore.ProcessHandle{}
+	s.mu.Unlock()
 }
 
 func (s *Supervisor) Apply(ctx context.Context, artifact agentcore.Artifact) error {
@@ -306,6 +354,10 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 			current, currentEngine, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentEngine, currentBinary, currentVersion, child, configPath)
 		case exitErr := <-child.done:
 			child = nil
+			// A core that died on its own never passes through stop(), so the
+			// handle is dropped here. Without this the supervisor would keep
+			// naming a process the kernel is free to recycle.
+			s.clearHandle()
 			s.setDegraded("core exited: " + processExitDetail(exitErr))
 			timer := time.NewTimer(retryDelay)
 			select {
@@ -457,6 +509,9 @@ func (s *Supervisor) start(runCtx, waitCtx context.Context, engine, binary, conf
 		_ = s.stop(child)
 		return nil, runCtx.Err()
 	case <-timer.C:
+		// Recorded only once the child has survived its grace period, so a core
+		// that died during startup never publishes a handle it never had.
+		s.recordHandle(command.Process.Pid)
 		return child, nil
 	}
 }
@@ -474,6 +529,11 @@ func (s *Supervisor) stop(child *managedProcess) error {
 	if child == nil || child.command.Process == nil {
 		return nil
 	}
+	// Every termination path routes through here — a config switch, a cancelled
+	// context, a failed start — so this is the one place the handle has to be
+	// dropped. Deferred rather than repeated on each return: there are two exits
+	// below and a third would silently keep publishing a dead process's identity.
+	defer s.clearHandle()
 	if err := signalProcess(child.command); err != nil && !processGone(err) {
 		return fmt.Errorf("signal core process: %w", err)
 	}
