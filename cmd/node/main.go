@@ -26,6 +26,7 @@ import (
 	coreruntime "github.com/KazuhaHub/passwall-node/internal/core/runtime"
 	"github.com/KazuhaHub/passwall-node/internal/core/singbox"
 	"github.com/KazuhaHub/passwall-node/internal/core/xray"
+	"github.com/KazuhaHub/passwall-node/internal/host"
 	"github.com/KazuhaHub/passwall-node/internal/lifecycle"
 	"github.com/KazuhaHub/passwall-node/internal/manage"
 	"github.com/KazuhaHub/passwall-node/internal/nodeconfig"
@@ -243,9 +244,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	restarts := func() uint64 { return supervisor.Status().RestartCount }
+	runtimeStats := agent.NewRuntimeStats(now, restarts)
 	syncer, err := agent.NewHTTPSyncer(parsed.Endpoint, agent.HTTPOptions{
 		Signer: signer, AllowInsecureHTTP: parsed.AllowInsecureHTTP,
 		UserAgent: "passwall-node/" + buildversion.String(),
+		Stats:     runtimeStats,
 	})
 	if err != nil {
 		return err
@@ -253,15 +257,37 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	observer := &agent.ObservationService{
 		Telemetry: telemetry, Store: store, Issues: issues, Status: supervisor.Status, Now: now,
 	}
+	capabilities := taskWorker.Capabilities()
+	// THE CAPABILITY IS DECLARED FROM THE RESULT, NOT FROM THE PLATFORM. A build
+	// whose collector could not be constructed must not advertise
+	// host.telemetry.v1: the panel would then expect telemetry from a node that
+	// will never send any, and "old node" would stop being distinguishable from
+	// "node that stopped collecting".
+	var hostReporter *agent.HostReporter
+	collector, err := host.New(host.Options{
+		DataDir: parsed.DataDir, Core: supervisor.ProcessHandle, Runtime: runtimeStats.Observation,
+	})
+	if err != nil {
+		logger.Warnf("host telemetry is unavailable on this platform: %v", err)
+	} else if hostReporter, err = agent.NewHostReporter(agent.HostReporterOptions{
+		Collector: collector, Issues: issues, Now: now,
+	}); err != nil {
+		return err
+	}
+	if hostReporter != nil {
+		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
+	}
 	synchronizer := agent.Synchronizer{
 		Reports: agent.ReportBuilder{
 			AgentID: parsed.AgentID, AgentVersion: buildversion.String(),
 			Store: store, CoreStatus: supervisor.Status, Now: now,
-			Capabilities: taskWorker.Capabilities(),
+			Capabilities: capabilities,
 		},
 		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
+		Host:           hostReporter,
+		Stats:          runtimeStats,
 	}
 	if upgradeClient != nil {
 		synchronizer.OnSynced = func(ctx context.Context) error { return upgradeClient.RecordReady(ctx, store) }
