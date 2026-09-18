@@ -13,12 +13,29 @@ import (
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
 
-func TestNodeLoggerUsesUTCStructuredSingleLineOutput(t *testing.T) {
+// The shape below is the contract operators read out of the journal, and it is
+// deliberately identical to passwall-sub-panel's so a mixed deployment does not
+// produce two log dialects.
+func TestNodeLoggerUsesXrayStyleSingleLineOutput(t *testing.T) {
 	var output bytes.Buffer
 	logger := newNodeLogger(&output)
 	logger.now = func() time.Time { return time.Date(2026, 9, 16, 3, 4, 5, 600, time.FixedZone("local", -7*60*60)) }
 	logger.Warnf("sync failed: %s", "line one\nline two")
-	want := "2026-09-16T10:04:05.0000006Z passwall-node level=warn message=\"sync failed: line one\\nline two\"\n"
+	want := "2026/09/16 10:04:05.000000 [Warning] passwall-node: sync failed: line one\\nline two\n"
+	if output.String() != want {
+		t.Fatalf("log output = %q, want %q", output.String(), want)
+	}
+}
+
+// A carriage return must not survive into the log line: journald and Docker's
+// json-file driver both treat it as the end of a record, which would let a core
+// message forge its own log entry.
+func TestNodeLoggerEscapesCarriageReturn(t *testing.T) {
+	var output bytes.Buffer
+	logger := newNodeLogger(&output)
+	logger.now = func() time.Time { return time.Date(2026, 9, 16, 3, 4, 5, 600, time.UTC) }
+	logger.Errorf("core said %s", "first\rsecond")
+	want := "2026/09/16 03:04:05.000000 [Error] passwall-node: core said first\\rsecond\n"
 	if output.String() != want {
 		t.Fatalf("log output = %q, want %q", output.String(), want)
 	}

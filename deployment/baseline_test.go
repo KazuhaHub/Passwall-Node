@@ -15,8 +15,8 @@ func TestDockerEntrypointTimestampsAndDiagnosesPermanentMountErrors(t *testing.T
 	}
 	text := string(entrypoint)
 	for _, required := range []string{
-		"%Y-%m-%dT%H:%M:%SZ",
-		"level=error",
+		"%Y/%m/%d %H:%M:%S",
+		"[Error] passwall-node:",
 		"credential path is a directory, not a file",
 		`chown -R "$PUID:$PGID" "$DATA_DIR"`,
 		"allow ownership changes or set PUID/PGID",

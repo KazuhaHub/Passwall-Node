@@ -4,8 +4,12 @@
 # into a private tmpfs file before permanently dropping privileges.
 set -eu
 
+# The Agent's own lines read "YYYY/MM/DD HH:MM:SS.ffffff [Severity] ...". BusyBox
+# date cannot produce sub-second precision, so these pre-exec failures keep the
+# same shape at second resolution rather than reintroducing a second dialect for
+# operators to parse.
 log_error() {
-    printf '%s passwall-node level=error message=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >&2
+    printf '%s [Error] passwall-node: %s\n' "$(date -u '+%Y/%m/%d %H:%M:%S')" "$1" >&2
 }
 fatal() {
     log_error "$1"
