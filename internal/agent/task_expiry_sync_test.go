@@ -77,7 +77,7 @@ func TestExpirySyncMeasuresThroughHTTPBodyEOFWithoutBlockingCoreStreams(t *testi
 		Syncer: httpSyncer, Processor: processor, TaskClock: clock,
 	}
 	for round := 1; round <= 2; round++ {
-		result, err := synchronizer.SyncOnce(t.Context(), false)
+		result, err := synchronizer.SyncOnce(t.Context(), false, false)
 		if err != nil {
 			t.Fatalf("round %d: %v", round, err)
 		}
@@ -138,7 +138,7 @@ func TestExpirySyncClockFaultStillAcknowledgesAndProcessesValidResponse(t *testi
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(t.Context(), false); err != nil {
+	if _, err := synchronizer.SyncOnce(t.Context(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	if processed != 1 || clockErrors != 1 {
@@ -175,7 +175,7 @@ func TestExpirySyncInvalidResponseCannotRefreshTaskAuthorization(t *testing.T) {
 			return ProcessResult{}, nil
 		}),
 	}
-	if _, err := synchronizer.SyncOnce(t.Context(), false); err == nil {
+	if _, err := synchronizer.SyncOnce(t.Context(), false, false); err == nil {
 		t.Fatal("invalid response was accepted")
 	}
 	if _, err := clock.TaskTimeBounds(); !errors.Is(err, ErrTaskClockUnavailable) {
@@ -185,7 +185,7 @@ func TestExpirySyncInvalidResponseCannotRefreshTaskAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	elapsed.Store(int64(2 * time.Second))
-	if _, err := synchronizer.SyncOnce(t.Context(), false); err == nil {
+	if _, err := synchronizer.SyncOnce(t.Context(), false, false); err == nil {
 		t.Fatal("invalid response refreshed an old anchor")
 	}
 	if _, err := clock.TaskTimeBounds(); !errors.Is(err, ErrTaskClockUnavailable) {
