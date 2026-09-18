@@ -44,3 +44,54 @@ const (
 	MaxTaskErrorCodeBytes       = 128
 	MaxTaskErrorBytes           = 4096
 )
+
+const (
+	// DefaultHostReportSeconds is PSP's default requested telemetry cadence. It
+	// is independent of both the poll cadence and full_report_seconds: a fleet
+	// polling every few seconds must not ship a host sample every round.
+	DefaultHostReportSeconds = 60
+	// MinHostReportSeconds stops a control plane from requesting a telemetry
+	// cadence finer than any collector can hold, which would spend the whole
+	// budget on syscalls and starve the sync loop of scheduling.
+	MinHostReportSeconds = 5
+	// MaxHostReportSeconds bounds how long a bad response can silence telemetry.
+	// It matches the steady-state reconnect bound rather than the one-day
+	// full-report bound: host metrics are what an operator watches during an
+	// incident, and a day-long gap is not a useful floor.
+	MaxHostReportSeconds = 3600
+)
+
+const (
+	// MaxHostObservationBytes caps the encoded HostObservation subtree. The
+	// whole-body limit is MaxSyncBodyBytes, which also has to carry the
+	// enumerations; a telemetry subtree large enough to crowd them out would turn
+	// an observability feature into an outage. The agent drops the host subtree
+	// and retries rather than letting it push a control report over the wire
+	// limit.
+	MaxHostObservationBytes = 128 << 10
+	// MaxNetworkInterfaces bounds the interface list. A host with more than this
+	// many interfaces is not produceable by the deployments this protocol
+	// targets, and the list is the one part of the sample that scales with host
+	// layout rather than with a fixed field set.
+	MaxNetworkInterfaces = 32
+	// MaxInterfaceNameBytes bounds one interface name.
+	MaxInterfaceNameBytes = 64
+	// MaxCongestionControls and MaxCongestionControlBytes bound the read-only
+	// congestion-control enumeration.
+	MaxCongestionControls     = 32
+	MaxCongestionControlBytes = 32
+	MaxUnavailableTokens      = 32
+	MaxUnavailableTokenBytes  = 64
+	MaxCounterEpochBytes      = 128
+	MaxBootIDBytes            = 64
+	MaxPlatformFieldBytes     = 32
+	MaxKernelReleaseBytes     = 128
+	MaxInterfaceMTU           = 1048576
+	MaxLinkSpeedMbps          = 100000000
+	MinLogicalCPUs            = 1
+	MaxLogicalCPUs            = 4096
+	// SampleIDBytes is exact, not a bound: the value is 16 random bytes in
+	// lowercase hex, so the panel can treat the length itself as part of the
+	// identity rather than a range to normalise.
+	SampleIDBytes = 32
+)

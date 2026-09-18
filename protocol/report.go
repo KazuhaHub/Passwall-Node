@@ -102,6 +102,19 @@ type NodeReport struct {
 	// has not implemented it; that is distinguishable from all-zeros.
 	Subjects []SubjectObservation `json:"subjects,omitempty"`
 
+	// Host is the OPTIONAL host telemetry. Its absence is always legal and never
+	// means zero: it means the build has no collector, or this round was not due
+	// for one, or the collection failed as a whole. A panel that reads an absent
+	// Host as "everything is at zero" would show a healthy-looking idle machine,
+	// and one that deletes the last valid snapshot on it would erase the only
+	// evidence of what the host looked like before it went dark.
+	//
+	// It is NOT part of the durable outbox. Telemetry is best-effort observation
+	// that is regenerated every interval; replaying it after a reconnect would
+	// deliver a stale machine's numbers as if they were current. The panel
+	// tolerates a gap rather than making the data plane wait for a metric.
+	Host *HostObservation `json:"host,omitempty"`
+
 	// Issues are conditions the agent cannot reconcile by itself. This is
 	// CONTESTED's outlet (§5, hole 4): the terminal action is not to fix it,
 	// but to record a stable code and hand it to a person.
@@ -142,15 +155,27 @@ func (r NodeReport) MarshalJSON() ([]byte, error) {
 		Capabilities    []string               `json:"capabilities,omitempty"`
 		Partial         bool                   `json:"partial"`
 		Have            map[string]StreamState `json:"have"`
-		Issues          []Issue                `json:"issues,omitempty"`
-		TaskResults     []TaskResult           `json:"task_results,omitempty"`
+		// Host IS CARRIED ON A PARTIAL REPORT, and that is the point of the
+		// two-cadence split: telemetry's cadence is independent of the enumeration
+		// cadence, so binding it to full reports would tie "how often the operator
+		// sees CPU" to "how often the fleet ships every client counter". A partial
+		// report is defined by which ENUMERATIONS it omits, not by which
+		// observations it may carry.
+		//
+		// It is listed explicitly because this struct is a second, hand-written
+		// shape. A field added to NodeReport alone silently disappears from every
+		// partial report, and the symptom is a dashboard that fills in bursts and
+		// is mysteriously blank in between.
+		Host        *HostObservation `json:"host,omitempty"`
+		Issues      []Issue          `json:"issues,omitempty"`
+		TaskResults []TaskResult     `json:"task_results,omitempty"`
 	}
 	return json.Marshal(partialReport{
 		AgentID: r.AgentID, ProtocolVersion: r.ProtocolVersion,
 		ReportedAtMS: r.ReportedAtMS, AgentVersion: r.AgentVersion,
 		CoreEngine: r.CoreEngine, CoreVersion: r.CoreVersion, CoreState: r.CoreState,
 		Partial: true, Have: r.Have, Capabilities: r.Capabilities,
-		Issues: r.Issues, TaskResults: r.TaskResults,
+		Host: r.Host, Issues: r.Issues, TaskResults: r.TaskResults,
 	})
 }
 
