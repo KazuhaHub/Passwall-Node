@@ -93,6 +93,25 @@ type Envelope struct {
 	// regardless of the interval — PSP restarted and lost its cache, an
 	// operator hit refresh, a previous report did not add up.
 	WantFullReport bool `json:"want_full_report"`
+
+	// HostReportSeconds is how often PSP wants a HostObservation attached. It is
+	// independent of FullReportSeconds and of NextPollSeconds — telemetry has its
+	// own freshness requirement, and a host sample can ride on either a partial
+	// or a full report — so a fleet that polls every few seconds for delivery
+	// latency is not forced to ship one every few seconds.
+	//
+	// ZERO MEANS EVERY REPORT CARRIES ONE, and that is the fail-safe direction
+	// here for the opposite reason it is above. Silence is the failure mode this
+	// feature exists to detect, and an older panel that does not know the field
+	// sends zero; taking that as "never report" would produce exactly the
+	// all-missing dashboard nobody can explain. Over-reporting is measurable and
+	// self-evident.
+	HostReportSeconds int `json:"host_report_seconds"`
+
+	// WantHostReport asks for one HostObservation on the very next report
+	// without changing the long-term cadence — an administrator hit refresh and
+	// does not want to wait out the interval.
+	WantHostReport bool `json:"want_host_report"`
 }
 
 // ValidateEnvelope validates the response values that affect scheduling and
@@ -109,6 +128,15 @@ func ValidateEnvelope(envelope Envelope) error {
 	}
 	if envelope.FullReportSeconds < 0 || envelope.FullReportSeconds > MaxFullReportSeconds {
 		return fmt.Errorf("full_report_seconds must be between 0 and %d", MaxFullReportSeconds)
+	}
+	// Zero is legal here and means every report — see HostReportSeconds. A
+	// positive value below the floor is rejected rather than clamped: it means
+	// the control plane believes a cadence is available that the agent cannot
+	// hold, and silently rounding it up would hide that disagreement.
+	if envelope.HostReportSeconds < 0 || envelope.HostReportSeconds > MaxHostReportSeconds ||
+		(envelope.HostReportSeconds > 0 && envelope.HostReportSeconds < MinHostReportSeconds) {
+		return fmt.Errorf("host_report_seconds must be 0 or between %d and %d",
+			MinHostReportSeconds, MaxHostReportSeconds)
 	}
 	return nil
 }
@@ -156,6 +184,55 @@ func EffectiveFullReportPeriod(fullReportSeconds, nextPollSeconds int) int {
 	}
 	cycles := fullReportSeconds / nextPollSeconds
 	if fullReportSeconds%nextPollSeconds != 0 {
+		cycles++
+	}
+	return cycles * nextPollSeconds
+}
+
+// ShouldSendHost decides whether the next NodeReport carries a HostObservation.
+//
+// It lives here, beside ShouldSendFull, for the same reason: PSP must be able to
+// predict exactly what the agent will do, and a second copy of this rule on the
+// panel side is the two-sources-of-truth problem the shared package exists to
+// avoid.
+//
+// sinceLastHostSeconds is measured from the agent's last report that ACTUALLY
+// carried a host sample — not from the last time one was built. A sample that
+// was built and then dropped for exceeding the wire limit did not reach the
+// panel, so the next round must try again rather than start a fresh interval.
+//
+// On the first report of a session there is no such instant; the agent signals
+// that by passing a value that exceeds any interval, exactly as it does for the
+// full-report cadence.
+func ShouldSendHost(env Envelope, sinceLastHostSeconds int) bool {
+	if env.WantHostReport {
+		return true
+	}
+	// Fail safe: an unset, zero or nonsense interval means report every time.
+	if env.HostReportSeconds <= 0 {
+		return true
+	}
+	return sinceLastHostSeconds >= env.HostReportSeconds
+}
+
+// EffectiveHostReportPeriod returns the actual wall-clock telemetry cadence
+// produced by polling at nextPollSeconds.
+//
+// The panel needs this because HostReportSeconds is NOT required to be a
+// multiple of the poll interval: an operator can ask for 60 seconds of telemetry
+// on a 30-second poll, or 45 seconds on a 30-second poll, and the second case
+// delivers every 60 seconds in practice. A freshness threshold computed against
+// the requested interval rather than this one would mark a perfectly healthy
+// node stale on every cycle.
+func EffectiveHostReportPeriod(hostReportSeconds, nextPollSeconds int) int {
+	if nextPollSeconds <= 0 {
+		nextPollSeconds = DefaultNextPollSeconds
+	}
+	if ShouldSendHost(Envelope{HostReportSeconds: hostReportSeconds}, nextPollSeconds) {
+		return nextPollSeconds
+	}
+	cycles := hostReportSeconds / nextPollSeconds
+	if hostReportSeconds%nextPollSeconds != 0 {
 		cycles++
 	}
 	return cycles * nextPollSeconds
