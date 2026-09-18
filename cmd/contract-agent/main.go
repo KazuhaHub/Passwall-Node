@@ -86,7 +86,7 @@ func main() {
 	}
 	results := make([]agent.SyncResult, 0, rounds)
 	for i := 0; i < rounds; i++ {
-		result, err := synchronizer.SyncOnce(ctx, false)
+		result, err := synchronizer.SyncOnce(ctx, false, false)
 		if err != nil {
 			fail(fmt.Errorf("sync round %d: %w", i+1, err))
 		}
