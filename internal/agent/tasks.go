@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/KazuhaHub/passwall-node/internal/nodeevent"
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
@@ -119,6 +120,10 @@ type TaskWorkerOptions struct {
 	Registry *TaskRegistry
 	Now      func() time.Time
 	Clock    state.TaskStartClock
+	// Events records task rejections for a later diagnostic. NIL RECORDS
+	// NOTHING, which is what a build without a diagnostic should do rather than
+	// inventing events.
+	Events nodeevent.Recorder
 }
 
 // TaskWorker drains the journal independently of the heartbeat. Wake is
@@ -128,6 +133,7 @@ type TaskWorker struct {
 	registry *TaskRegistry
 	now      func() time.Time
 	clock    state.TaskStartClock
+	events   nodeevent.Recorder
 	wake     chan struct{}
 	mu       sync.RWMutex
 	notify   func()
@@ -143,7 +149,8 @@ func NewTaskWorker(options TaskWorkerOptions) (*TaskWorker, error) {
 	}
 	return &TaskWorker{
 		store: options.Store, registry: options.Registry, now: now, clock: options.Clock,
-		wake: make(chan struct{}, 1),
+		events: options.Events,
+		wake:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -326,6 +333,18 @@ func (w *TaskWorker) finishError(ctx context.Context, task state.TaskExecution, 
 	if indeterminate {
 		terminal = state.TaskIndeterminate
 	}
+	// THE STABLE CODE GOES ON THE WIRE, NOT cause. A task's cause is whatever
+	// the handler happened to return — an endpoint, a path, a panel message —
+	// and section 13.3 keeps all of that out of a diagnostic. The code is a
+	// value this package already publishes, so it says what went wrong without
+	// carrying anything it should not.
+	severity := protocol.DiagnosticsSeverityWarning
+	if indeterminate {
+		// An unknowable outcome is worse than a known failure: the work may or
+		// may not have happened.
+		severity = protocol.DiagnosticsSeverityError
+	}
+	nodeevent.Record(w.events, protocol.DiagnosticsEventTaskRejected, severity, code)
 	result := protocol.TaskResult{
 		ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256, NotAfterMS: task.NotAfterMS,
 		Indeterminate: indeterminate, ErrorCode: code, Error: boundedError(cause),
