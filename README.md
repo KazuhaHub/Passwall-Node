@@ -144,9 +144,16 @@ the first `docker compose up`. Mounting the directory instead of an individual
 host file prevents NAS Compose implementations from turning a missing file bind
 source into a directory.
 
-Agent-owned log lines use an RFC 3339 UTC timestamp, component, severity and
-quoted message. The Compose example also bounds Docker's `json-file` logs to
-three 10 MiB files. Core subprocesses retain their upstream log format.
+Agent-owned log lines use a UTC timestamp, severity and component in the same
+line-oriented shape Xray and the panel use, so a managed core and the Agent read
+as one stream in the journal:
+
+```
+2026/09/17 08:15:36.091882 [Info] passwall-node: sync completed
+```
+
+Core subprocesses retain their upstream log format. The Compose example also
+bounds Docker's `json-file` logs to three 10 MiB files.
 
 The optional `passwall-node-updater` service enables PSP's authenticated remote
 upgrade task for Docker deployments. The network-facing Agent never receives

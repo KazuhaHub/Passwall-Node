@@ -51,6 +51,15 @@ type options struct {
 	ShowVersion       bool
 }
 
+// nodeLogger keeps the line-oriented shape operators already see from Xray and
+// from passwall-sub-panel, instead of slog's key=value timestamp and level:
+//
+//	2026/09/17 08:15:36.091882 [Info] passwall-node: message
+//
+// A managed core writes into the same journal, so a second log dialect on the
+// agent's own lines is what makes an incident hard to read. The writer sits
+// behind a mutex because the lifecycle services report failures concurrently
+// during shutdown and recovery.
 type nodeLogger struct {
 	mu  sync.Mutex
 	out io.Writer
@@ -64,13 +73,16 @@ func newNodeLogger(out io.Writer) *nodeLogger {
 func (l *nodeLogger) printf(level, format string, args ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, _ = fmt.Fprintf(l.out, "%s passwall-node level=%s message=%q\n",
-		l.now().UTC().Format(time.RFC3339Nano), level, fmt.Sprintf(format, args...))
+
+	message := fmt.Sprintf(format, args...)
+	message = strings.NewReplacer("\r\n", `\n`, "\n", `\n`, "\r", `\r`).Replace(message)
+	_, _ = fmt.Fprintf(l.out, "%s [%s] passwall-node: %s\n",
+		l.now().UTC().Format("2006/01/02 15:04:05.000000"), level, message)
 }
 
-func (l *nodeLogger) Infof(format string, args ...any)  { l.printf("info", format, args...) }
-func (l *nodeLogger) Warnf(format string, args ...any)  { l.printf("warn", format, args...) }
-func (l *nodeLogger) Errorf(format string, args ...any) { l.printf("error", format, args...) }
+func (l *nodeLogger) Infof(format string, args ...any)  { l.printf("Info", format, args...) }
+func (l *nodeLogger) Warnf(format string, args ...any)  { l.printf("Warning", format, args...) }
+func (l *nodeLogger) Errorf(format string, args ...any) { l.printf("Error", format, args...) }
 
 func main() {
 	if filepath.Base(os.Args[0]) == "pn" {
