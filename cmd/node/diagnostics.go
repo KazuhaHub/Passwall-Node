@@ -29,12 +29,13 @@ func newDiagnosticsHandler(
 	parsed options,
 	store *statesqlite.Store,
 	supervisor *process.Supervisor,
+	ring *diagnostics.Ring,
 	collector func() host.Collector,
 	now func() time.Time,
 ) *diagnostics.Handler {
 	millis := func() int64 { return now().UnixMilli() }
 	return &diagnostics.Handler{
-		Ring: diagnostics.NewRing(diagnostics.DefaultRingCapacity, millis),
+		Ring: ring,
 		Collect: func(ctx context.Context) (diagnostics.Collection, error) {
 			// THE DOCTOR DOES THE READING, ONCE. Reusing it rather than
 			// reimplementing its checks is what keeps the diagnostic and the

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KazuhaHub/passwall-node/internal/nodeevent"
 	"github.com/KazuhaHub/passwall-node/protocol"
 )
 
@@ -31,6 +32,9 @@ type HostReporterOptions struct {
 	Issues      IssueSink
 	Now         func() time.Time
 	HardTimeout time.Duration
+	// Events records a collector failure episode for a later diagnostic. NIL
+	// RECORDS NOTHING.
+	Events nodeevent.Recorder
 }
 
 // HostReporter owns the telemetry cadence, the cached sample and the failure
@@ -44,6 +48,7 @@ type HostReporterOptions struct {
 type HostReporter struct {
 	collector   HostCollector
 	issues      IssueSink
+	events      nodeevent.Recorder
 	now         func() time.Time
 	hardTimeout time.Duration
 
@@ -84,6 +89,7 @@ func NewHostReporter(options HostReporterOptions) (*HostReporter, error) {
 	reporter := &HostReporter{
 		collector:   options.Collector,
 		issues:      options.Issues,
+		events:      options.Events,
 		now:         options.Now,
 		hardTimeout: options.HardTimeout,
 	}
@@ -255,7 +261,7 @@ func (r *HostReporter) ReportWireLimitDropped(ctx context.Context) {
 
 // recordFailureEpisode emits the stable code once per contiguous failure.
 func (r *HostReporter) recordFailureEpisode(ctx context.Context, detail string) {
-	if r.issues == nil {
+	if r.issues == nil && r.events == nil {
 		return
 	}
 	r.mu.Lock()
@@ -266,10 +272,18 @@ func (r *HostReporter) recordFailureEpisode(ctx context.Context, detail string) 
 	r.episodeOpen = true
 	r.mu.Unlock()
 	// The detail carries a classification, never a raw error string: it is
-	// reported to the panel and has no bounded size otherwise.
+	// reported to the panel and has no bounded size otherwise. That is also what
+	// makes it safe to record: the diagnostic carries the same classification,
+	// so it says what kind of failure this was without carrying the error text.
+	summary := truncateUTF8(detail, 256)
+	nodeevent.Record(r.events, protocol.DiagnosticsEventCollectorUnavailable,
+		protocol.DiagnosticsSeverityWarning, summary)
+	if r.issues == nil {
+		return
+	}
 	_, _ = r.issues.Record(ctx, LocalIssue{
 		Kind:      LocalIssueHostTelemetryFailed,
 		DedupeKey: string(LocalIssueHostTelemetryFailed),
-		Detail:    truncateUTF8(detail, 256),
+		Detail:    summary,
 	})
 }

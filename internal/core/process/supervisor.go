@@ -19,6 +19,8 @@ import (
 	"time"
 
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
+	"github.com/KazuhaHub/passwall-node/internal/nodeevent"
+	"github.com/KazuhaHub/passwall-node/protocol"
 )
 
 const (
@@ -38,8 +40,11 @@ type Options struct {
 	CheckTimeout time.Duration
 	StartGrace   time.Duration
 	StopTimeout  time.Duration
-	RetryMin     time.Duration
-	RetryMax     time.Duration
+	// Events records core lifecycle transitions for a later diagnostic. NIL
+	// RECORDS NOTHING, which is what a build without one should do.
+	Events   nodeevent.Recorder
+	RetryMin time.Duration
+	RetryMax time.Duration
 	// RequireInitialConfigDigest makes restart fail closed: current.json is
 	// started only when its digest equals the last deployment durably confirmed
 	// by the runtime. A stale/tampered or crash-orphaned file is retained for
@@ -604,9 +609,38 @@ func (s *Supervisor) noteStart() {
 
 func (s *Supervisor) updateStatus(update func(*agentcore.Status)) {
 	s.mu.Lock()
+	previous := s.status.State
 	update(&s.status)
 	s.status.LastChangedAt = s.options.Now().UTC()
+	next, restarts := s.status.State, s.status.RestartCount
 	s.mu.Unlock()
+	s.recordStateChange(previous, next, restarts)
+}
+
+// recordStateChange reports a lifecycle transition, outside the lock.
+//
+// THE SUPERVISOR'S MUTEX IS NOT HELD ACROSS THIS. Recording is a diagnostic
+// concern, and calling into another subsystem while holding the lock the rest of
+// the core depends on is how a deadlock gets built later. The values it needs
+// are read under the lock and passed by value instead.
+func (s *Supervisor) recordStateChange(previous, next agentcore.ProcessState, restarts uint64) {
+	if previous == next {
+		return
+	}
+	switch next {
+	case agentcore.ProcessRunning:
+		// A TRANSITION INTO RUNNING AFTER A RESTART IS A RESTART. The counter is
+		// what separates the two, and an operator reading the list wants to see
+		// that difference: a core that came back is not a core that started.
+		if restarts > 0 {
+			nodeevent.Record(s.options.Events, protocol.DiagnosticsEventCoreRestarted,
+				protocol.DiagnosticsSeverityWarning, fmt.Sprintf("core restarted, %d restarts", restarts))
+			return
+		}
+		nodeevent.Record(s.options.Events, protocol.DiagnosticsEventCoreStarted, protocol.DiagnosticsSeverityInfo, "core started")
+	case agentcore.ProcessStopped:
+		nodeevent.Record(s.options.Events, protocol.DiagnosticsEventCoreStopped, protocol.DiagnosticsSeverityInfo, "core stopped")
+	}
 }
 
 func (s *Supervisor) stoppedError() error {

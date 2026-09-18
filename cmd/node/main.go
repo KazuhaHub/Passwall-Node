@@ -26,10 +26,12 @@ import (
 	coreruntime "github.com/KazuhaHub/passwall-node/internal/core/runtime"
 	"github.com/KazuhaHub/passwall-node/internal/core/singbox"
 	"github.com/KazuhaHub/passwall-node/internal/core/xray"
+	"github.com/KazuhaHub/passwall-node/internal/diagnostics"
 	"github.com/KazuhaHub/passwall-node/internal/host"
 	"github.com/KazuhaHub/passwall-node/internal/lifecycle"
 	"github.com/KazuhaHub/passwall-node/internal/manage"
 	"github.com/KazuhaHub/passwall-node/internal/nodeconfig"
+	"github.com/KazuhaHub/passwall-node/internal/nodeevent"
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-node/internal/upgrade"
@@ -160,6 +162,13 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	defer store.Close()
 
+	// The node's own recent events, recorded from the three places that already
+	// notice something worth reporting: the sync loop, the core supervisor and
+	// the task worker. It is created here because those are built below, and the
+	// diagnostic that reads it is only one of its consumers.
+	eventRing := diagnostics.NewRing(diagnostics.DefaultRingCapacity,
+		func() int64 { return time.Now().UnixMilli() })
+
 	coreRoot := filepath.Join(parsed.DataDir, "cores")
 	installer, err := install.New(install.Options{RootDir: coreRoot})
 	if err != nil {
@@ -176,6 +185,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		StateDir: filepath.Join(parsed.DataDir, "runtime", "xray"),
 		Commands: coreCommand,
 		Stdout:   stdout, Stderr: stderr,
+		Events:                     eventRing,
 		RequireInitialConfigDigest: true,
 		InitialConfigDigest:        initial.ConfigDigest,
 	})
@@ -246,7 +256,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	var hostCollector host.Collector
 	handlers := map[string]agent.TaskHandler{}
 	handlers[protocol.TaskKindDiagnosticsCollectV1] = newDiagnosticsHandler(
-		parsed, store, supervisor, func() host.Collector { return hostCollector }, now,
+		parsed, store, supervisor, eventRing, func() host.Collector { return hostCollector }, now,
 	)
 	if startClock != nil {
 		upgradeClient = remoteUpgradeClient(parsed, buildversion.Version, startClock, coreRuntime.Converge)
@@ -259,7 +269,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	taskWorker, err := agent.NewTaskWorker(agent.TaskWorkerOptions{
-		Store: store, Registry: taskRegistry, Now: now, Clock: startClock,
+		Store: store, Registry: taskRegistry, Now: now, Clock: startClock, Events: eventRing,
 	})
 	if err != nil {
 		return err
@@ -302,7 +312,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		hostCollector = nil
 		logger.Warnf("host telemetry is unavailable on this platform: %v", err)
 	} else if hostReporter, err = agent.NewHostReporter(agent.HostReporterOptions{
-		Collector: hostCollector, Issues: issues, Now: now,
+		Collector: hostCollector, Issues: issues, Now: now, Events: eventRing,
 	}); err != nil {
 		return err
 	}
@@ -326,6 +336,13 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	runner, err := agent.NewRunner(synchronizer, agent.RunnerOptions{OnError: func(err error) {
 		logger.Warnf("sync failed; retrying: %v", err)
+		// A FIXED SUMMARY, NOT err. A sync error is whatever the HTTP client
+		// produced, and that can include the endpoint it was talking to —
+		// section 13.3 keeps endpoints, queries and userinfo out of a
+		// diagnostic. The event carries when it happened, which is what a reader
+		// needs; the detail stays in the local log, where it already was.
+		nodeevent.Record(eventRing, protocol.DiagnosticsEventSyncFailed,
+			protocol.DiagnosticsSeverityWarning, "a sync round failed")
 	}})
 	if err != nil {
 		return err
