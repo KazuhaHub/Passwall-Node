@@ -25,106 +25,43 @@ import (
 // upgrade contract. A released archive does that, so pointing this suite at one
 // strengthens the run rather than weakening the check.
 //
-// WHAT IT FOUND, AND IT IS A DEFECT IN THE RELEASE RATHER THAN IN THIS HARNESS.
+// IT PASSES, AND WHAT THAT DOES AND DOES NOT PROVE.
 //
-// Against v0.0.1-beta9 the real release authenticates, acknowledges all three
-// empty streams and starts a real Xray core, and then the upgrade task never
-// produces a private request on disk. Read out of the daemon's own state during a
-// run — /opt/passwall-node/data/state.db, task_executions, while the suite was
-// still waiting — the task is there and it FAILED:
+//	--- PASS: TestUpgradeSystemdHistoricalReleaseE2E (13.71s)
+//	native real Node: success/recover/report=true start-failure/rollback/report=true
+//	UID=999 newPID=16702 identity/config/DB_inode_retained=true
 //
-//	task_id      e2e-success-22a3b92a75be823b
-//	kind         agent.upgrade.v1
-//	args         {"version":"v0.0.1-beta11","expected_version":"v0.0.1-beta9"}
-//	state        failed
-//	error_code   task_execution_failed
-//	error_detail upgrade requires an exact newer release and exact expected
-//	             current release
+// A v0.0.1-beta9 -> v0.0.1-beta11 upgrade on real systemd, with the rollback leg
+// and identity, configuration and database inode retained across both.
 //
-// So the agent claimed the task, ran the handler, and refused it. That is also
-// why no request reached disk: it is refused before one is written. An earlier
-// reading of this comment called the stop a harness gap; the row above refutes
-// that.
+// BOTH SIDES ARE BUILT FROM THIS REPOSITORY, stamped with the real version scheme.
+// So this proves the FIXED code path handles real-shaped versions end to end. It
+// does NOT prove that a released v0.0.1-beta9 can be upgraded, because that binary
+// carries the comparison defect below and no change here can reach it.
 //
-// THE REFUSAL IS CompareVersions in internal/upgrade/types.go, which gets the
-// answer BACKWARDS for two-digit prerelease numbers:
+// Five harness defects had to be fixed before the suite could say anything, and
+// each was found by running it rather than by reading:
 //
-//	if !deployment.ValidReleaseVersion(args.Version) ||
-//	    !deployment.ValidReleaseVersion(args.ExpectedVersion) ||
-//	    CompareVersions(args.Version, args.ExpectedVersion) <= 0 { ...refuse... }
+//  1. the artifact identity was a hardcoded string, so a released archive could
+//     never satisfy it — the label now comes from the caller;
+//  2. the commit inside the version string was hardcoded to the CI stamp in two
+//     places, and a real release reports its own;
+//  3. the installed config/version file was written as the literal "v1.0.0"
+//     regardless of which artifact was installed, so the controller read a
+//     version that never matched the expected one — "installed release no longer
+//     matches the expected release";
+//  4. the result-identity check paired a version with whichever commit belonged
+//     to the LEG rather than to the version the node reports, which fails a
+//     correct rollback;
+//  5. and the whole thing was masked for three runs by `go test -c` reusing a
+//     build cache, so the probes I added were not in the binary.
 //
-// Its prerelease loop takes the numeric path only when BOTH identifiers are
-// entirely digits — numeric(s) is `strings.Trim(s, "0123456789") == ""` — so for
-// "beta9" against "beta11" neither qualifies and it falls through to
-// strings.Compare, which is lexical: '9' > '1', so beta9 sorts ABOVE beta11 and
-// the requested target looks OLDER than the source.
-//
-// Consequence: a remote upgrade from beta9 to beta11 cannot happen, and the agent
-// reports it as a determinate failure rather than as an unsupported edge.
-//
-// The function is identical in v0.0.1-beta9 and in this repository's current
-// source, so this suite is not testing a fixed bug — it is testing a live one.
-// That is the same class of defect the PSP release catalog carried, where the
-// upgrade list offered beta9 ahead of beta11 for the same reason; there it
-// misordered a list, here it blocks an upgrade.
-//
-// CompareVersions in THIS repository has since been fixed to compare a shared
-// alphabetic prefix and then the number after it numerically, so v0.0.1-beta11
-// now sorts above v0.0.1-beta9 here.
-//
-// THAT FIX DOES NOT MAKE THIS EDGE WORK, and the distinction matters. The defect
-// is compiled into the RELEASED v0.0.1-beta9 binary, which is the one this suite
-// runs; patching HEAD changes what current and future builds do and cannot change
-// what an installed beta9 already does. So beta9 -> beta11 stays refused, now for
-// an understood reason rather than an mysterious one, and the edge belongs in the
-// support matrix as unsupported-by-the-source-release rather than as untested.
-//
-// The upgrade path that IS now open is beta11 and later to anything above them,
-// which the same defect had also been blocking.
-//
-// THE FIX IS VERIFIED TO CHANGE THIS RUN'S BEHAVIOUR, which is the part worth
-// recording because it is easy to assert and hard to show. Pointing the suite at
-// two builds made from THIS repository with the real version scheme stamped in
-// (Version=v0.0.1-beta9 / v0.0.1-beta11, commits 1f80aee / 60d96490) moves the
-// failure from a four-minute timeout to ten seconds, and moves it FORWARD: the
-// task is accepted, the real controller runs, and the run now stops on
-// "real controller outcome did not match success/start-failure scenario".
-//
-// The daemon's journal shows where it stops now:
-//
-//	02:35:26 passwall-node ... version=v0.0.1-beta9 (1f80aee)
-//	02:39:34 systemd: Stopping passwall-node.service
-//	02:41:28 passwall-node ... version=v0.0.1-beta9 (1f80aee)   <- still beta9
-//
-// The service comes back as the version it went down as, and the timestamps say
-// why: 02:39:34 down, 02:41:28 back — 114 seconds, against the controller's
-// healthTimeout of 120s. So the candidate did NOT become healthy and the
-// controller gave up and restored the running version, which is the designed
-// rollback rather than a failed swap.
-//
-// That is a different question from the one this comment set out to answer and is
-// left as one. Worth noting for whoever picks it up: the mechanism suite drives
-// v1.0.0 -> v1.1.0 successfully from the SAME source, so the difference between a
-// passing and a failing candidate here is the version scheme stamped into the
-// binaries rather than the code that reads it — which is why this was only
-// reachable once the suite was pointed at real-shaped versions.
-//
-// NARROWED FURTHER, so the next reader starts past it. helper_linux.go's
-// controller.run returns a bare error from five call sites BEFORE it ever calls
-// c.fail, and c.fail is the only thing that writes a receipt. The run leaves no
-// receipt in /opt/passwall-node/upgrades — and it fails in about ten seconds,
-// far too fast to have reached the download and staging path — so the failure is
-// one of those five:
-//
-//	c.validate(c.root)
-//	checkOwnedPath(receipts, ...)
-//	open/flock of upgrades/.lock
-//	ReadDocument(data/upgrades, "request.json", &request)
-//	ParseArgs(request.Task) or args != request.Args
-//
-// The last is worth trying first: the controller calls the SAME ParseArgs the
-// daemon does, so the version fix applies to it too, and the remaining way that
-// line fails after the fix is the arguments not comparing equal.
+// THE LIVE DEFECT the suite found is unchanged and still stands: CompareVersions
+// in internal/upgrade/types.go compared a dotless prerelease number lexically, so
+// v0.0.1-beta11 sorted BELOW v0.0.1-beta9 and the upgrade admission check refused
+// the target as older than the source. It is fixed here; the same function is
+// compiled into every release up to and including beta9, so beta9 -> beta11 stays
+// an unsupported edge in the support matrix rather than an untested one.
 func TestUpgradeSystemdHistoricalReleaseE2E(t *testing.T) {
 	if os.Getenv("PN_NODE_UPGRADE_HIST") != "1" {
 		t.Skip("historical release upgrade E2E is enabled only by dedicated disposable Linux CI")

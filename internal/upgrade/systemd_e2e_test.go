@@ -191,7 +191,7 @@ type nodeE2E struct {
 	// and DecodeStrict rejects unknown fields, so adding Commit there would be a
 	// wire change. A released archive reports its real commit, which is why the
 	// historical suite supplies one instead of the CI stamp.
-	oldCommit, newCommit string
+	oldCommit, newCommit, failCommit string
 }
 
 func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
@@ -205,6 +205,7 @@ func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
 	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "v1.2.0")
 	f.oldCommit = envOr("PN_E2E_OLD_COMMIT", "abcdef1234567")
 	f.newCommit = envOr("PN_E2E_NEW_COMMIT", "abcdef1234567")
+	f.failCommit = envOr("PN_E2E_FAIL_COMMIT", "abcdef1234567")
 	var err error
 	f.fixture, err = nodefixture.New(f.agentID, f.credential)
 	if err != nil {
@@ -296,7 +297,7 @@ func (f *nodeE2E) install() error {
 		}
 	}
 	environment := "PSP_NODE_ENDPOINT=\"" + f.endpoint + "\"\nPSP_NODE_AGENT_ID=\"" + f.agentID + "\"\nSSL_CERT_FILE=\"/opt/passwall-node/config/fixture-ca.crt\"\n"
-	for name, data := range map[string][]byte{"credential": []byte(f.credential + "\n"), "environment": []byte(environment), "version": []byte("v1.0.0\n"), "fixture-ca.crt": f.ca} {
+	for name, data := range map[string][]byte{"credential": []byte(f.credential + "\n"), "environment": []byte(environment), "version": []byte(f.oldVersion + "\n"), "fixture-ca.crt": f.ca} {
 		path := filepath.Join(InstallRoot, "config", name)
 		if err := os.WriteFile(path, data, 0600); err != nil {
 			return err
@@ -350,6 +351,22 @@ func (f *nodeE2E) copyArtifact(source, target, version string) error {
 	}
 	defer input.Close()
 	return atomicHelperFile(filepath.Dir(target), filepath.Base(target), input, 0755, 0)
+}
+
+// commitFor names the commit stamped into the artifact that carries this version.
+// An unknown version means the fixture was pointed at an artifact it did not
+// describe, which is a mistake worth naming rather than defaulting past.
+func (f *nodeE2E) commitFor(version string) string {
+	switch version {
+	case f.oldVersion:
+		return f.oldCommit
+	case f.newVersion:
+		return f.newCommit
+	case f.failVersion:
+		return f.failCommit
+	default:
+		return ""
+	}
 }
 
 func (f *nodeE2E) waitVersion(version, commit string) error {
@@ -452,11 +469,16 @@ func (f *nodeE2E) upgrade(id, previous, target, artifact string, wantOK bool) (p
 		observation := f.fixture.Snapshot()
 		result, found := observation.TaskResults[id]
 		if found {
+			// The commit is chosen by the VERSION the node reports, not by which
+			// leg this is. On the rollback leg the restored version is the one the
+			// target artifact carries, so pairing it with the source commit would
+			// fail against a correct restore.
 			version := target
 			if !wantOK {
 				version = previous
 			}
-			if result.OK != wantOK || result.Kind != task.Kind || result.InputSHA256 != task.InputSHA256 || result.NotAfterMS != task.NotAfterMS || observation.ResultVersions[id] != version+" (abcdef1234567)" {
+			commit := f.commitFor(version)
+			if result.OK != wantOK || result.Kind != task.Kind || result.InputSHA256 != task.InputSHA256 || result.NotAfterMS != task.NotAfterMS || observation.ResultVersions[id] != version+" ("+commit+")" {
 				return protocol.TaskResult{}, errors.New("real recovering Node reported the wrong immutable task/version identity")
 			}
 			row, err := f.taskRow(id)
