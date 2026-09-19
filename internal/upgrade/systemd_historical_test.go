@@ -68,9 +68,19 @@ import (
 // upgrade list offered beta9 ahead of beta11 for the same reason; there it
 // misordered a list, here it blocks an upgrade.
 //
-// A FIX IS NOT HERE ON PURPOSE. CompareVersions is shared with the published
-// release line, and changing an ordering function changes what every earlier
-// binary does, so it needs its own decision rather than a drive-by edit.
+// CompareVersions in THIS repository has since been fixed to compare a shared
+// alphabetic prefix and then the number after it numerically, so v0.0.1-beta11
+// now sorts above v0.0.1-beta9 here.
+//
+// THAT FIX DOES NOT MAKE THIS EDGE WORK, and the distinction matters. The defect
+// is compiled into the RELEASED v0.0.1-beta9 binary, which is the one this suite
+// runs; patching HEAD changes what current and future builds do and cannot change
+// what an installed beta9 already does. So beta9 -> beta11 stays refused, now for
+// an understood reason rather than an mysterious one, and the edge belongs in the
+// support matrix as unsupported-by-the-source-release rather than as untested.
+//
+// The upgrade path that IS now open is beta11 and later to anything above them,
+// which the same defect had also been blocking.
 func TestUpgradeSystemdHistoricalReleaseE2E(t *testing.T) {
 	if os.Getenv("PN_NODE_UPGRADE_HIST") != "1" {
 		t.Skip("historical release upgrade E2E is enabled only by dedicated disposable Linux CI")
