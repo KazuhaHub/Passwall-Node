@@ -96,10 +96,18 @@ import (
 //	02:39:34 systemd: Stopping passwall-node.service
 //	02:41:28 passwall-node ... version=v0.0.1-beta9 (1f80aee)   <- still beta9
 //
-// The service comes back as the version it went down as. So the version check no
-// longer blocks the upgrade, and what remains is a separate problem in the
-// controller path — the swap does not take — which is a different question from
-// the one this comment set out to answer and is left as one.
+// The service comes back as the version it went down as, and the timestamps say
+// why: 02:39:34 down, 02:41:28 back — 114 seconds, against the controller's
+// healthTimeout of 120s. So the candidate did NOT become healthy and the
+// controller gave up and restored the running version, which is the designed
+// rollback rather than a failed swap.
+//
+// That is a different question from the one this comment set out to answer and is
+// left as one. Worth noting for whoever picks it up: the mechanism suite drives
+// v1.0.0 -> v1.1.0 successfully from the SAME source, so the difference between a
+// passing and a failing candidate here is the version scheme stamped into the
+// binaries rather than the code that reads it — which is why this was only
+// reachable once the suite was pointed at real-shaped versions.
 func TestUpgradeSystemdHistoricalReleaseE2E(t *testing.T) {
 	if os.Getenv("PN_NODE_UPGRADE_HIST") != "1" {
 		t.Skip("historical release upgrade E2E is enabled only by dedicated disposable Linux CI")
