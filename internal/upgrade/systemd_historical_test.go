@@ -81,6 +81,25 @@ import (
 //
 // The upgrade path that IS now open is beta11 and later to anything above them,
 // which the same defect had also been blocking.
+//
+// THE FIX IS VERIFIED TO CHANGE THIS RUN'S BEHAVIOUR, which is the part worth
+// recording because it is easy to assert and hard to show. Pointing the suite at
+// two builds made from THIS repository with the real version scheme stamped in
+// (Version=v0.0.1-beta9 / v0.0.1-beta11, commits 1f80aee / 60d96490) moves the
+// failure from a four-minute timeout to ten seconds, and moves it FORWARD: the
+// task is accepted, the real controller runs, and the run now stops on
+// "real controller outcome did not match success/start-failure scenario".
+//
+// The daemon's journal shows where it stops now:
+//
+//	02:35:26 passwall-node ... version=v0.0.1-beta9 (1f80aee)
+//	02:39:34 systemd: Stopping passwall-node.service
+//	02:41:28 passwall-node ... version=v0.0.1-beta9 (1f80aee)   <- still beta9
+//
+// The service comes back as the version it went down as. So the version check no
+// longer blocks the upgrade, and what remains is a separate problem in the
+// controller path — the swap does not take — which is a different question from
+// the one this comment set out to answer and is left as one.
 func TestUpgradeSystemdHistoricalReleaseE2E(t *testing.T) {
 	if os.Getenv("PN_NODE_UPGRADE_HIST") != "1" {
 		t.Skip("historical release upgrade E2E is enabled only by dedicated disposable Linux CI")
