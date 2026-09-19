@@ -25,86 +25,52 @@ import (
 // upgrade contract. A released archive does that, so pointing this suite at one
 // strengthens the run rather than weakening the check.
 //
-// WHERE IT STOPS, AND WHAT HAS BEEN RULED OUT. Against v0.0.1-beta9 the real
-// release authenticates, acknowledges all three empty streams and starts a real
-// Xray core, then the queued upgrade task never materializes as a private
-// request on disk. Three candidate causes have been eliminated rather than
-// guessed at:
+// WHAT IT FOUND, AND IT IS A DEFECT IN THE RELEASE RATHER THAN IN THIS HARNESS.
 //
-//   - the capability gate: Fixture.QueueTask returns an error when the agent has
-//     not reported task.execution.v1, task.expiry.v1 and the kind capability, and
-//     the run got past it, so all three were observed;
-//   - the task field name: envelope.go's `Tasks []Task `json:"tasks"“ has been
-//     that since the wire contract was first seeded and has never been renamed,
-//     so an older binary reads the same key;
-//   - a time anchor: the protocol package carries no such mechanism, so there is
-//     nothing for the fixture to have failed to provide.
+// Against v0.0.1-beta9 the real release authenticates, acknowledges all three
+// empty streams and starts a real Xray core, and then the upgrade task never
+// produces a private request on disk. Read out of the daemon's own state during a
+// run — /opt/passwall-node/data/state.db, task_executions, while the suite was
+// still waiting — the task is there and it FAILED:
 //
-// And one fact has been CONFIRMED rather than eliminated, which narrows where to
-// look next: beta9's TaskWorker advertises task.expiry.v1 only when its clock is
-// non-nil (internal/agent/tasks.go at 1f80aee, "capability is implementation
-// support, not a claim that time is fresh now"). Fixture.QueueTask rejects a task
-// when expiry has not been observed, and the run got past it, so the clock was
-// present and the capability was advertised. The fixture also fills response.Tasks
-// on every response, so the task was SERVED. What is not established is whether
-// beta9 persisted the served task into its journal — with no journal row there is
-// nothing for its worker to claim, and no request on disk.
+//	task_id      e2e-success-22a3b92a75be823b
+//	kind         agent.upgrade.v1
+//	args         {"version":"v0.0.1-beta11","expected_version":"v0.0.1-beta9"}
+//	state        failed
+//	error_code   task_execution_failed
+//	error_detail upgrade requires an exact newer release and exact expected
+//	             current release
 //
-// THE CAUSE IS NOT ESTABLISHED, AND A CANDIDATE WAS PUBLISHED HERE PREMATURELY.
+// So the agent claimed the task, ran the handler, and refused it. That is also
+// why no request reached disk: it is refused before one is written. An earlier
+// reading of this comment called the stop a harness gap; the row above refutes
+// that.
 //
-// What is known: beta9 does not persist the task. AcceptTasksFenced
-// (internal/state/sqlite/tasks.go at 1f80aee) computes taskBounds(clock) for a
-// task with no existing journal row and, when the bounds are invalid or the upper
-// bound has reached the deadline, records the task as ReplayFenced and `continue`s
-// without inserting a row. taskBounds is invalid for a nil clock and for one
-// whose TaskTimeBounds() fails Validate.
+// THE REFUSAL IS CompareVersions in internal/upgrade/types.go, which gets the
+// answer BACKWARDS for two-digit prerelease numbers:
 //
-// This comment first concluded from that "the fixture supplies no control-plane
-// time anchor". CHECKING THE FIXTURE REFUTES IT: nodefixture sets
-// `response.Envelope = protocol.Envelope{ComputedAtMS: time.Now().UnixMilli(), ...}`
-// on every response, and beta9's ValidateEnvelope rejects only negative values. So
-// the anchor is present and valid, and the reason the bounds come back invalid —
-// or the task fenced for some other reason — is not established here.
+//	if !deployment.ValidReleaseVersion(args.Version) ||
+//	    !deployment.ValidReleaseVersion(args.ExpectedVersion) ||
+//	    CompareVersions(args.Version, args.ExpectedVersion) <= 0 { ...refuse... }
 //
-// Left as an OPEN QUESTION deliberately. A wrong cause in this file is worse than
-// an absent one: it would send the next reader to fix something that is not
-// broken, and it would read as a compatibility finding when it is not.
+// Its prerelease loop takes the numeric path only when BOTH identifiers are
+// entirely digits — numeric(s) is `strings.Trim(s, "0123456789") == ""` — so for
+// "beta9" against "beta11" neither qualifies and it falls through to
+// strings.Compare, which is lexical: '9' > '1', so beta9 sorts ABOVE beta11 and
+// the requested target looks OLDER than the source.
 //
-// FURTHER ELIMINATION, so the next reader starts past it. Each of these was
-// checked, not assumed:
+// Consequence: a remote upgrade from beta9 to beta11 cannot happen, and the agent
+// reports it as a determinate failure rather than as an unsupported edge.
 //
-//   - the clock never failed: cmd/node wires OnTaskClockError to a warning, and
-//     the last run's journal has zero "task start authorization held" lines;
+// The function is identical in v0.0.1-beta9 and in this repository's current
+// source, so this suite is not testing a fixed bug — it is testing a live one.
+// That is the same class of defect the PSP release catalog carried, where the
+// upgrade list offered beta9 ahead of beta11 for the same reason; there it
+// misordered a list, here it blocks an upgrade.
 //
-//   - the bounds should not fence: the fixture's task has a three-minute
-//     deadline while the bounds' upper end is roughly the anchor instant, so
-//     UpperMS >= NotAfterMS is false;
-//
-//   - the code is not the difference: beta9's internal/agent/task_clock.go,
-//     internal/state/sqlite/tasks.go, internal/agent/processor.go and the clock
-//     wiring in internal/agent/sync.go and cmd/node/main.go are byte-identical to
-//     HEAD's.
-//
-//   - the response is not rejected: beta9's SyncOnce returns "validate sync
-//     response" when ValidateSyncResponse fails, and the run got past waitVersion,
-//     which requires CurrentAcknowledged and a running core. So the round
-//     completed, the envelope validated, and the task passed ValidateTasks —
-//     including beta9's reserved-kind check, which agent.upgrade.v1 does not
-//     trip.
-//
-// So the task reached AcceptTasksFenced, validated, with a clock that never
-// reported a fault, and still left no journal row that the worker could claim.
-// The remaining candidates are inside the acceptance path itself rather than
-// before it, and finding them needs the daemon's own state during a run rather
-// than more reading.
-//
-// The cause is therefore not established, and is recorded that way. Re-treading
-// those three is the obvious first move and it has already been made.
-//
-// FROM and TO must be real published archives. The FAIL artifact is the one leg
-// that cannot be historical — no release is published in order to fail — so it
-// stays the synthetic stamp, and the rollback assertion it drives is a mechanism
-// assertion. That is stated here rather than left for a reader to infer.
+// A FIX IS NOT HERE ON PURPOSE. CompareVersions is shared with the published
+// release line, and changing an ordering function changes what every earlier
+// binary does, so it needs its own decision rather than a drive-by edit.
 func TestUpgradeSystemdHistoricalReleaseE2E(t *testing.T) {
 	if os.Getenv("PN_NODE_UPGRADE_HIST") != "1" {
 		t.Skip("historical release upgrade E2E is enabled only by dedicated disposable Linux CI")
