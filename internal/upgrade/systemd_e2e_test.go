@@ -91,7 +91,7 @@ func runNodeE2E(t *testing.T) {
 	if err := f.install(); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.waitVersion(f.oldVersion); err != nil {
+	if err := f.waitVersion(f.oldVersion, f.oldCommit); err != nil {
 		t.Fatal(err)
 	}
 	t.Log("old real daemon authenticated and acknowledged all three empty streams with real Xray telemetry")
@@ -119,7 +119,7 @@ func runNodeE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.waitVersion(f.newVersion); err != nil {
+	if err := f.waitVersion(f.newVersion, f.newCommit); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.assertPreserved(before); err != nil {
@@ -185,6 +185,13 @@ type nodeE2E struct {
 	// synthetic pair (the mechanism test) or a real from/to release pair (the
 	// historical test) without either weakening the other's assertion.
 	oldVersion, newVersion, failVersion string
+	// The agent reports "<version> (<commit>)", so the commit is part of the
+	// identity the fixture waits for. It cannot be read from the artifact: the
+	// --upgrade-info document carries Version, StateSchema and UpgradeContract,
+	// and DecodeStrict rejects unknown fields, so adding Commit there would be a
+	// wire change. A released archive reports its real commit, which is why the
+	// historical suite supplies one instead of the CI stamp.
+	oldCommit, newCommit string
 }
 
 func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
@@ -196,6 +203,8 @@ func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
 	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "v1.0.0")
 	f.newVersion = envOr("PN_E2E_NEW_VERSION", "v1.1.0")
 	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "v1.2.0")
+	f.oldCommit = envOr("PN_E2E_OLD_COMMIT", "abcdef1234567")
+	f.newCommit = envOr("PN_E2E_NEW_COMMIT", "abcdef1234567")
 	var err error
 	f.fixture, err = nodefixture.New(f.agentID, f.credential)
 	if err != nil {
@@ -343,7 +352,7 @@ func (f *nodeE2E) copyArtifact(source, target, version string) error {
 	return atomicHelperFile(filepath.Dir(target), filepath.Base(target), input, 0755, 0)
 }
 
-func (f *nodeE2E) waitVersion(version string) error {
+func (f *nodeE2E) waitVersion(version, commit string) error {
 	ctx, cancel := context.WithTimeout(f.ctx, 4*time.Minute)
 	defer cancel()
 	for {
@@ -351,7 +360,7 @@ func (f *nodeE2E) waitVersion(version string) error {
 		if observation.Rejected != 0 {
 			return errors.New("real Node authentication/protocol was rejected")
 		}
-		if observation.LatestVersion == version+" (abcdef1234567)" && observation.CurrentAcknowledged && observation.LatestCoreState == "running" {
+		if observation.LatestVersion == version+" ("+commit+")" && observation.CurrentAcknowledged && observation.LatestCoreState == "running" {
 			if _, err := f.coreEpoch(); err == nil {
 				return nil
 			}
