@@ -70,6 +70,25 @@ import (
 // an absent one: it would send the next reader to fix something that is not
 // broken, and it would read as a compatibility finding when it is not.
 //
+// FURTHER ELIMINATION, so the next reader starts past it. Each of these was
+// checked, not assumed:
+//
+//   - the clock never failed: cmd/node wires OnTaskClockError to a warning, and
+//     the last run's journal has zero "task start authorization held" lines;
+//   - the bounds should not fence: the fixture's task has a three-minute
+//     deadline while the bounds' upper end is roughly the anchor instant, so
+//     UpperMS >= NotAfterMS is false;
+//   - the code is not the difference: beta9's internal/agent/task_clock.go,
+//     internal/state/sqlite/tasks.go, internal/agent/processor.go and the clock
+//     wiring in internal/agent/sync.go and cmd/node/main.go are byte-identical to
+//     HEAD's.
+//
+// What DID change between the two is concentrated in protocol/validate.go (790
+// lines) and protocol/envelope.go (77). Whether beta9 rejects the fixture's
+// response earlier — before tasks are ever considered — is the next thing worth
+// looking at, and it is a question about the EXCHANGE rather than about the task
+// machinery.
+//
 // The cause is therefore not established, and is recorded that way. Re-treading
 // those three is the obvious first move and it has already been made.
 //
