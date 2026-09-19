@@ -423,6 +423,48 @@ check_b08() {
   log "B08: the panel refused protocol generation 99 with a diagnostic, stored nothing and queued nothing (HTTP $code: $body)"
 }
 
+# B06 IS N/A AGAINST THIS VERSION, AND SAYING SO IS THE RESULT.
+#
+# The plan allows a missing optional feature to be N/A PROVIDED the panel is also
+# shown not to dispatch it — what it forbids is letting the gap read as coverage.
+#
+# `node-diagnostics` was added on 2026-09-18 (PR #133); v4.0.0-beta.19 was
+# published 2026-09-17. So the route is not there, and the request falls through
+# to the SPA catch-all: HTTP 200 with an HTML page, which is exactly the shape
+# that would fool a case asserting only "not 4xx".
+#
+# THE EXPIRY HALF CANNOT BE DRIVEN EITHER, and that is a property of THIS PAIR
+# rather than of the harness. The only task kind this panel can mint is
+# `agent.upgrade.v1`, and it refuses to mint one for the candidate, which reports
+# no upgrade helper — proved by B05 in the same run. An expired task the agent
+# could actually have accepted therefore cannot be constructed here at all.
+check_b06() {
+  local token="$1" panel_id="$2" agent_id="$3"
+
+  local code
+  code=$(curl -sS -o "$WORKDIR/b06.json" -w '%{http_code}' \
+    -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d '{"sections":["system"]}' \
+    "http://127.0.0.1:$OLD_PSP_PORT/api/admin/servers/$panel_id/node-diagnostics" || true)
+
+  # Detected by the SPA marker rather than by the status code: an absent admin
+  # route answers 200 here, so "not 404" would have been read as "the route
+  # exists and did something".
+  if ! grep -qi '<!doctype html' "$WORKDIR/b06.json" 2>/dev/null; then
+    fail "B06: this panel ANSWERS the diagnostics route (HTTP $code), so the case is not N/A and must be implemented rather than waived: $(head -c 200 "$WORKDIR/b06.json" 2>/dev/null)"
+  fi
+
+  # The negative half the plan asks for: nothing of that kind was queued for the
+  # node. An absent route that still left a task row would be a dispatch with no
+  # way to collect it.
+  local rows
+  rows=$(task_count "$agent_id" "diagnostics.collect.v1")
+  [ "$rows" = "0" ] ||
+    fail "B06: $rows diagnostics.collect.v1 task row(s) exist although the route that would mint them is absent"
+
+  log "B06: N/A — $OLD_PSP_VERSION has no node-diagnostics route (HTTP $code served the SPA), and no such task was queued. Task expiry is unreachable for this pair: the only kind the panel can mint is agent.upgrade.v1, which B05 shows it refuses for this candidate."
+}
+
 # B07: THE CONTROL PLANE GOES AWAY AND COMES BACK, WITH THE AGENT STILL RUNNING.
 #
 # The property is not that the agent survives its panel. It is that a node which
@@ -519,6 +561,7 @@ main() {
     fail "B05: the forged report that grants the upgrade capability was not accepted (HTTP $report_code: $(cat "$WORKDIR/report.json" 2>/dev/null)) — without it there is no capable node to compare against"
 
   check_b05 "$token" "$panel_id" "$agent_id" "$eligible_id" "$eligible_agent"
+  check_b06 "$token" "$panel_id" "$agent_id"
 
   # The digest is taken BEFORE the outage; afterwards is too late to know what
   # "unchanged" would have meant.

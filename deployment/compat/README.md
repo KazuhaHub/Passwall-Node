@@ -37,6 +37,7 @@ B03: the older panel accepted a report carrying fields it predates, and carries 
 B04: an absent capability stayed absent (state=limited ready=None)
 B05: the capable node was admitted and has its task row (HTTP 202)
 B05: the incapable node was refused (HTTP 400) and wrote no task row
+B06: N/A — v4.0.0-beta.19 has no node-diagnostics route (HTTP 200 served the SPA), and no such task was queued
 B07: stopping v4.0.0-beta.19 with the agent still running
 B07: the agent kept its last valid config across the outage (sha256 b35ebf2bd0b2)
 B07: restarting the panel
@@ -99,9 +100,41 @@ of the old panel's API), **B03**, **B04**, **B05** (upgrade admission gated on
 the reported capability), **B07** (control-plane loss and return) and **B08** (an
 unknown protocol generation refused by name).
 
-Still missing, each needing the harness to drive a state it does not yet drive:
-**B02** (user added, credential updated, disabled, expired, over quota — the
-node-side configuration that follows each) and **B06** (an unknown task kind, an
-expired task, a replayed result).
+**B06 — N/A, and the reason is a version fact.** `node-diagnostics` was added on
+2026-09-18 (PR #133); `v4.0.0-beta.19` was published 2026-09-17. The route is
+absent, so the request falls through to the SPA catch-all and comes back **200
+with an HTML page** — which is why the case is written to detect the SPA marker
+rather than a 404. The plan allows a missing optional feature to be N/A provided
+the panel is also shown not to dispatch it, and the case asserts exactly that:
+no `diagnostics.collect.v1` row exists.
+
+The expiry half is unreachable for this **pair** as well, and that is a property
+of the versions rather than of the harness: the only kind this panel can mint is
+`agent.upgrade.v1`, and B05 shows in the same run that it refuses to mint one for
+this candidate, which reports no upgrade helper. There is therefore no task the
+agent could have accepted, expired or not.
+
+**B02 — NOT COVERED.** A user added in the panel must reach the node, and the
+harness cannot currently make that happen. What was established by trying:
+
+- A native panel learns its inbounds from the node's report, so the inbound must
+  be recorded *after* the node has reported. Recorded alongside the node, the
+  panel answers `sync existing users (background) node_id=1 err="inspect inbound:
+  native panel has no cached full report: not found"` and the node's
+  `config_sync_state` stays `pending` for the rest of the run.
+- Recorded after the first report, the error becomes `inspect inbound: not
+  found`, and the panel's own task queue records the failure:
+  `user_resync ... last_error="shared provision: shared client u2@psp.local absent
+  after create"`, retrying. The `psp_clients` row and its attachment **are**
+  created; what never happens is the node receiving the inbound.
+- The node's applied configuration then contains `inbounds: []`.
+
+It is not yet known whether that is a defect in the released panel or an artifact
+of the harness creating the node through `POST /api/admin/servers` and
+`POST /api/admin/nodes` instead of the install flow an operator would use. Until
+that is settled, B02 is recorded as a gap rather than asserted at whatever
+strength the harness happens to reach — an earlier version of this file called
+B05 covered on that kind of reasoning and it was wrong.
+
 
 
