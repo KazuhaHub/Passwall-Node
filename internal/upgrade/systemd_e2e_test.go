@@ -73,6 +73,10 @@ func TestUpgradeSystemdRealNodeE2E(t *testing.T) {
 	if err := nodeE2EGuard(); err != nil {
 		t.Fatal(err)
 	}
+	runNodeE2E(t)
+}
+
+func runNodeE2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
 	f, err := newNodeE2E(ctx)
@@ -87,7 +91,7 @@ func TestUpgradeSystemdRealNodeE2E(t *testing.T) {
 	if err := f.install(); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.waitVersion("v1.0.0"); err != nil {
+	if err := f.waitVersion(f.oldVersion); err != nil {
 		t.Fatal(err)
 	}
 	t.Log("old real daemon authenticated and acknowledged all three empty streams with real Xray telemetry")
@@ -99,7 +103,7 @@ func TestUpgradeSystemdRealNodeE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	success, err := f.upgrade("e2e-success-"+f.nonce, "v1.0.0", "v1.1.0", os.Getenv("PN_E2E_NEW_BINARY"), true)
+	success, err := f.upgrade("e2e-success-"+f.nonce, f.oldVersion, f.newVersion, os.Getenv("PN_E2E_NEW_BINARY"), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,11 +115,11 @@ func TestUpgradeSystemdRealNodeE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log("target real daemon recovered the original running task and reported confirmed success")
-	failure, err := f.upgrade("e2e-failure-"+f.nonce, "v1.1.0", "v1.2.0", os.Getenv("PN_E2E_FAIL_BINARY"), false)
+	failure, err := f.upgrade("e2e-failure-"+f.nonce, f.newVersion, f.failVersion, os.Getenv("PN_E2E_FAIL_BINARY"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.waitVersion("v1.1.0"); err != nil {
+	if err := f.waitVersion(f.newVersion); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.assertPreserved(before); err != nil {
@@ -127,7 +131,7 @@ func TestUpgradeSystemdRealNodeE2E(t *testing.T) {
 	if err := f.assertPrivacy(); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("native real Node: success/recover/report=%t start-failure/rollback/report=%t UID=%d new_PID=%d identity/config/DB_inode_retained=true", success.OK, !failure.OK, f.uid, newPID)
+	t.Logf("native real Node: success/recover/report=%t start-failure/rollback/report=%t UID=%d newPID=%d identity/config/DB_inode_retained=true", success.OK, !failure.OK, f.uid, newPID)
 }
 
 func nodeE2EGuard() error {
@@ -175,6 +179,12 @@ type nodeE2E struct {
 	createdUnits                map[string]bool
 	rootCreated, accountCreated bool
 	serverClose                 func() error
+	// oldVersion, newVersion and failVersion are the labels the three artifacts
+	// must SELF-REPORT. copyArtifact asserts the identity rather than trusting
+	// the path, so these are what makes the same fixture able to drive a
+	// synthetic pair (the mechanism test) or a real from/to release pair (the
+	// historical test) without either weakening the other's assertion.
+	oldVersion, newVersion, failVersion string
 }
 
 func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
@@ -183,6 +193,9 @@ func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
 		return nil, errors.New("cannot mint private disposable identity")
 	}
 	f := &nodeE2E{ctx: ctx, nonce: hex.EncodeToString(random[32:40]), agentID: "agt_upgrade_e2e_" + hex.EncodeToString(random[40:]), credential: "pspn_'\"$(false);`false`_" + hex.EncodeToString(random[:32]), units: make(map[string]string), createdUnits: make(map[string]bool)}
+	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "v1.0.0")
+	f.newVersion = envOr("PN_E2E_NEW_VERSION", "v1.1.0")
+	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "v1.2.0")
 	var err error
 	f.fixture, err = nodefixture.New(f.agentID, f.credential)
 	if err != nil {
@@ -259,7 +272,7 @@ func (f *nodeE2E) install() error {
 			}
 		}
 	}
-	if err := f.copyArtifact(os.Getenv("PN_E2E_OLD_BINARY"), filepath.Join(InstallRoot, "bin", "passwall-node"), "v1.0.0"); err != nil {
+	if err := f.copyArtifact(os.Getenv("PN_E2E_OLD_BINARY"), filepath.Join(InstallRoot, "bin", "passwall-node"), f.oldVersion); err != nil {
 		return err
 	}
 	for _, name := range []string{"LICENSE", "NOTICE"} {
@@ -715,3 +728,12 @@ ReadWritePaths=/opt/passwall-node/data
 [Install]
 WantedBy=multi-user.target
 `
+
+// envOr reads an override, falling back to the synthetic stamp the mechanism
+// test has always used so its behaviour is unchanged when the override is absent.
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
