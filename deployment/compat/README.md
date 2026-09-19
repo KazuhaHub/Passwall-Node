@@ -35,10 +35,13 @@ candidate node state: limited 1 4
 control node state:   unknown None 0
 B03: the older panel accepted a report carrying fields it predates, and carries none of them itself
 B04: an absent capability stayed absent (state=limited ready=None)
+B05: the capable node was admitted and has its task row (HTTP 202)
+B05: the incapable node was refused (HTTP 400) and wrote no task row
 B07: stopping v4.0.0-beta.19 with the agent still running
 B07: the agent kept its last valid config across the outage (sha256 b35ebf2bd0b2)
 B07: restarting the panel
 B07: the node re-converged after the panel returned (compatibility=limited)
+B08: the panel refused protocol generation 99 with a diagnostic, stored nothing and queued nothing (HTTP 400)
 PASS: v4.0.0-beta.19 accepted the candidate agent (compatibility=limited 1 4)
 ```
 
@@ -52,6 +55,23 @@ assertion is the applied config's **digest**, not the agent's liveness — "stil
 running" is also true of an agent that threw its configuration away and is
 idling, and a node that dropped its config when its panel went away would take
 the user's traffic down with it.
+
+**B05** and **B08** are both *differential*, and in both cases the first version
+of the case was one-sided and proved nothing:
+
+- B05 asks the same upgrade request of two nodes whose only difference is the
+  capability they report. The incapable one being refused says nothing on its own
+  — a panel that refuses everything looks identical — so a second node is given
+  the full capability set by a forged report, and must be admitted.
+- B08 sends a report whose protocol generation the panel does not know. It is
+  otherwise complete, because a 400 produced by a malformed field would satisfy
+  "it was refused" while saying nothing about protocol handling. An earlier
+  version did exactly that and passed for the wrong reason.
+
+Neither can see the *reason* the panel refused the upgrade: every validation
+error on that route is flattened into one string by the handler, so an ineligible
+node and a malformed request are indistinguishable from the response. The case
+asserts what is observable and says so rather than implying it checked more.
 
 ## The negative control
 
@@ -74,15 +94,14 @@ of looking like a pass.
 
 ## Scope
 
-The cases present are **B01** (first contact: authenticate, pull, apply, report,
-read back out of the old panel's API), **B03**, **B04** and **B07** (control-plane
-loss and return).
+Present: **B01** (first contact: authenticate, pull, apply, report, read back out
+of the old panel's API), **B03**, **B04**, **B05** (upgrade admission gated on
+the reported capability), **B07** (control-plane loss and return) and **B08** (an
+unknown protocol generation refused by name).
 
-Still missing from the plan's B01–B08 set, and each needing the harness to drive a
-state it does not yet drive: **B02** (user add, credential update, disable,
-expiry, quota — the node-side config that follows), **B05** (capability withdrawal
-or helper disabled, and the panel then admitting no new upgrade task), **B06**
-(unknown task kind, expired task, replayed result) and **B08** (a protocol
-generation the old panel does not understand, refused with a diagnostic rather
-than looped).
+Still missing, each needing the harness to drive a state it does not yet drive:
+**B02** (user added, credential updated, disabled, expired, over quota — the
+node-side configuration that follows each) and **B06** (an unknown task kind, an
+expired task, a replayed result).
+
 

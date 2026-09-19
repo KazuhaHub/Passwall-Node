@@ -253,6 +253,176 @@ wait_converged() {
   done
 }
 
+# node_id_by_name resolves the panel's own numeric id, which the upgrade endpoint
+# is addressed by. `node_state` matches on name because that is what the DTO
+# carries alongside; the admin routes want the id.
+node_id_by_name() {
+  local token="$1" name="$2"
+  curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$OLD_PSP_PORT/api/admin/servers" |
+    python3 -c "
+import json,sys
+want=sys.argv[1]
+for s in json.load(sys.stdin).get('items',[]):
+    if s.get('name')==want:
+        print(s.get('id'))
+        break
+" "$name"
+}
+
+# task_count reads the panel's OWN durable task rows. The admission path returns
+# no task id when it refuses — that is the refusal — so there is nothing to ask
+# the API about by id, and "no row exists" is a question only the panel's own
+# store can answer. Opened read-only so a check can never be the thing that
+# changes what it is measuring.
+task_count() {
+  local agent_id="$1" kind="${2:-}"
+  python3 - "$WORKDIR/data/panel.db" "$agent_id" "$kind" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+kind = sys.argv[3]
+if kind:
+    rows = db.execute(
+        "select count(*) from node_agent_tasks where agent_id=? and kind=?",
+        (sys.argv[2], kind),
+    ).fetchone()[0]
+else:
+    rows = db.execute(
+        "select count(*) from node_agent_tasks where agent_id=?",
+        (sys.argv[2],),
+    ).fetchone()[0]
+print(rows)
+PY
+}
+
+# post_report sends a report AS the node, which is the only way to put a node
+# into a state this harness chooses rather than the one the candidate happens to
+# be in. Used to give one node a capability set the real candidate does not have.
+post_report() {
+  local credential="$1" body="$2"
+  curl -sS -o "$WORKDIR/report.json" -w '%{http_code}' \
+    -X POST -H "Authorization: Bearer $credential" -H 'Content-Type: application/json' \
+    -d "$body" "http://127.0.0.1:$OLD_PSP_PORT/v1/node/sync" || true
+}
+
+report_body() {
+  local agent_id="$1" protocol="$2"; shift 2
+  python3 - "$agent_id" "$protocol" "$@" <<'PY'
+import json, sys, time
+print(json.dumps({
+    "agent_id": sys.argv[1],
+    "protocol_version": int(sys.argv[2]),
+    "reported_at_ms": int(time.time() * 1000),
+    "capabilities": sys.argv[3:],
+    "partial": False,
+    # All three streams are required by ValidateNodeReportBase; a state with no
+    # etag and no applied version is the valid "nothing applied yet" shape. They
+    # are here so that the rejection a case is measuring is the ONLY thing wrong
+    # with the report.
+    "have": {"config": {}, "roster": {}, "directives": {}},
+    "objects": [],
+    "listener_counters": [],
+    "clients": [],
+    "core_state": "running",
+}))
+PY
+}
+
+upgrade_attempt() {
+  local token="$1" panel_id="$2"
+  curl -sS -o "$WORKDIR/b05.json" -w '%{http_code}' \
+    -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -H 'Idempotency-Key: psp-compat-b05-admission-1' \
+    -d '{"version":"v9.9.9","expected_version":"v1.0.0"}' \
+    "http://127.0.0.1:$OLD_PSP_PORT/api/admin/servers/$panel_id/upgrade-node-agent" || true
+}
+
+# B05: AN UPGRADE TASK IS ADMITTED ONLY FOR A NODE THAT REPORTS THE CAPABILITY.
+#
+# THE SAME REQUEST, TWICE, AGAINST TWO NODES WHOSE ONLY DIFFERENCE IS WHAT THEY
+# REPORT. A one-sided check cannot work here, and finding that out cost a run: a
+# panel that refused EVERYTHING satisfies "the request for the incapable node was
+# refused" exactly as well as a panel that gates on the capability, and the first
+# version of this case passed for a reason it had not tested at all — the request
+# had been rejected by ordinary request validation, before any admission decision
+# was reached, and the response body is no help in telling those apart because
+# every validation error is flattened into one string by the handler.
+#
+# So the other side is built rather than hoped for: a second node is given, by a
+# forged report, the full capability set AgentUpgradeCapabilities names. If that
+# node is admitted and the real candidate is not, the decision provably depends
+# on what the node reports.
+#
+# WHAT THIS DOES NOT CLAIM. The eligible node's capability set is asserted by the
+# harness, not by the candidate, so this measures the PANEL's gate — which is what
+# "停止新升级任务准入" is about. Whether the candidate can actually serve an upgrade
+# task needs a node with the helper installed, and is not reachable from here.
+check_b05() {
+  local token="$1" candidate_id="$2" candidate_agent="$3" eligible_id="$4" eligible_agent="$5"
+  local code rows
+
+  code=$(upgrade_attempt "$token" "$eligible_id")
+  if [ "$code" != "202" ]; then
+    fail "B05: a node reporting the full upgrade capability set was not admitted (HTTP $code: $(cat "$WORKDIR/b05.json" 2>/dev/null)), so the refusal of the real candidate proves nothing — a panel that refuses every request looks the same"
+  fi
+  rows=$(task_count "$eligible_agent" "agent.upgrade.v1")
+  [ "$rows" = "1" ] ||
+    fail "B05: the eligible node was answered 202 but has $rows agent.upgrade.v1 task row(s), so the answer and the recorded intent disagree"
+  log "B05: the capable node was admitted and has its task row (HTTP $code)"
+
+  code=$(upgrade_attempt "$token" "$candidate_id")
+  [ "$code" != "202" ] ||
+    fail "B05: an upgrade task was admitted for a node that reports no upgrade capability"
+  rows=$(task_count "$candidate_agent" "agent.upgrade.v1")
+  [ "$rows" = "0" ] ||
+    fail "B05: $rows agent.upgrade.v1 task row(s) exist for a node without the capability"
+  log "B05: the incapable node was refused (HTTP $code: $(cat "$WORKDIR/b05.json")) and wrote no task row"
+}
+
+# B08: A PROTOCOL GENERATION THE OLD PANEL DOES NOT KNOW IS REFUSED, BY NAME.
+#
+# The report sent below is OTHERWISE COMPLETE — every required field, all three
+# required streams — so the protocol generation is the only thing left to refuse
+# it for. That matters more than it looks: an earlier version of this case sent a
+# truncated report and got its 400 from a missing `have.config`, which satisfies
+# "it was refused" while saying nothing whatever about protocol handling.
+#
+# Measured response from v4.0.0-beta.19:
+#   400 {"error":"validate node report: protocol_version 99 is unsupported"}
+check_b08() {
+  local token="$1" credential="$2" agent_id="$3" name="$4"
+  local code body
+
+  code=$(post_report "$credential" "$(report_body "$agent_id" 99 \
+    "task.execution.v1" "task.expiry.v1" "task.agent.upgrade.v1")")
+  body=$(cat "$WORKDIR/report.json" 2>/dev/null)
+
+  case "$code" in
+    2??) fail "B08: a report claiming protocol generation 99 was ACCEPTED (HTTP $code)" ;;
+  esac
+
+  # THE DIAGNOSTIC IS THE OTHER HALF OF THE REQUIREMENT. A 400 with an empty body
+  # refuses without saying what it refused, which sends an operator hunting
+  # through node logs for a cause the panel already knew.
+  printf '%s' "$body" | grep -q 'protocol_version' ||
+    fail "B08: the refusal does not name the protocol version: $body"
+  printf '%s' "$body" | grep -q 'unsupported' ||
+    fail "B08: the refusal does not say the generation is unsupported: $body"
+
+  # AND NOTHING WAS HALF-APPLIED. A rejected report that had already written what
+  # it carried would leave the node reading as observed, and the panel then
+  # offering configuration for a generation it cannot produce — the loop this case
+  # exists to rule out.
+  local state rows
+  state=$(node_state "$token" "$name" | awk '{print $1}')
+  [ "$state" = "unknown" ] ||
+    fail "B08: the node reads as '$state' after a report that was refused, so the refusal did not roll back what it had stored"
+  rows=$(task_count "$agent_id")
+  [ "$rows" = "0" ] ||
+    fail "B08: $rows task row(s) exist for a node whose only report was refused"
+
+  log "B08: the panel refused protocol generation 99 with a diagnostic, stored nothing and queued nothing (HTTP $code: $body)"
+}
+
 # B07: THE CONTROL PLANE GOES AWAY AND COMES BACK, WITH THE AGENT STILL RUNNING.
 #
 # The property is not that the agent survives its panel. It is that a node which
@@ -296,10 +466,11 @@ main() {
   # every node as observed would look like a pass.
   create_node "$token" "compat-control" >/dev/null
 
-  local node agent_id credential
+  local node agent_id credential panel_id
   node=$(create_node "$token" "compat-candidate")
   agent_id=$(printf '%s' "$node" | python3 -c 'import json,sys;print(json.load(sys.stdin)["agent_id"])')
   credential=$(printf '%s' "$node" | python3 -c 'import json,sys;print(json.load(sys.stdin)["credential"])')
+  panel_id=$(node_id_by_name "$token" "compat-candidate")
 
   local rundir="$WORKDIR/agent"
   rm -rf "$rundir"; mkdir -p "$rundir"
@@ -332,6 +503,23 @@ main() {
 
   check_b03_b04 "$token"
 
+  # THE OTHER HALF OF B05'S COMPARISON, built here because no real node in this
+  # harness has the upgrade helper installed. `compat-eligible` is given the full
+  # capability set AgentUpgradeCapabilities names, by a forged report, so the only
+  # difference between the two nodes below is what they say about themselves.
+  local eligible eligible_agent eligible_cred eligible_id
+  eligible=$(create_node "$token" "compat-eligible")
+  eligible_agent=$(printf '%s' "$eligible" | python3 -c 'import json,sys;print(json.load(sys.stdin)["agent_id"])')
+  eligible_cred=$(printf '%s' "$eligible" | python3 -c 'import json,sys;print(json.load(sys.stdin)["credential"])')
+  eligible_id=$(node_id_by_name "$token" "compat-eligible")
+  local report_code
+  report_code=$(post_report "$eligible_cred" "$(report_body "$eligible_agent" 1 \
+    "task.execution.v1" "task.expiry.v1" "task.agent.upgrade.v1")")
+  [ "$report_code" = "200" ] ||
+    fail "B05: the forged report that grants the upgrade capability was not accepted (HTTP $report_code: $(cat "$WORKDIR/report.json" 2>/dev/null)) — without it there is no capable node to compare against"
+
+  check_b05 "$token" "$panel_id" "$agent_id" "$eligible_id" "$eligible_agent"
+
   # The digest is taken BEFORE the outage; afterwards is too late to know what
   # "unchanged" would have meant.
   #
@@ -348,6 +536,18 @@ main() {
   done
   applied_before=$(sha256sum "$applied" | awk '{print $1}')
   check_b07 "$token" "compat-candidate" "$applied" "$applied_before"
+
+  # B08 LAST, AND ON ITS OWN NODE. A report claiming an unknown protocol
+  # generation is BY DESIGN an attempt to corrupt what the panel believes about a
+  # node, so it must not be aimed at the node every other case just measured: one
+  # forged report against `compat-candidate` would leave B03, B04 and B05 reading
+  # a row this case had rewritten. `compat-probe` exists to be damaged.
+  local probe
+  probe=$(create_node "$token" "compat-probe")
+  check_b08 "$token" \
+    "$(printf '%s' "$probe" | python3 -c 'import json,sys;print(json.load(sys.stdin)["credential"])')" \
+    "$(printf '%s' "$probe" | python3 -c 'import json,sys;print(json.load(sys.stdin)["agent_id"])')" \
+    "compat-probe"
 
   log "PASS: $OLD_PSP_VERSION accepted the candidate agent (compatibility=$observed)"
 }
