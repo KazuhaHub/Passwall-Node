@@ -50,24 +50,25 @@ import (
 // beta9 persisted the served task into its journal — with no journal row there is
 // nothing for its worker to claim, and no request on disk.
 //
-// THAT QUESTION IS NOW ANSWERED, from beta9's own source. It does not persist the
-// task: internal/state/sqlite/tasks.go at 1f80aee, AcceptTasksFenced, computes
-// taskBounds(clock) for a task with no existing journal row and, when the bounds
-// are invalid or the upper bound has reached the deadline, records the task as
-// ReplayFenced and `continue`s WITHOUT inserting a row. taskBounds returns
-// invalid for a nil clock, and for one whose TaskTimeBounds() fails Validate.
+// THE CAUSE IS NOT ESTABLISHED, AND A CANDIDATE WAS PUBLISHED HERE PREMATURELY.
 //
-// So the cause is the control-plane time anchor: a released beta9 refuses to
-// accept a task it cannot bound, which is exactly what ADR 0032 requires ("no
-// fresh control-plane time anchor means no received task is started"), and the
-// fixture supplies no anchor. The fixture is not wrong for the current source —
-// the mechanism suite passes against it — but an older release needs something
-// from the exchange that this control fixture does not provide.
+// What is known: beta9 does not persist the task. AcceptTasksFenced
+// (internal/state/sqlite/tasks.go at 1f80aee) computes taskBounds(clock) for a
+// task with no existing journal row and, when the bounds are invalid or the upper
+// bound has reached the deadline, records the task as ReplayFenced and `continue`s
+// without inserting a row. taskBounds is invalid for a nil clock and for one
+// whose TaskTimeBounds() fails Validate.
 //
-// That makes this a HARNESS gap rather than a Node/PSP incompatibility, and it is
-// recorded as one. The historical suite cannot pass until the fixture carries an
-// anchor, or until the anchor requirement is shown to be satisfiable from what a
-// released agent can send.
+// This comment first concluded from that "the fixture supplies no control-plane
+// time anchor". CHECKING THE FIXTURE REFUTES IT: nodefixture sets
+// `response.Envelope = protocol.Envelope{ComputedAtMS: time.Now().UnixMilli(), ...}`
+// on every response, and beta9's ValidateEnvelope rejects only negative values. So
+// the anchor is present and valid, and the reason the bounds come back invalid —
+// or the task fenced for some other reason — is not established here.
+//
+// Left as an OPEN QUESTION deliberately. A wrong cause in this file is worse than
+// an absent one: it would send the next reader to fix something that is not
+// broken, and it would read as a compatibility finding when it is not.
 //
 // The cause is therefore not established, and is recorded that way. Re-treading
 // those three is the obvious first move and it has already been made.
