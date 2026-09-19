@@ -48,8 +48,26 @@ import (
 // present and the capability was advertised. The fixture also fills response.Tasks
 // on every response, so the task was SERVED. What is not established is whether
 // beta9 persisted the served task into its journal — with no journal row there is
-// nothing for its worker to claim, and no request on disk. That is the next
-// question, not a guess.
+// nothing for its worker to claim, and no request on disk.
+//
+// THAT QUESTION IS NOW ANSWERED, from beta9's own source. It does not persist the
+// task: internal/state/sqlite/tasks.go at 1f80aee, AcceptTasksFenced, computes
+// taskBounds(clock) for a task with no existing journal row and, when the bounds
+// are invalid or the upper bound has reached the deadline, records the task as
+// ReplayFenced and `continue`s WITHOUT inserting a row. taskBounds returns
+// invalid for a nil clock, and for one whose TaskTimeBounds() fails Validate.
+//
+// So the cause is the control-plane time anchor: a released beta9 refuses to
+// accept a task it cannot bound, which is exactly what ADR 0032 requires ("no
+// fresh control-plane time anchor means no received task is started"), and the
+// fixture supplies no anchor. The fixture is not wrong for the current source —
+// the mechanism suite passes against it — but an older release needs something
+// from the exchange that this control fixture does not provide.
+//
+// That makes this a HARNESS gap rather than a Node/PSP incompatibility, and it is
+// recorded as one. The historical suite cannot pass until the fixture carries an
+// anchor, or until the anchor requirement is shown to be satisfiable from what a
+// released agent can send.
 //
 // The cause is therefore not established, and is recorded that way. Re-treading
 // those three is the obvious first move and it has already been made.
