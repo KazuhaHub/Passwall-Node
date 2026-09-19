@@ -25,8 +25,42 @@ OLD_PSP_PORT="${PSP_OLD_PORT:-8788}"
 WORKDIR="${PSP_OLD_WORKDIR:-/tmp/psp-compat-old-psp}"
 AGENT_BIN="${PSP_CANDIDATE_AGENT:?set PSP_CANDIDATE_AGENT to the candidate agent binary}"
 
+# The panel this run starts, so it can be stopped by PID rather than by name.
+# Naming it (`pkill -x psp`) would reach any other psp on the machine, including
+# one belonging to somebody else's work.
+OLD_PSP_PID=""
+
 log() { printf '%s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
+
+# THE PANEL IS STARTED FOR ONE CASE AND STOPPED WITH IT.
+#
+# Left running it does two things, and the second is the expensive one. It holds
+# the panel port, so the next case cannot bind. And it keeps this script's shell
+# alive: bash sits in do_wait on its child, so the process never exits and a
+# caller cannot tell "the case passed" from "the harness hung". That is exactly
+# what a wedged run looks like from the outside — a `limactl shell` that never
+# returns, a `tail` that never sees EOF, and no output at all, because the last
+# line was printed an hour and a half earlier.
+#
+# SIGTERM first, because the panel drains its background workers; SIGKILL only
+# for one that does not come back, so a genuine shutdown hang is bounded rather
+# than waited on.
+stop_old_psp() {
+  [ -n "$OLD_PSP_PID" ] || return 0
+  kill -0 "$OLD_PSP_PID" 2>/dev/null || return 0
+  kill "$OLD_PSP_PID" 2>/dev/null || true
+  local waited=0
+  while kill -0 "$OLD_PSP_PID" 2>/dev/null; do
+    if [ "$waited" -ge 15 ]; then
+      log "the panel did not exit after SIGTERM; killing it"
+      kill -9 "$OLD_PSP_PID" 2>/dev/null || true
+      break
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+}
+trap stop_old_psp EXIT
 
 # --------------------------------------------------------------- fetch & verify
 
@@ -55,7 +89,17 @@ fetch_old_psp() {
 
 start_old_psp() {
   rm -rf "$WORKDIR/data" "$WORKDIR/config.yaml"
-  ( cd "$WORKDIR" && nohup ./psp > "$WORKDIR/psp.log" 2>&1 & )
+  # `exec`, NOT `nohup`, and the difference is not cosmetic: `$!` has to name the
+  # PANEL, because that is what `stop_old_psp` kills. uutils' nohup (the one on
+  # this VM) forks instead of exec'ing, so `$!` named a wrapper that had already
+  # exited and the cleanup killed a PID belonging to nothing — leaving the panel
+  # running and the port held, while the script itself exited cleanly and looked
+  # fine. GNU nohup execs, so the same line is correct on the runner and wrong
+  # here, which is the worst shape a bug can have. With no wrapper process there
+  # is nothing to disagree about, and the redirects below are what nohup would
+  # have set up anyway.
+  ( cd "$WORKDIR" && exec ./psp > "$WORKDIR/psp.log" 2>&1 < /dev/null ) &
+  OLD_PSP_PID=$!
   local waited=0
   while ! curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$OLD_PSP_PORT/api/version" 2>/dev/null; do
     if [ "$waited" -ge 60 ]; then fail "the old panel never answered on :$OLD_PSP_PORT"; fi
