@@ -13,6 +13,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/deployment"
 	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-node/releaseid"
 )
 
 const TaskKind = protocol.TaskKindAgentUpgradeV1
@@ -158,99 +159,14 @@ func ParseArgs(task protocol.Task) (Args, error) {
 	return args, nil
 }
 
-// CompareVersions accepts only canonical tags already validated by deployment.
-// Compare numeric identifiers by length so untrusted numbers cannot overflow.
-func CompareVersions(a, b string) int {
-	left, lp, _ := strings.Cut(strings.TrimPrefix(a, "v"), "-")
-	right, rp, _ := strings.Cut(strings.TrimPrefix(b, "v"), "-")
-	for i, l := range strings.Split(left, ".") {
-		r := strings.Split(right, ".")[i]
-		if c := compareNumeric(l, r); c != 0 {
-			return c
-		}
-	}
-	if lp == rp {
-		return 0
-	}
-	if lp == "" {
-		return 1
-	}
-	if rp == "" {
-		return -1
-	}
-	ls, rs := strings.Split(lp, "."), strings.Split(rp, ".")
-	for i := 0; i < len(ls) && i < len(rs); i++ {
-		ln, rn := numeric(ls[i]), numeric(rs[i])
-		if ln && !rn {
-			return -1
-		}
-		if !ln && rn {
-			return 1
-		}
-		var c int
-		if ln {
-			c = compareNumeric(ls[i], rs[i])
-		} else {
-			c = comparePrereleaseIdentifier(ls[i], rs[i])
-		}
-		if c != 0 {
-			return c
-		}
-	}
-	if len(ls) < len(rs) {
-		return -1
-	}
-	if len(ls) > len(rs) {
-		return 1
-	}
-	return 0
-}
-
-// comparePrereleaseIdentifier orders two prerelease identifiers the way a reader
-// would: a shared alphabetic prefix first, then the number after it compared
-// NUMERICALLY.
+// CompareVersions orders two historical v-prefixed release tags.
 //
-// A plain strings.Compare gets this backwards for the identifiers this project
-// actually publishes. "beta9" against "beta11" compares '9' > '1' and returns
-// one, so beta9 sorts ABOVE beta11 — and CompareVersions feeds a refusal check,
-// so a remote upgrade from v0.0.1-beta9 to v0.0.1-beta11 was rejected as "an
-// exact newer release and exact expected current release", with the target
-// looking older than the source. The dotted form ("alpha.10") never showed it,
-// because splitting on "." leaves "10" fully numeric and it takes the numeric
-// path.
-func comparePrereleaseIdentifier(a, b string) int {
-	ap, an := splitTrailingDigits(a)
-	bp, bn := splitTrailingDigits(b)
-	if c := strings.Compare(ap, bp); c != 0 {
-		return c
-	}
-	if an == "" || bn == "" {
-		// One carries a numeric suffix the other does not. Comparing the whole
-		// identifiers keeps "alpha" below "alpha1", which is the same rule the
-		// caller applies to a shorter identifier list.
-		return strings.Compare(a, b)
-	}
-	return compareNumeric(an, bn)
-}
-
-// splitTrailingDigits separates an identifier into its leading text and its
-// trailing run of digits. An identifier with no trailing digits returns the whole
-// string and an empty suffix.
-func splitTrailingDigits(s string) (string, string) {
-	i := len(s)
-	for i > 0 && s[i-1] >= '0' && s[i-1] <= '9' {
-		i--
-	}
-	return s[:i], s[i:]
-}
-
-func numeric(s string) bool { return s != "" && strings.Trim(s, "0123456789") == "" }
-func compareNumeric(a, b string) int {
-	if len(a) < len(b) {
-		return -1
-	}
-	if len(a) > len(b) {
-		return 1
-	}
-	return strings.Compare(a, b)
+// It delegates to releaseid.CompareLegacyTag rather than carrying its own copy
+// of the rule. The rule is the project's release order, and it is applied in
+// three places — here, the release CLI, and the panel's admission check — so a
+// second implementation is a second opinion about whether an upgrade is an
+// upgrade. The dotless prerelease handling (v0.0.1-beta11 above v0.0.1-beta9)
+// lives there, with the vectors that pin it.
+func CompareVersions(a, b string) int {
+	return releaseid.CompareLegacyTag(a, b)
 }
