@@ -9,7 +9,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	"github.com/KazuhaHub/passwall-node/protocol"
-	"github.com/KazuhaHub/passwall-node/protocol/conformance"
+	"github.com/KazuhaHub/passwall-protocol/protocol/conformance"
 )
 
 const (
