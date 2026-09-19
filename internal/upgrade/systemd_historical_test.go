@@ -25,6 +25,24 @@ import (
 // upgrade contract. A released archive does that, so pointing this suite at one
 // strengthens the run rather than weakening the check.
 //
+// WHERE IT STOPS, AND WHAT HAS BEEN RULED OUT. Against v0.0.1-beta9 the real
+// release authenticates, acknowledges all three empty streams and starts a real
+// Xray core, then the queued upgrade task never materializes as a private
+// request on disk. Three candidate causes have been eliminated rather than
+// guessed at:
+//
+//   - the capability gate: Fixture.QueueTask returns an error when the agent has
+//     not reported task.execution.v1, task.expiry.v1 and the kind capability, and
+//     the run got past it, so all three were observed;
+//   - the task field name: envelope.go's `Tasks []Task `json:"tasks"“ has been
+//     that since the wire contract was first seeded and has never been renamed,
+//     so an older binary reads the same key;
+//   - a time anchor: the protocol package carries no such mechanism, so there is
+//     nothing for the fixture to have failed to provide.
+//
+// The cause is therefore not established, and is recorded that way. Re-treading
+// those three is the obvious first move and it has already been made.
+//
 // FROM and TO must be real published archives. The FAIL artifact is the one leg
 // that cannot be historical — no release is published in order to fail — so it
 // stays the synthetic stamp, and the rollback assertion it drives is a mechanism
