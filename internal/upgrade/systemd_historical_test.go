@@ -108,6 +108,23 @@ import (
 // passing and a failing candidate here is the version scheme stamped into the
 // binaries rather than the code that reads it — which is why this was only
 // reachable once the suite was pointed at real-shaped versions.
+//
+// NARROWED FURTHER, so the next reader starts past it. helper_linux.go's
+// controller.run returns a bare error from five call sites BEFORE it ever calls
+// c.fail, and c.fail is the only thing that writes a receipt. The run leaves no
+// receipt in /opt/passwall-node/upgrades — and it fails in about ten seconds,
+// far too fast to have reached the download and staging path — so the failure is
+// one of those five:
+//
+//	c.validate(c.root)
+//	checkOwnedPath(receipts, ...)
+//	open/flock of upgrades/.lock
+//	ReadDocument(data/upgrades, "request.json", &request)
+//	ParseArgs(request.Task) or args != request.Args
+//
+// The last is worth trying first: the controller calls the SAME ParseArgs the
+// daemon does, so the version fix applies to it too, and the remaining way that
+// line fails after the fix is the arguments not comparing equal.
 func TestUpgradeSystemdHistoricalReleaseE2E(t *testing.T) {
 	if os.Getenv("PN_NODE_UPGRADE_HIST") != "1" {
 		t.Skip("historical release upgrade E2E is enabled only by dedicated disposable Linux CI")
