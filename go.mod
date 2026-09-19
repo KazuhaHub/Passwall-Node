@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.8
 
 require (
-	github.com/KazuhaHub/passwall-protocol v0.0.0-20260919233931-741ab2cb3b85
+	github.com/KazuhaHub/passwall-protocol v0.1.0
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
