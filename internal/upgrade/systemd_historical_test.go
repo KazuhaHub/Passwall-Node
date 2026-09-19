@@ -75,19 +75,28 @@ import (
 //
 //   - the clock never failed: cmd/node wires OnTaskClockError to a warning, and
 //     the last run's journal has zero "task start authorization held" lines;
+//
 //   - the bounds should not fence: the fixture's task has a three-minute
 //     deadline while the bounds' upper end is roughly the anchor instant, so
 //     UpperMS >= NotAfterMS is false;
+//
 //   - the code is not the difference: beta9's internal/agent/task_clock.go,
 //     internal/state/sqlite/tasks.go, internal/agent/processor.go and the clock
 //     wiring in internal/agent/sync.go and cmd/node/main.go are byte-identical to
 //     HEAD's.
 //
-// What DID change between the two is concentrated in protocol/validate.go (790
-// lines) and protocol/envelope.go (77). Whether beta9 rejects the fixture's
-// response earlier — before tasks are ever considered — is the next thing worth
-// looking at, and it is a question about the EXCHANGE rather than about the task
-// machinery.
+//   - the response is not rejected: beta9's SyncOnce returns "validate sync
+//     response" when ValidateSyncResponse fails, and the run got past waitVersion,
+//     which requires CurrentAcknowledged and a running core. So the round
+//     completed, the envelope validated, and the task passed ValidateTasks —
+//     including beta9's reserved-kind check, which agent.upgrade.v1 does not
+//     trip.
+//
+// So the task reached AcceptTasksFenced, validated, with a clock that never
+// reported a fault, and still left no journal row that the worker could claim.
+// The remaining candidates are inside the acceptance path itself rather than
+// before it, and finding them needs the daemon's own state during a run rather
+// than more reading.
 //
 // The cause is therefore not established, and is recorded that way. Re-treading
 // those three is the obvious first move and it has already been made.
