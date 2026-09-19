@@ -22,6 +22,7 @@ set -euo pipefail
 OLD_PSP_VERSION="${PSP_OLD_VERSION:-v4.0.0-beta.19}"
 OLD_PSP_REPO="${PSP_OLD_REPO:-KazuhaHub/Passwall-Sub-Panel}"
 OLD_PSP_PORT="${PSP_OLD_PORT:-8788}"
+HOST="${PSP_OLD_HOST:-127.0.0.1}"
 WORKDIR="${PSP_OLD_WORKDIR:-/tmp/psp-compat-old-psp}"
 AGENT_BIN="${PSP_CANDIDATE_AGENT:?set PSP_CANDIDATE_AGENT to the candidate agent binary}"
 
@@ -253,6 +254,46 @@ wait_converged() {
   done
 }
 
+# --------------------------------------------------------------- natives
+
+# A NATIVE NODE BINDS ITS OWN PORT, SO IT MUST NOT PICK ONE THE LAUNCHER PUBLISHED.
+#
+# R07's launcher publishes 3X-UI's node range (24443-24450) on the host, so a
+# native node told to listen on one of those ports cannot: the container's port
+# forwarder already holds it. The agent then fails to start its core —
+#
+#   failed to listen TCP on 24443 > listen tcp 0.0.0.0:24443: bind: address already in use
+#
+# — rolls the config back, and never reports the inbound. Downstream that reads as
+# a panel problem: config_sync_state stays `pending` forever, PSP logs "native
+# panel has no cached full report", and provisioning a user onto the node fails
+# with "shared client u2@psp.local absent after create". Every one of those was
+# this port, and none of them said so.
+NODE_PORT="${PSP_OLD_NODE_PORT:-25443}"
+
+# create_inbound gives the native panel a node for a client to attach to. It is
+# created BEFORE the agent starts, so the agent's first sync carries it — created
+# afterwards, the panel has already tried and failed to provision existing users
+# and does not retry that.
+create_inbound() {
+  local token="$1" panel_id="$2"
+  python3 - "$panel_id" "$HOST" "$NODE_PORT" > "$WORKDIR/b02-inbound-request.json" <<'PY'
+import json, sys
+print(json.dumps({
+    "panel_id": int(sys.argv[1]), "display_name": "compat-inbound",
+    "server_address": sys.argv[2], "region": "compat",
+    "inbound": {"remark": "compat", "enable": True, "listen": "", "port": int(sys.argv[3]),
+                "protocol": "vless",
+                "settings": json.dumps({"clients": [], "decryption": "none", "fallbacks": []}),
+                "stream_settings": json.dumps({"network": "tcp", "security": "none"}),
+                "sniffing": json.dumps({"enabled": False, "destOverride": ["http", "tls"]})}}))
+PY
+  curl -sS -o "$WORKDIR/b02-inbound.json" -w '%{http_code}' \
+    -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "@$WORKDIR/b02-inbound-request.json" \
+    "http://127.0.0.1:$OLD_PSP_PORT/api/admin/nodes" || true
+}
+
 # node_id_by_name resolves the panel's own numeric id, which the upgrade endpoint
 # is addressed by. `node_state` matches on name because that is what the DTO
 # carries alongside; the admin routes want the id.
@@ -334,6 +375,161 @@ upgrade_attempt() {
     -H 'Idempotency-Key: psp-compat-b05-admission-1' \
     -d '{"version":"v9.9.9","expected_version":"v1.0.0"}' \
     "http://127.0.0.1:$OLD_PSP_PORT/api/admin/servers/$panel_id/upgrade-node-agent" || true
+}
+
+# wait_synced polls the panel's record of whether the node has confirmed the
+# configuration it was sent. `pending` means PSP minted a desired config the node
+# has not acknowledged; `synced` means it has.
+wait_synced() {
+  local waited=0 state
+  while :; do
+    state=$(node_field config_sync_state) || true
+    if [ "$state" = "synced" ]; then return 0; fi
+    if [ "$waited" -ge 90 ]; then
+      log "the node never reached synced (state=${state:-<none>}); its core could not apply the configuration PSP sent"
+      return 1
+    fi
+    sleep 3; waited=$((waited + 3))
+  done
+}
+
+# node_field reads one column of the single node row this harness creates.
+node_field() {
+  python3 - "$WORKDIR/data/panel.db" "$1" <<'PY'
+import sqlite3, sys
+column = sys.argv[2]
+if column not in {"config_sync_state", "config_synced_at", "id"}:
+    raise SystemExit(f"refusing to read unexpected column {column!r}")
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = db.execute(f"select {column} from nodes limit 1").fetchone()
+print("" if row is None or row[0] is None else row[0])
+PY
+}
+
+# attachment_state reads WHERE PSP believes the client is on the node, as
+# `state|email|applied_version`. `applied` is set only after a read-back confirms
+# it, so this is the panel's own record that the client reached the node rather
+# than an intention to send it. The version is what moves when the desired
+# configuration changes: PSP mints a new one only when it does.
+attachment_state() {
+  python3 - "$WORKDIR/data/panel.db" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = db.execute("select state, applied_email, applied_version from psp_client_inbounds limit 1").fetchone()
+print("none" if row is None else f"{row[0]}|{row[1]}|{row[2]}")
+PY
+}
+
+# B02: A USER ADDED IN THE PANEL REACHES THE NODE, AND LEAVES IT WHEN DISABLED.
+#
+# Read out of the PANEL'S record of the attachment, not out of PSP's intent to
+# send one: `psp_client_inbounds.state = applied` is written only after a
+# read-back confirms the client is on the node, which is exactly the claim.
+#
+# The user can only be provisioned once the node has confirmed a configuration —
+# a native panel learns its inbounds from the node's report, so provisioning
+# before that fails with "native panel has no cached full report". That is why
+# this runs after wait_synced rather than alongside the node's creation.
+check_b02() {
+  local token="$1" upn="$2" waited state
+
+  local code
+  code=$(curl -sS -o "$WORKDIR/b02.json" -w '%{http_code}' \
+    -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "{\"upn\":\"$upn\",\"group_id\":1,\"traffic_limit_gb\":10}" \
+    "http://127.0.0.1:$OLD_PSP_PORT/api/admin/users" || true)
+  [ "$code" = "201" ] ||
+    fail "B02: the user was not created (HTTP $code: $(head -c 200 "$WORKDIR/b02.json" 2>/dev/null))"
+
+  waited=0
+  # Matched on the STATE, not on a full address. The client's email is derived
+  # from the user's ID (`u2@psp.local`), so a comparison assembling the UPN into
+  # an address never matches — and it fails by looping, which reads as "it never
+  # arrived" when the record in front of it says otherwise.
+  until attachment_state | grep -q '^applied|'; do
+    if [ "$waited" -ge 120 ]; then
+      fail "B02: the client never reached the node; the panel's attachment record says $(attachment_state)"
+    fi
+    sleep 5; waited=$((waited + 5))
+  done
+  log "B02: the panel recorded the client as applied to the node after ${waited}s ($(attachment_state))"
+
+  # Captured BEFORE the disable: the assertion below is that this number moves,
+  # so the value it moves FROM has to be the one in force before the change.
+  local before_version
+  before_version=$(attachment_state | awk -F'|' '{print $3}')
+
+  # DISABLING MUST REACH IT TOO. A user the panel has switched off staying in the
+  # node's configuration is the failure this half exists for: the panel would
+  # report the user as disabled while the node kept serving them.
+  #
+  # `set-service-status` and not `PUT /users/:id`: the update route has no
+  # `enabled` field at all, so `{"enabled":false}` there is IGNORED — it answers
+  # 200 and changes nothing. That cost a run, and what it looked like was a panel
+  # that would not push a disable to its node.
+  local uid
+  uid=$(user_id_by_upn "$token" "$upn")
+  [ -n "$uid" ] || fail "B02: the panel does not list $upn after creating it"
+
+  code=$(curl -sS -o "$WORKDIR/b02-disable.json" -w '%{http_code}' \
+    -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d '{"enabled":false}' \
+    "http://127.0.0.1:$OLD_PSP_PORT/api/admin/users/$uid/set-service-status" || true)
+  case "$code" in
+    2??) : ;;
+    *) fail "B02: disabling $upn was refused (HTTP $code: $(head -c 200 "$WORKDIR/b02-disable.json" 2>/dev/null))" ;;
+  esac
+
+  # Confirmed on the panel before waiting on the node, so a request that was
+  # accepted and ignored cannot read as a node that did not follow.
+  #
+  # THE SERVICE AXIS IS THE ONE THAT MOVES. `enabled` belongs to the ACCOUNT axis
+  # and deliberately stays true: a suspended user can still sign in and
+  # self-rescue, which is the model this panel documents. Asserting `enabled=0`
+  # here asserts a model it does not have, and it fails against a working
+  # disable — which is exactly what it did.
+  local service_reason
+  service_reason=$(python3 - "$WORKDIR/data/panel.db" "$uid" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = db.execute("select service_disabled_reason from users where id=?", (int(sys.argv[2]),)).fetchone()
+print("" if row is None or row[0] is None else row[0])
+PY
+)
+  [ -n "$service_reason" ] ||
+    fail "B02: the panel answered $code to the disable and the user's service axis is still unset"
+
+  local after_state
+  waited=0
+  # THE VERSION IS WHAT MOVES, not the state. The attachment stays `applied` — the
+  # client is still provisioned onto that node; what changes is the configuration
+  # the node confirmed, and PSP mints a new version only when the desired one
+  # changes. Asserting that the attachment stops reading `applied` would be
+  # asserting a model this panel does not have, and it would fail against a
+  # correctly-working disable.
+  until [ "$(attachment_state | awk -F'|' '{print $3}')" != "$before_version" ]; do
+    if [ "$waited" -ge 120 ]; then
+      fail "B02: $upn was disabled in the panel and the node never confirmed a new configuration (still version $before_version)"
+    fi
+    sleep 5; waited=$((waited + 5))
+  done
+  after_state=$(attachment_state)
+  log "B02: the node confirmed a new configuration after the disable (version $before_version -> ${after_state##*|}; $(node_field config_sync_state))"
+}
+
+# user_id_by_upn resolves the panel's own id for a user, which the update route
+# is addressed by.
+user_id_by_upn() {
+  local token="$1" upn="$2"
+  curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$OLD_PSP_PORT/api/admin/users" |
+    python3 -c "
+import json,sys
+want=sys.argv[1]
+for u in json.load(sys.stdin).get('items',[]):
+    if u.get('upn')==want:
+        print(u.get('id'))
+        break
+" "$upn"
 }
 
 # B05: AN UPGRADE TASK IS ADMITTED ONLY FOR A NODE THAT REPORTS THE CAPABILITY.
@@ -514,6 +710,15 @@ main() {
   credential=$(printf '%s' "$node" | python3 -c 'import json,sys;print(json.load(sys.stdin)["credential"])')
   panel_id=$(node_id_by_name "$token" "compat-candidate")
 
+  # THE INBOUND IS CREATED BEFORE THE AGENT STARTS, so the agent's first sync
+  # carries it. Created afterwards, the panel has already attempted — and failed —
+  # to provision existing users against a node with no cached report, and it does
+  # not retry that.
+  local inbound_code
+  inbound_code=$(create_inbound "$token" "$panel_id")
+  [ "$inbound_code" = "201" ] ||
+    fail "the node's inbound was not created (HTTP $inbound_code: $(head -c 200 "$WORKDIR/b02-inbound.json" 2>/dev/null)); without it no user can reach this node"
+
   local rundir="$WORKDIR/agent"
   rm -rf "$rundir"; mkdir -p "$rundir"
   printf '%s' "$credential" > "$rundir/credential"; chmod 600 "$rundir/credential"
@@ -544,6 +749,8 @@ main() {
     fail "the control node changed too, so this run cannot attribute the change to the agent"
 
   check_b03_b04 "$token"
+  wait_synced || fail "the node never confirmed the configuration, so nothing about a user reaching it could be measured"
+  check_b02 "$token" "compat-user-b02"
 
   # THE OTHER HALF OF B05'S COMPARISON, built here because no real node in this
   # harness has the upgrade helper installed. `compat-eligible` is given the full

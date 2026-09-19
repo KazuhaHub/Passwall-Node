@@ -35,6 +35,8 @@ candidate node state: limited 1 4
 control node state:   unknown None 0
 B03: the older panel accepted a report carrying fields it predates, and carries none of them itself
 B04: an absent capability stayed absent (state=limited ready=None)
+B02: the panel recorded the client as applied to the node after 60s (applied|u2@psp.local|2)
+B02: the node confirmed a new configuration after the disable (version 2 -> 3; synced)
 B05: the capable node was admitted and has its task row (HTTP 202)
 B05: the incapable node was refused (HTTP 400) and wrote no task row
 B06: N/A — v4.0.0-beta.19 has no node-diagnostics route (HTTP 200 served the SPA), and no such task was queued
@@ -96,9 +98,10 @@ of looking like a pass.
 ## Scope
 
 Present: **B01** (first contact: authenticate, pull, apply, report, read back out
-of the old panel's API), **B03**, **B04**, **B05** (upgrade admission gated on
-the reported capability), **B07** (control-plane loss and return) and **B08** (an
-unknown protocol generation refused by name).
+of the old panel's API), **B02** (a user reaches the node, and the node confirms a
+new configuration when the user's service is suspended), **B03**, **B04**, **B05**
+(upgrade admission gated on the reported capability), **B07** (control-plane loss
+and return) and **B08** (an unknown protocol generation refused by name).
 
 **B06 — N/A, and the reason is a version fact.** `node-diagnostics` was added on
 2026-09-18 (PR #133); `v4.0.0-beta.19` was published 2026-09-17. The route is
@@ -114,27 +117,33 @@ of the versions rather than of the harness: the only kind this panel can mint is
 this candidate, which reports no upgrade helper. There is therefore no task the
 agent could have accepted, expired or not.
 
-**B02 — NOT COVERED.** A user added in the panel must reach the node, and the
-harness cannot currently make that happen. What was established by trying:
+## B02 cost four runs, and three of them were this harness
 
-- A native panel learns its inbounds from the node's report, so the inbound must
-  be recorded *after* the node has reported. Recorded alongside the node, the
-  panel answers `sync existing users (background) node_id=1 err="inspect inbound:
-  native panel has no cached full report: not found"` and the node's
-  `config_sync_state` stays `pending` for the rest of the run.
-- Recorded after the first report, the error becomes `inspect inbound: not
-  found`, and the panel's own task queue records the failure:
-  `user_resync ... last_error="shared provision: shared client u2@psp.local absent
-  after create"`, retrying. The `psp_clients` row and its attachment **are**
-  created; what never happens is the node receiving the inbound.
-- The node's applied configuration then contains `inbounds: []`.
+It was recorded here as NOT COVERED once, on the reading that a native panel
+would not provision a client onto a node. That reading was wrong, and the way it
+was wrong is worth keeping.
 
-It is not yet known whether that is a defect in the released panel or an artifact
-of the harness creating the node through `POST /api/admin/servers` and
-`POST /api/admin/nodes` instead of the install flow an operator would use. Until
-that is settled, B02 is recorded as a gap rather than asserted at whatever
-strength the harness happens to reach — an earlier version of this file called
-B05 covered on that kind of reasoning and it was wrong.
+- **The node could not bind its port.** R07's launcher publishes 3X-UI's node
+  range (24443–24450) on the host, and the harness had told the native node to
+  listen on 24443. Xray failed with `bind: address already in use`, the agent
+  rolled the configuration back, and it never reported the inbound. Everything
+  downstream followed: `config_sync_state` stayed `pending` forever, the panel
+  logged `native panel has no cached full report`, and provisioning a user failed
+  with `shared client u2@psp.local absent after create`. Three different-looking
+  failures, one port, and none of them said so. The node now uses 25443.
+- **`PUT /users/:id` with `{"enabled":false}` does nothing.** The update route has
+  no `enabled` field, so the field is ignored and it answers 200. It looked like a
+  panel that would not push a disable to its node.
+- **The service axis is the one that moves.** `POST /users/:id/set-service-status`
+  suspends the service and leaves `enabled` true on purpose — a suspended user can
+  still sign in and self-rescue. And the attachment stays `applied`; the client is
+  still provisioned onto that node. The number that moves is the **applied
+  version**, which PSP mints only when the desired configuration changes.
+
+What the case actually asserts, all of it read from the panel's own store: the
+attachment reaches `state = applied` with the client's email; and after the
+service is suspended the applied version advances while `config_sync_state`
+returns to `synced`.
 
 
 
