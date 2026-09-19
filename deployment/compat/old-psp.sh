@@ -107,6 +107,56 @@ for s in json.load(sys.stdin).get('items',[]):
 
 # --------------------------------------------------------------- the assertion
 
+# node_raw returns the old panel's own DTO for one node, so an assertion can be
+# made about WHAT THE OLD PANEL STORED rather than about what the agent sent.
+node_raw() {
+  local token="$1" name="$2"
+  curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$OLD_PSP_PORT/api/admin/servers" |
+    python3 -c "
+import json,sys
+want=sys.argv[1]
+for s in json.load(sys.stdin).get('items',[]):
+    if s.get('name')==want:
+        print(json.dumps(s))
+        break
+" "$name"
+}
+
+# check_b03_b04 asserts the two contract properties a NEWER agent against an OLDER
+# panel has to hold. Both are about what the old panel does with what it does not
+# understand, which is the half of the wire contract the newer side cannot test on
+# its own.
+check_b03_b04() {
+  local token="$1" raw
+  raw=$(node_raw "$token" "compat-candidate")
+
+  # B03: the candidate reports fields this panel predates — host telemetry shipped
+  # after it — and the panel must neither reject the report nor invent the fields
+  # it never learned. The run already proved it did not reject; this proves it did
+  # not start carrying them either.
+  local guessed
+  guessed=$(printf '%s' "$raw" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+# Fields a LATER panel row would carry. Their absence is the assertion: an older
+# panel that started echoing them would be reporting on data it never parsed.
+present=[k for k in ('node_cpu_percent','node_metric_received_at','node_memory_percent') if k in d]
+print(','.join(present))
+")
+  [ -z "$guessed" ] || fail "B03: the older panel is carrying telemetry fields it predates: $guessed"
+  log "B03: the older panel accepted a report carrying fields it predates, and carries none of them itself"
+
+  # B04: a capability the node did not report must not read as permission. The
+  # upgrade capability is absent, and the panel says 'limited' — a default that
+  # flipped a missing capability to ready would say 'compatible' here.
+  local ready state
+  state=$(printf '%s' "$raw" | python3 -c "import json,sys;print(json.load(sys.stdin).get('node_compatibility',''))")
+  ready=$(printf '%s' "$raw" | python3 -c "import json,sys;print(json.load(sys.stdin).get('node_upgrade_ready'))")
+  [ "$state" != "compatible" ] || fail "B04: an absent upgrade capability was read as ready"
+  [ "$ready" != "True" ] || fail "B04: node_upgrade_ready is true without the capability"
+  log "B04: an absent capability stayed absent (state=$state ready=$ready)"
+}
+
 main() {
   fetch_old_psp
   start_old_psp
@@ -146,6 +196,8 @@ main() {
   [ "$state" != "unknown" ] || fail "the old panel still reports the candidate node as unknown; it never accepted a report"
   [ "$(printf '%s' "$control" | awk '{print $1}')" = "unknown" ] ||
     fail "the control node changed too, so this run cannot attribute the change to the agent"
+
+  check_b03_b04 "$token"
 
   log "PASS: $OLD_PSP_VERSION accepted the candidate agent (compatibility=$observed)"
 }
