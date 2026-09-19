@@ -187,9 +187,11 @@ func CompareVersions(a, b string) int {
 		if !ln && rn {
 			return 1
 		}
-		c := strings.Compare(ls[i], rs[i])
+		var c int
 		if ln {
 			c = compareNumeric(ls[i], rs[i])
+		} else {
+			c = comparePrereleaseIdentifier(ls[i], rs[i])
 		}
 		if c != 0 {
 			return c
@@ -202,6 +204,44 @@ func CompareVersions(a, b string) int {
 		return 1
 	}
 	return 0
+}
+
+// comparePrereleaseIdentifier orders two prerelease identifiers the way a reader
+// would: a shared alphabetic prefix first, then the number after it compared
+// NUMERICALLY.
+//
+// A plain strings.Compare gets this backwards for the identifiers this project
+// actually publishes. "beta9" against "beta11" compares '9' > '1' and returns
+// one, so beta9 sorts ABOVE beta11 — and CompareVersions feeds a refusal check,
+// so a remote upgrade from v0.0.1-beta9 to v0.0.1-beta11 was rejected as "an
+// exact newer release and exact expected current release", with the target
+// looking older than the source. The dotted form ("alpha.10") never showed it,
+// because splitting on "." leaves "10" fully numeric and it takes the numeric
+// path.
+func comparePrereleaseIdentifier(a, b string) int {
+	ap, an := splitTrailingDigits(a)
+	bp, bn := splitTrailingDigits(b)
+	if c := strings.Compare(ap, bp); c != 0 {
+		return c
+	}
+	if an == "" || bn == "" {
+		// One carries a numeric suffix the other does not. Comparing the whole
+		// identifiers keeps "alpha" below "alpha1", which is the same rule the
+		// caller applies to a shorter identifier list.
+		return strings.Compare(a, b)
+	}
+	return compareNumeric(an, bn)
+}
+
+// splitTrailingDigits separates an identifier into its leading text and its
+// trailing run of digits. An identifier with no trailing digits returns the whole
+// string and an empty suffix.
+func splitTrailingDigits(s string) (string, string) {
+	i := len(s)
+	for i > 0 && s[i-1] >= '0' && s[i-1] <= '9' {
+		i--
+	}
+	return s[:i], s[i:]
 }
 
 func numeric(s string) bool { return s != "" && strings.Trim(s, "0123456789") == "" }

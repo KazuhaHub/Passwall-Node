@@ -42,7 +42,11 @@ func TestUpgradeInputRequiresExactNewerIdentityBoundRelease(t *testing.T) {
 }
 
 func TestUpgradeVersionOrder(t *testing.T) {
-	versions := []string{"v0.0.1-beta1", "v0.0.1-beta2", "v0.0.1-beta3", "v0.0.1", "v0.0.2-alpha.1", "v0.0.2-alpha.2", "v0.0.2-alpha.10", "v0.0.2-beta.1", "v0.0.2", "v1.0.0", "v10.0.0", "v9999999999999999999999.0.0"}
+	// THE DOTLESS FORM IS THE ONE THE REAL RELEASES USE. v0.0.1-beta9 and
+	// v0.0.1-beta11 are the Node project's actual tags, and they are the shape the
+	// dotted cases below do NOT exercise: "alpha.10" splits into ["alpha","10"] and
+	// reaches the numeric path, while "beta11" is a single identifier.
+	versions := []string{"v0.0.1-beta1", "v0.0.1-beta2", "v0.0.1-beta3", "v0.0.1-beta9", "v0.0.1-beta11", "v0.0.1", "v0.0.2-alpha.1", "v0.0.2-alpha.2", "v0.0.2-alpha.10", "v0.0.2-beta.1", "v0.0.2", "v1.0.0", "v10.0.0", "v9999999999999999999999.0.0"}
 	for i, a := range versions {
 		for j, b := range versions {
 			c := CompareVersions(a, b)
