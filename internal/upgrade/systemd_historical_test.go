@@ -40,6 +40,17 @@ import (
 //   - a time anchor: the protocol package carries no such mechanism, so there is
 //     nothing for the fixture to have failed to provide.
 //
+// And one fact has been CONFIRMED rather than eliminated, which narrows where to
+// look next: beta9's TaskWorker advertises task.expiry.v1 only when its clock is
+// non-nil (internal/agent/tasks.go at 1f80aee, "capability is implementation
+// support, not a claim that time is fresh now"). Fixture.QueueTask rejects a task
+// when expiry has not been observed, and the run got past it, so the clock was
+// present and the capability was advertised. The fixture also fills response.Tasks
+// on every response, so the task was SERVED. What is not established is whether
+// beta9 persisted the served task into its journal — with no journal row there is
+// nothing for its worker to claim, and no request on disk. That is the next
+// question, not a guess.
+//
 // The cause is therefore not established, and is recorded that way. Re-treading
 // those three is the obvious first move and it has already been made.
 //
