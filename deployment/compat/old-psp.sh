@@ -29,6 +29,7 @@ AGENT_BIN="${PSP_CANDIDATE_AGENT:?set PSP_CANDIDATE_AGENT to the candidate agent
 # Naming it (`pkill -x psp`) would reach any other psp on the machine, including
 # one belonging to somebody else's work.
 OLD_PSP_PID=""
+AGENT_PID=""
 
 log() { printf '%s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -60,7 +61,25 @@ stop_old_psp() {
     sleep 1; waited=$((waited + 1))
   done
 }
-trap stop_old_psp EXIT
+# The agent is long-lived by design — B07 takes the panel away underneath it —
+# so nothing bounds it except this. Without it a run that fails early leaves the
+# agent syncing forever, which is the same "cannot tell a pass from a hang"
+# problem the panel's own cleanup above exists to avoid.
+stop_agent() {
+  [ -n "$AGENT_PID" ] || return 0
+  kill -0 "$AGENT_PID" 2>/dev/null || return 0
+  kill "$AGENT_PID" 2>/dev/null || true
+  local waited=0
+  while kill -0 "$AGENT_PID" 2>/dev/null; do
+    if [ "$waited" -ge 10 ]; then
+      kill -9 "$AGENT_PID" 2>/dev/null || true
+      break
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+}
+
+trap 'stop_agent; stop_old_psp' EXIT
 
 # --------------------------------------------------------------- fetch & verify
 
@@ -87,8 +106,7 @@ fetch_old_psp() {
 
 # --------------------------------------------------------------- run the panel
 
-start_old_psp() {
-  rm -rf "$WORKDIR/data" "$WORKDIR/config.yaml"
+launch_old_psp() {
   # `exec`, NOT `nohup`, and the difference is not cosmetic: `$!` has to name the
   # PANEL, because that is what `stop_old_psp` kills. uutils' nohup (the one on
   # this VM) forks instead of exec'ing, so `$!` named a wrapper that had already
@@ -105,7 +123,23 @@ start_old_psp() {
     if [ "$waited" -ge 60 ]; then fail "the old panel never answered on :$OLD_PSP_PORT"; fi
     sleep 2; waited=$((waited + 2))
   done
+}
+
+start_old_psp() {
+  rm -rf "$WORKDIR/data" "$WORKDIR/config.yaml"
+  launch_old_psp
   log "old PSP up: $(curl -fsS "http://127.0.0.1:$OLD_PSP_PORT/api/version")"
+}
+
+# A RESTART KEEPS THE DATABASE, and that is the whole difference from a start.
+# The panel's own database holds the node row and its credential, and its
+# config.yaml holds the jwt_secret that keeps the admin token valid. Wiping
+# either would delete the identity the running agent is holding, so the agent
+# could never re-converge and B07 would fail for a reason this harness invented
+# rather than for anything the two implementations did.
+restart_old_psp() {
+  launch_old_psp
+  log "old PSP back up: $(curl -fsS "http://127.0.0.1:$OLD_PSP_PORT/api/version")"
 }
 
 admin_token() {
@@ -201,6 +235,58 @@ print(','.join(present))
   log "B04: an absent capability stayed absent (state=$state ready=$ready)"
 }
 
+# wait_converged polls the OLD panel's own view until it stops saying `unknown`,
+# and returns whatever it last said rather than failing: the caller decides what
+# an unconverged node means, and one of the callers (B07) expects convergence
+# and the other (the first case) has to distinguish it from a control node that
+# never moved.
+wait_converged() {
+  local token="$1" name="$2" waited=0 state
+  while :; do
+    # `|| true` because the panel can be unreachable — this is polled across a
+    # restart — and under `set -e` a failing command substitution assigned to a
+    # variable ends the script rather than the loop.
+    state=$(node_state "$token" "$name" 2>/dev/null | awk '{print $1}') || true
+    if [ -n "$state" ] && [ "$state" != "unknown" ]; then printf '%s' "$state"; return 0; fi
+    if [ "$waited" -ge 40 ]; then printf 'unknown'; return 0; fi
+    sleep 2; waited=$((waited + 2))
+  done
+}
+
+# B07: THE CONTROL PLANE GOES AWAY AND COMES BACK, WITH THE AGENT STILL RUNNING.
+#
+# The property is not that the agent survives its panel. It is that a node which
+# loses its panel KEEPS THE LAST CONFIGURATION IT WAS GIVEN: a node that dropped
+# its config when the panel went away would take the user's traffic down with it,
+# and the panel would have no way to know until it came back. So the assertion is
+# the applied config's digest, not the agent's liveness — "still running" is also
+# true of an agent that threw its configuration away and is idling.
+check_b07() {
+  local token="$1" name="$2" applied="$3" before="$4"
+
+  [ -s "$applied" ] || fail "B07: the agent never wrote an applied config at $applied"
+  [ -n "$before" ] || fail "B07: no digest of the applied config was taken before the outage"
+
+  log "B07: stopping $OLD_PSP_VERSION with the agent still running"
+  stop_old_psp
+  sleep 10
+
+  kill -0 "$AGENT_PID" 2>/dev/null || fail "B07: the agent exited when its panel went away"
+
+  local during
+  during=$(sha256sum "$applied" | awk '{print $1}')
+  [ "$during" = "$before" ] ||
+    fail "B07: the agent's applied config changed while the panel was unreachable (was $before, now $during)"
+  log "B07: the agent kept its last valid config across the outage (sha256 ${during:0:12})"
+
+  log "B07: restarting the panel"
+  restart_old_psp
+  local state
+  state=$(wait_converged "$token" "$name")
+  [ "$state" != "unknown" ] || fail "B07: the node did not re-converge after the panel came back"
+  log "B07: the node re-converged after the panel returned (compatibility=$state)"
+}
+
 main() {
   fetch_old_psp
   start_old_psp
@@ -220,28 +306,48 @@ main() {
   printf '%s' "$credential" > "$rundir/credential"; chmod 600 "$rundir/credential"
 
   log "running the candidate agent against $OLD_PSP_VERSION"
-  # Bounded: the agent is a long-lived process, and this harness wants one
-  # converged sync, not a daemon to manage.
-  timeout 45 "$AGENT_BIN" \
-    -agent-id "$agent_id" \
-    -credential-file "$rundir/credential" \
-    -data-dir "$rundir" \
-    -endpoint "http://127.0.0.1:$OLD_PSP_PORT/v1/node/sync" \
-    -allow-insecure-http > "$rundir/agent.log" 2>&1 || true
+  # IN THE BACKGROUND, so the panel can be taken away underneath it at a point
+  # this harness chooses: B07 is about a node that has ALREADY converged losing
+  # its control plane, and a foreground agent with a fixed cap cannot be
+  # interrupted that way. `exec` for the same reason as the panel — `$!` has to
+  # name the agent, since that is what the cleanup kills.
+  ( exec "$AGENT_BIN" \
+      -agent-id "$agent_id" \
+      -credential-file "$rundir/credential" \
+      -data-dir "$rundir" \
+      -endpoint "http://127.0.0.1:$OLD_PSP_PORT/v1/node/sync" \
+      -allow-insecure-http > "$rundir/agent.log" 2>&1 ) &
+  AGENT_PID=$!
 
-  local observed control
+  local state observed control
+  state=$(wait_converged "$token" "compat-candidate")
   observed=$(node_state "$token" "compat-candidate")
   control=$(node_state "$token" "compat-control")
   log "candidate node state: $observed"
   log "control node state:   $control"
 
-  local state
-  state=$(printf '%s' "$observed" | awk '{print $1}')
   [ "$state" != "unknown" ] || fail "the old panel still reports the candidate node as unknown; it never accepted a report"
   [ "$(printf '%s' "$control" | awk '{print $1}')" = "unknown" ] ||
     fail "the control node changed too, so this run cannot attribute the change to the agent"
 
   check_b03_b04 "$token"
+
+  # The digest is taken BEFORE the outage; afterwards is too late to know what
+  # "unchanged" would have meant.
+  #
+  # Its existence is WAITED FOR rather than assumed from convergence. A node
+  # reports to its panel before its core has necessarily written a config, so
+  # taking the digest the moment the panel stops saying `unknown` races the file.
+  # Under `set -o pipefail` the race does not read as a race either: a failing
+  # `sha256sum` in the pipeline below ends the script with no message at all, so
+  # the run stops after B04 having printed no verdict — which is what it did.
+  local applied="$rundir/runtime/xray/current.json" applied_before="" waited=0
+  while [ ! -s "$applied" ]; do
+    if [ "$waited" -ge 40 ]; then fail "the agent never wrote an applied config at $applied"; fi
+    sleep 2; waited=$((waited + 2))
+  done
+  applied_before=$(sha256sum "$applied" | awk '{print $1}')
+  check_b07 "$token" "compat-candidate" "$applied" "$applied_before"
 
   log "PASS: $OLD_PSP_VERSION accepted the candidate agent (compatibility=$observed)"
 }
