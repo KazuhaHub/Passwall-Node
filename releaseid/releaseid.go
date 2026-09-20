@@ -14,17 +14,16 @@
 // version keeps its v because the Go toolchain requires it; a product version
 // never has one because a release is not a module.
 //
-// There are two schemes and they are not comparable. Historical tags
-// ("v0.0.1-beta11") and product tags ("release/102.1.0") describe different
-// things, and no arithmetic converts one to the other. Comparing them is a
-// question about an upgrade edge, not about ordering, so this package refuses to
-// pretend otherwise.
+// ONE SCHEME, AND ONE ADDRESS FORM. A version is MAJOR.MINOR.PATCH with an
+// optional fourth BUILD segment; its tag is `release/` + that version. The
+// historical v-prefixed scheme ("v0.0.1-beta11") is no longer produced or read,
+// and no arithmetic ever converted one into the other — which is why removing the
+// reader was a deletion rather than a migration.
 package releaseid
 
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -39,42 +38,16 @@ const MaxSegment int64 = 2147483647
 type Scheme string
 
 const (
-	// SchemeProduct is the current scheme: a tag of release/MAJOR.MINOR.PATCH.
+	// SchemeProduct is the scheme: a tag of release/MAJOR.MINOR.PATCH. There is
+	// no other, which is why the type has kept its name and its field on Tag —
+	// a record that says which identity system it belongs to is worth keeping
+	// even when there is one answer, because the field is what a reader looks at.
 	SchemeProduct Scheme = "product"
-	// SchemeLegacy is a historical tag: a v-prefixed version, possibly with a
-	// prerelease. Reading one is supported forever; producing one is over.
-	SchemeLegacy Scheme = "legacy"
 )
 
 // TagPrefix is the namespace product tags live under. It exists so a product tag
 // can never be mistaken for a Go module version, which also begins with a v.
 const TagPrefix = "release/"
-
-// legacyTagShape is the historical tag form: a v, three numeric segments, and an
-// optional dotted or dotless prerelease — the shape Passwall Node has published.
-//
-// It is written as a shape check rather than imported from the node module's
-// deployment package, which owns the same rule for installation. Two copies of a
-// PATTERN is a lesser hazard than two copies of an ORDERING, which is the thing
-// this package exists to consolidate; if the two ever diverge, this one is the
-// classifier and that one is the installer, and a tag the installer refuses will
-// fail installation whatever this says.
-var legacyTagShape = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
-
-// legacyVersionShape is the historical VERSION rule, and it is stricter than
-// legacyTagShape above. The two answer different questions about the same
-// strings, which is why there are two:
-//
-//   - legacyTagShape CLASSIFIES a tag, and is deliberately permissive: it
-//     decides whether a published name is a legacy one, and a tag it wrongly
-//     rejects is a release that can no longer be read.
-//   - legacyVersionShape VALIDATES a version a caller is about to act on, so it
-//     refuses what only looks close: leading zeroes, a missing segment, build
-//     metadata.
-//
-// Collapsing them would either start accepting inputs the installer refuses, or
-// start refusing tags that are already published.
-var legacyVersionShape = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
 
 var (
 	// ErrUnknownFormat means the input is not a version or tag in any scheme this
@@ -108,8 +81,9 @@ type Version struct {
 	Build int64
 }
 
-// String renders the fixed three-segment form. Every published surface — UI, API
-// output, build version, archive names, Docker tags — uses this and nothing else.
+// String renders the version as published: three segments, or four when a build
+// component is present. Every published surface — UI, API output, build version,
+// archive names, Docker tags — uses this and nothing else.
 func (v Version) String() string {
 	if v.Build > 0 {
 		return fmt.Sprintf("%d.%d.%d.%d", v.Major, v.Minor, v.Patch, v.Build)
@@ -173,10 +147,17 @@ func parseSegment(part, whole string) (int64, error) {
 // CompareProductVersion orders two product versions, -1 / 0 / +1.
 //
 // Segment by segment, as integers: 102.1.10 is above 102.1.9, which any string
-// comparison gets backwards. Only product versions are comparable here; a legacy
-// tag has no place in this ordering and must not be forced into it.
+// comparison gets backwards.
+//
+// THE BUILD SEGMENT IS PART OF THE ORDER, AND IT WAS NOT. This compared the first
+// three segments and returned zero, so `4.0.0` and `4.0.0.1` were EQUAL here
+// while the panel's mirror of this rule ranked the rebuild above its base — two
+// implementations of one rule, disagreeing about a pair the fourth segment exists
+// to distinguish. It matters in exactly one place, and it is the place that
+// matters most: the node refuses an upgrade whose target does not compare above
+// its current version, so a rebuild could never be installed.
 func CompareProductVersion(a, b Version) int {
-	for _, pair := range [][2]int64{{a.Major, b.Major}, {a.Minor, b.Minor}, {a.Patch, b.Patch}} {
+	for _, pair := range [][2]int64{{a.Major, b.Major}, {a.Minor, b.Minor}, {a.Patch, b.Patch}, {a.Build, b.Build}} {
 		if pair[0] != pair[1] {
 			if pair[0] < pair[1] {
 				return -1
@@ -198,37 +179,12 @@ type Tag struct {
 	Product Version
 }
 
-// ValidLegacyVersion is the historical version rule on its own: a v, three
-// segments with no leading zeroes, and an optional prerelease whose numeric
-// segments also carry no redundant leading zero.
+// ValidVersion is the version rule: what a binary may be stamped with, and what a
+// caller may ask for.
 //
-// The installers keep this rule rather than ValidVersion, and that is
-// deliberate. An installer that accepted a product version would build a
-// download URL out of it, and a product version is not the path a release lives
-// at — the tag is. Until the installers identify a release by both, they must
-// keep refusing the input they cannot place.
-func ValidLegacyVersion(value string) bool {
-	if !legacyVersionShape.MatchString(value) {
-		return false
-	}
-	_, prerelease, exists := strings.Cut(value, "-")
-	if !exists {
-		return true
-	}
-	for _, segment := range strings.Split(prerelease, ".") {
-		if len(segment) > 1 && segment[0] == '0' && strings.Trim(segment, "0123456789") == "" {
-			return false
-		}
-	}
-	return true
-}
-
-// ValidVersion is the version rule for both schemes: what a binary may be
-// stamped with, and what a caller may ask for.
-//
-// The scheme is read from the string, and it cannot be ambiguous: every legacy
-// version began with a v, and no product version does. Anything else — a tag, a
-// channel name, a version with build metadata — is refused rather than repaired.
+// Anything that is not a product version — a tag, a channel name, a version with
+// build metadata, a v-prefixed historical string — is refused rather than
+// repaired.
 //
 // THREE OR FOUR SEGMENTS, NEVER FEWER. ParseProductVersion pads the short forms,
 // because comparing "4" and "4.0.0" is a thing callers legitimately do; a VERSION
@@ -237,9 +193,6 @@ func ValidLegacyVersion(value string) bool {
 // that does not exist under that name. The fourth segment is the optional BUILD
 // component, and a literal zero in it is refused by the parser beside this.
 func ValidVersion(value string) bool {
-	if strings.HasPrefix(value, "v") {
-		return ValidLegacyVersion(value)
-	}
 	if dots := strings.Count(value, "."); dots != 2 && dots != 3 {
 		return false
 	}
@@ -257,17 +210,10 @@ func ValidVersion(value string) bool {
 // `.../download/4.0.0/...` for a release that lives at `release/4.0.0`, and the
 // failure would look like a missing release rather than a wrong URL.
 //
-// WHICH SCHEME IS NOT GUESSED FROM THE SHAPE OF THE NUMBER. It is decided by
-// what a published version can be: a v-prefixed string is a legacy version and
-// is already its own tag; anything else must be a product version, because the
-// legacy scheme always wrote the v. The two answers are total — there is no
-// third case — and the round trip through VersionString is lossless, so a
-// caller cannot end up fetching a release whose own binary reports a different
-// version than the one requested.
+// The round trip through VersionString is lossless, so a caller cannot end up
+// fetching a release whose own binary reports a different version than the one
+// requested.
 func TagForVersion(version string) (Tag, error) {
-	if strings.HasPrefix(version, "v") {
-		return ParseReleaseTag(version)
-	}
 	v, err := ParseProductVersion(version)
 	if err != nil {
 		return Tag{}, err
@@ -283,65 +229,46 @@ func TagForVersion(version string) (Tag, error) {
 // VersionString is the string this release is STAMPED with: the build version,
 // the archive name, the Docker tag.
 //
-// IT IS NOT THE TAG, AND THE TWO DIVERGE IN EXACTLY ONE DIRECTION. A product
-// tag is `release/4.0.0` and its version is `4.0.0`, because the namespace
-// exists so a product tag cannot be mistaken for a Go module version — it is
-// not part of the version. A legacy tag has no namespace, so its version IS the
-// tag, and this returns it unchanged rather than stripping a v: releases
-// already published were stamped `v0.0.1-beta11`, historical artifacts are not
-// renamed, and a derivation that "normalised" them would describe builds that
-// do not exist.
+// IT IS NOT THE TAG, AND THE TWO NEVER COINCIDE. A tag is `release/4.0.0` and
+// its version is `4.0.0`: the namespace exists so a product tag cannot be
+// mistaken for a Go module version, and it is not part of the version.
 //
 // Callers that need a URL path segment want Raw. Callers that need a version
 // want this. Substituting one for the other addresses a different release.
 func (t Tag) VersionString() string {
-	if t.Scheme == SchemeProduct {
-		return t.Product.String()
-	}
-	return t.Raw
+	return t.Product.String()
 }
 
 // ParseReleaseTag parses a release tag.
 //
-// "release/MAJOR.MINOR.PATCH" is the current scheme, and the version part must
-// be exactly three segments: a tag is a published identity, so the short forms
-// that are legal as parse input do not get releases of their own.
+// "release/MAJOR.MINOR.PATCH" is the form, and the version part must be exactly
+// three segments: a tag is a published identity, so the short forms that are
+// legal as parse input do not get releases of their own. The fourth BUILD
+// segment is allowed, because a rebuild is published under its own tag.
 //
-// Anything beginning with "v" is a LEGACY tag and is returned as such, without
-// its version being interpreted. That matters for the v-prefixed numeric form:
-// "v102.1.0" is not a product version someone forgot to strip a letter from, it
-// is a legacy identity, and treating it as the former would grant a release
-// credit it has not earned.
+// A v INSIDE THE NAMESPACE (release/v4.0.0) is refused: it is not a version
+// someone forgot to strip a letter from, it is a string that would be read as a
+// tag by one rule and a version by another, and the two readings differ about
+// which release it names.
 func ParseReleaseTag(raw string) (Tag, error) {
-	if strings.HasPrefix(raw, TagPrefix) {
-		body := strings.TrimPrefix(raw, TagPrefix)
-		if strings.HasPrefix(body, "v") {
-			return Tag{}, fmt.Errorf("%w: %q puts a v inside the product tag namespace", ErrUnknownFormat, raw)
-		}
-		if dots := strings.Count(body, "."); dots != 2 && dots != 3 {
-			return Tag{}, fmt.Errorf("%w: %q is a product tag, which is three or four segments", ErrUnknownFormat, raw)
-		}
-		v, err := ParseProductVersion(body)
-		if err != nil {
-			return Tag{}, err
-		}
-		if v.Major == 0 {
-			return Tag{}, fmt.Errorf("%w: %q has a zero release line, which is not a released identity", ErrUnknownFormat, raw)
-		}
-		return Tag{Raw: raw, Scheme: SchemeProduct, Product: v}, nil
+	body, found := strings.CutPrefix(raw, TagPrefix)
+	if !found {
+		return Tag{}, fmt.Errorf("%w: %q is not a %sMAJOR.MINOR.PATCH tag", ErrUnknownFormat, raw, TagPrefix)
 	}
-	if strings.HasPrefix(raw, "v") {
-		// "Keep the old tag as it is" means do not REINTERPRET it — not accept
-		// anything that starts with a v. A tag is an identity, and a string that
-		// merely begins with v is not one: recognising it as legacy would put a
-		// value into the support matrix that no release ever published, and the
-		// refusal is the same one every other unrecognised input gets.
-		if !legacyTagShape.MatchString(raw) {
-			return Tag{}, fmt.Errorf("%w: %q begins with v but is not a version", ErrUnknownFormat, raw)
-		}
-		return Tag{Raw: raw, Scheme: SchemeLegacy}, nil
+	if strings.HasPrefix(body, "v") {
+		return Tag{}, fmt.Errorf("%w: %q puts a v inside the product tag namespace", ErrUnknownFormat, raw)
 	}
-	return Tag{}, fmt.Errorf("%w: %q is neither %sMAJOR.MINOR.PATCH nor a legacy v-tag", ErrUnknownFormat, raw, TagPrefix)
+	if dots := strings.Count(body, "."); dots != 2 && dots != 3 {
+		return Tag{}, fmt.Errorf("%w: %q is a product tag, which is three or four segments", ErrUnknownFormat, raw)
+	}
+	v, err := ParseProductVersion(body)
+	if err != nil {
+		return Tag{}, err
+	}
+	if v.Major == 0 {
+		return Tag{}, fmt.Errorf("%w: %q has a zero release line, which is not a released identity", ErrUnknownFormat, raw)
+	}
+	return Tag{Raw: raw, Scheme: SchemeProduct, Product: v}, nil
 }
 
 // Channel is where a release sits in the publication flow.

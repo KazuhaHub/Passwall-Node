@@ -200,9 +200,15 @@ func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
 		return nil, errors.New("cannot mint private disposable identity")
 	}
 	f := &nodeE2E{ctx: ctx, nonce: hex.EncodeToString(random[32:40]), agentID: "agt_upgrade_e2e_" + hex.EncodeToString(random[40:]), credential: "pspn_'\"$(false);`false`_" + hex.EncodeToString(random[:32]), units: make(map[string]string), createdUnits: make(map[string]bool)}
-	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "v1.0.0")
-	f.newVersion = envOr("PN_E2E_NEW_VERSION", "v1.1.0")
-	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "v1.2.0")
+	// THESE MUST MATCH WHAT THE WORKFLOW STAMPS. It builds three artifacts with
+	// explicit versions and this fixture asserts each one reports the version it
+	// was asked for, so a default that disagrees with the stamp fails the leg
+	// before anything is upgraded — which is the shape of failure that reads as a
+	// broken mechanism rather than as a stale label. The workflow's
+	// "Build exact real source artifacts" step carries the other half.
+	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "4.0.0")
+	f.newVersion = envOr("PN_E2E_NEW_VERSION", "4.0.1")
+	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "4.0.2")
 	f.oldCommit = envOr("PN_E2E_OLD_COMMIT", "abcdef1234567")
 	f.newCommit = envOr("PN_E2E_NEW_COMMIT", "abcdef1234567")
 	f.failCommit = envOr("PN_E2E_FAIL_COMMIT", "abcdef1234567")
@@ -306,7 +312,16 @@ func (f *nodeE2E) install() error {
 			return err
 		}
 	}
-	gate := "#!/bin/sh\nset -eu\n[ \"$(/usr/bin/cat /opt/passwall-node/config/version)\" != v1.2.0 ]\n"
+	// THE GATE IS WHAT MAKES THE FAILING ARTIFACT FAIL: it refuses to start unless
+	// the version it names is NOT the on-disk one, so a candidate carrying that
+	// version cannot come up and the helper has to roll back.
+	//
+	// A LITERAL HERE IS A SECOND SPELLING OF f.failVersion, and it drifted once:
+	// the two were moved to product versions by separate edits, the gate kept a
+	// version the fail artifact no longer carried, and the "failing" candidate
+	// started cleanly — so the leg that exists to prove a rollback passed by
+	// installing the release it was supposed to reject.
+	gate := fmt.Sprintf("#!/bin/sh\nset -eu\n[ \"$(/usr/bin/cat /opt/passwall-node/config/version)\" != %s ]\n", f.failVersion)
 	if err := os.WriteFile(filepath.Join(InstallRoot, "startup-gate"), []byte(gate), 0755); err != nil {
 		return err
 	}

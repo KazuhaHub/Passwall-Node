@@ -18,13 +18,12 @@
 # once bound to a source revision stays bound to it — including when the build
 # that took it then failed, which is the gap the rule permits.
 #
-# Usage: allocate-release-tag.sh <line> <scheme> [remote] [max-attempts]
+# Usage: allocate-release-tag.sh <line> [remote] [max-attempts]
 set -eu
 
 line=${1:?a release line, MAJOR.MINOR}
-scheme=${2:?a release scheme, product or legacy}
-remote=${3:-origin}
-max_attempts=${4:-5}
+remote=${2:-origin}
+max_attempts=${3:-5}
 
 # The revision this release is being built from. Every decision below is about
 # binding a number to THIS commit.
@@ -43,7 +42,7 @@ while [ "$attempt" -lt "$max_attempts" ]; do
   # the line is allocated. Both are one command, because "resume or allocate" is
   # one decision and splitting it would be a second place knowing the rule.
   tag=$(go run ./deployment/cmd/allocate-release-tag \
-    -line "$line" -scheme "$scheme" \
+    -line "$line" \
     -existing "$(all_tags)" \
     -on-commit "$(tags_on_this_commit)")
 

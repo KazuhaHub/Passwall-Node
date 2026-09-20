@@ -211,7 +211,7 @@ func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDocker
 		}
 	}
 	agentID := "agt_docker_upgrade_test"
-	currentVersion, targetVersion := "v1.0.0", "v1.1.0"
+	currentVersion, targetVersion := "4.1.0", "4.1.3"
 	labels := map[string]string{
 		DockerLabelManaged: "true", DockerLabelRole: "agent", DockerLabelAgentID: agentID,
 		DockerLabelStateSchema: "9", DockerLabelUpgradeContract: "1",

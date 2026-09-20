@@ -99,17 +99,17 @@ func moduleRoot(t *testing.T) string {
 }
 
 // allocateCmd prepares the script the way a release job would run it.
-func (r *releaseRepo) allocateCmd(t *testing.T, line, scheme string) *exec.Cmd {
+func (r *releaseRepo) allocateCmd(t *testing.T, line string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command("sh", "deployment/allocate-release-tag.sh", line, scheme, "origin")
+	cmd := exec.Command("sh", "deployment/allocate-release-tag.sh", line, "origin")
 	cmd.Dir = moduleRoot(t)
 	cmd.Env = r.env
 	return cmd
 }
 
-func (r *releaseRepo) allocate(t *testing.T, line, scheme string) (string, string, error) {
+func (r *releaseRepo) allocate(t *testing.T, line string) (string, string, error) {
 	t.Helper()
-	cmd := r.allocateCmd(t, line, scheme)
+	cmd := r.allocateCmd(t, line)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -118,7 +118,7 @@ func (r *releaseRepo) allocate(t *testing.T, line, scheme string) (string, strin
 
 // allocateTogether starts both runs BEFORE waiting for either, so they read the
 // tag list in the same window — which is the race the retry loop exists for.
-func (r *releaseRepo) allocateTogether(t *testing.T, other *releaseRepo, line, scheme string) (string, string) {
+func (r *releaseRepo) allocateTogether(t *testing.T, other *releaseRepo, line string) (string, string) {
 	t.Helper()
 	type running struct {
 		cmd    *exec.Cmd
@@ -126,7 +126,7 @@ func (r *releaseRepo) allocateTogether(t *testing.T, other *releaseRepo, line, s
 		stderr *strings.Builder
 	}
 	start := func(repo *releaseRepo) running {
-		cmd := repo.allocateCmd(t, line, scheme)
+		cmd := repo.allocateCmd(t, line)
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		return running{cmd: cmd, stdout: &stdout, stderr: &stderr}
@@ -180,7 +180,7 @@ func TestItAllocatesTheNextPatchAndCreatesTheTag(t *testing.T) {
 	if got := repo.tagSHA(t, "release/4.0.1"); got != "" {
 		t.Fatalf("the tag already existed: %s", got)
 	}
-	tag, stderr, err := repo.allocate(t, "4.0", "product")
+	tag, stderr, err := repo.allocate(t, "4.0")
 	if err != nil {
 		t.Fatalf("allocate: %v\n%s", err, stderr)
 	}
@@ -200,7 +200,7 @@ func TestARerunResumesItsNumberAndDoesNotMoveTheTag(t *testing.T) {
 	first := strings.TrimSpace(gitIn(t, repo.work, "rev-parse", "HEAD"))
 	repo.tagOnRemote(t, first, "release/4.0.0")
 
-	tag, stderr, err := repo.allocate(t, "4.0", "product")
+	tag, stderr, err := repo.allocate(t, "4.0")
 	if err != nil {
 		t.Fatalf("first: %v\n%s", err, stderr)
 	}
@@ -210,7 +210,7 @@ func TestARerunResumesItsNumberAndDoesNotMoveTheTag(t *testing.T) {
 	}
 
 	// The same revision, run again — a failed build being retried.
-	again, stderr, err := repo.allocate(t, "4.0", "product")
+	again, stderr, err := repo.allocate(t, "4.0")
 	if err != nil {
 		t.Fatalf("rerun: %v\n%s", err, stderr)
 	}
@@ -254,7 +254,7 @@ func TestTwoReleasesRacingDoNotTakeTheSameNumber(t *testing.T) {
 	repo.commit(t, "third")
 	gitIn(t, other.work, "commit", "--quiet", "--allow-empty", "-m", "other")
 
-	tagA, tagB := repo.allocateTogether(t, other, "4.0", "product")
+	tagA, tagB := repo.allocateTogether(t, other, "4.0")
 	if tagA == tagB {
 		t.Fatalf("both releases took %q", tagA)
 	}
@@ -271,7 +271,7 @@ func TestTwoReleasesRacingDoNotTakeTheSameNumber(t *testing.T) {
 // first version of a line is a maintainer's decision, not an increment.
 func TestALineWithNothingOnItIsRefused(t *testing.T) {
 	repo := newReleaseRepo(t)
-	tag, stderr, err := repo.allocate(t, "4.0", "product")
+	tag, stderr, err := repo.allocate(t, "4.0")
 	if err == nil {
 		t.Fatalf("allocated %q on an empty line", tag)
 	}
@@ -335,7 +335,7 @@ func TestALostRaceReReadsRatherThanOverwriting(t *testing.T) {
 	// left the shim unused and the test passing for the wrong reason.
 	repo.env = withEnv(repo.env, "PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	tag, stderr, err := repo.allocate(t, "4.0", "product")
+	tag, stderr, err := repo.allocate(t, "4.0")
 	if err != nil {
 		t.Fatalf("allocate: %v\n%s", err, stderr)
 	}

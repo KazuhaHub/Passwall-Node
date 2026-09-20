@@ -29,14 +29,23 @@ var linuxTemplate string
 // Installation never changes an existing identity, credential or release.
 func RenderLinux(options Options) (string, error) {
 	if !ValidReleaseVersion(options.Version) {
-		return "", errors.New("installation requires an explicit vMAJOR.MINOR.PATCH[-prerelease] release")
+		return "", errors.New("installation requires an explicit MAJOR.MINOR.PATCH release version")
 	}
 	connection := nodeconfig.Connection{Endpoint: options.Endpoint, AgentID: options.AgentID, Credential: options.Credential}
 	if err := nodeconfig.Validate(connection); err != nil {
 		return "", fmt.Errorf("installation connection: %w", err)
 	}
+	// THE TAG IS DERIVED HERE, NOT SENT ALONGSIDE. A caller that had to pass both
+	// could pass them out of step, and the template would then download one release
+	// and install another — the release it fetched is checked against the version
+	// it was told, so the mismatch would surface as a checksum failure at best.
+	tag, err := releaseid.TagForVersion(options.Version)
+	if err != nil {
+		return "", fmt.Errorf("installation release version: %w", err)
+	}
 	return strings.NewReplacer(
 		"@@VERSION@@", shellQuote(options.Version),
+		"@@TAG@@", shellQuote(tag.Raw),
 		"@@AGENT_ID@@", shellQuote(options.AgentID),
 		"@@ENDPOINT@@", shellQuote(options.Endpoint),
 		"@@CREDENTIAL@@", shellQuote(options.Credential),
@@ -44,16 +53,16 @@ func RenderLinux(options Options) (string, error) {
 	).Replace(linuxTemplate), nil
 }
 
-// ValidReleaseVersion is the single release-tag rule shared by installation
-// and publishing. No floating aliases, leading zeroes or build metadata.
+// ValidReleaseVersion is the single release-version rule shared by installation
+// and publishing. No floating aliases, leading zeroes, build metadata or tags.
 //
-// It is the LEGACY rule and it delegates to the one implementation of it, in
-// releaseid. The name is historical: what it validates is a version, and the
-// product scheme's versions are deliberately not accepted here. A product
-// version is not the path a release lives at, so an installer that took one
-// would build a download URL to somewhere that does not exist.
+// THE NAME IS HISTORICAL AND THE RULE IS NOT. It delegated to the legacy rule
+// while the version in this template doubled as the download path, which is the
+// one arrangement in which a version has to be its own address. The template now
+// takes the tag separately, so the version is checked as a version — and a
+// release is addressed by its tag rather than by its name.
 func ValidReleaseVersion(value string) bool {
-	return releaseid.ValidLegacyVersion(value)
+	return releaseid.ValidVersion(value)
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }

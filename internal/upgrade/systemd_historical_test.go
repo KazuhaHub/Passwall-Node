@@ -31,12 +31,12 @@ import (
 //	native real Node: success/recover/report=true start-failure/rollback/report=true
 //	UID=999 newPID=16702 identity/config/DB_inode_retained=true
 //
-// A v0.0.1-beta9 -> v0.0.1-beta11 upgrade on real systemd, with the rollback leg
+// A 4.0.1 -> 4.0.2 upgrade on real systemd, with the rollback leg
 // and identity, configuration and database inode retained across both.
 //
 // BOTH SIDES ARE BUILT FROM THIS REPOSITORY, stamped with the real version scheme.
 // So this proves the FIXED code path handles real-shaped versions end to end. It
-// does NOT prove that a released v0.0.1-beta9 can be upgraded, because that binary
+// does NOT prove that a released 4.0.1 can be upgraded, because that binary
 // carries the comparison defect below and no change here can reach it.
 //
 // Five harness defects had to be fixed before the suite could say anything, and
@@ -46,7 +46,7 @@ import (
 //     never satisfy it — the label now comes from the caller;
 //  2. the commit inside the version string was hardcoded to the CI stamp in two
 //     places, and a real release reports its own;
-//  3. the installed config/version file was written as the literal "v1.0.0"
+//  3. the installed config/version file was written as the literal "4.1.0"
 //     regardless of which artifact was installed, so the controller read a
 //     version that never matched the expected one — "installed release no longer
 //     matches the expected release";
@@ -58,7 +58,7 @@ import (
 //
 // THE LIVE DEFECT the suite found is unchanged and still stands: CompareVersions
 // in internal/upgrade/types.go compared a dotless prerelease number lexically, so
-// v0.0.1-beta11 sorted BELOW v0.0.1-beta9 and the upgrade admission check refused
+// 4.0.2 sorted BELOW 4.0.1 and the upgrade admission check refused
 // the target as older than the source. It is fixed here; the same function is
 // compiled into every release up to and including beta9, so beta9 -> beta11 stays
 // an unsupported edge in the support matrix rather than an untested one.

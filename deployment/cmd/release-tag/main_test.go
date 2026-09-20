@@ -59,17 +59,10 @@ func asExitError(err error, target **exec.ExitError) bool {
 }
 
 // A release tag is a published identity, and a publisher is the only thing
-// standing between a typo and a public name. Both schemes are accepted because
-// both are still published; neither is inferred from the other.
+// standing between a typo and a public name. ONE FORM: release/MAJOR.MINOR.PATCH
+// with the optional build segment.
 func TestAcceptedReleaseTags(t *testing.T) {
 	for _, tag := range []string{
-		// The legacy scheme, still published and still the shape every existing
-		// install was built from.
-		"v1.0.0",
-		"v0.0.1-beta11",
-		"v1.0.0-rc1",
-		// The product scheme: release/MAJOR.MINOR.PATCH[.BUILD], three or four
-		// segments, no v.
 		"release/4.0.0",
 		"release/102.1.0",
 		"release/4.0.0.1",
@@ -95,10 +88,6 @@ func TestTheReportedVersionIsWhatTheWorkflowStamps(t *testing.T) {
 		{"release/4.0.0", "4.0.0"},
 		{"release/102.1.0", "102.1.0"},
 		{"release/4.0.0.1", "4.0.0.1"},
-		// Unchanged for the scheme that is already published: the version a
-		// legacy release is stamped with is the tag it was published under.
-		{"v1.0.0", "v1.0.0"},
-		{"v0.0.1-beta11", "v0.0.1-beta11"},
 	} {
 		t.Run(tc.tag, func(t *testing.T) {
 			code, stdout, stderr := run(t, tc.tag)
@@ -136,8 +125,12 @@ func TestRefusedReleaseTags(t *testing.T) {
 		"release/v4.0.0",
 		// A zero release line is not a released identity.
 		"release/0.1.0",
-		// A string that merely begins with v is not a legacy tag.
+		// A string that merely begins with v is not a tag of ours — and neither is
+		// a whole legacy tag, which this project no longer publishes or reads.
 		"v4",
+		"v1.0.0",
+		"v0.0.1-beta11",
+		"v1.0.0-rc1",
 		"version-4",
 		"main",
 		"nightly",

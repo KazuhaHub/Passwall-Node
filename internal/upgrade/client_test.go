@@ -27,9 +27,9 @@ func clientFixture(t *testing.T) (*Client, Request) {
 	if err := os.WriteFile(filepath.Join(root, "bin", "passwall-node"), []byte("target binary"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	task := upgradeTask(`{"version":"v1.0.1","expected_version":"v1.0.0"}`)
+	task := upgradeTask(`{"version":"4.1.1","expected_version":"4.1.0"}`)
 	args, _ := ParseArgs(task)
-	return &Client{RootDir: root, Version: "v1.0.1", PollInterval: time.Millisecond, WaitTimeout: 20 * time.Millisecond, ConfirmConverged: func(context.Context) error { return nil }}, Request{Task: task, Args: args}
+	return &Client{RootDir: root, Version: "4.1.1", PollInterval: time.Millisecond, WaitTimeout: 20 * time.Millisecond, ConfirmConverged: func(context.Context) error { return nil }}, Request{Task: task, Args: args}
 }
 
 func TestRecoverUpgradeRequiresConfirmedTargetReceiptAndNeverReenqueues(t *testing.T) {
@@ -51,11 +51,11 @@ func TestRecoverUpgradeRequiresConfirmedTargetReceiptAndNeverReenqueues(t *testi
 	if _, err := os.Stat(filepath.Join(c.RootDir, "data", "upgrades", "request.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("recovery re-enqueued request")
 	}
-	c.Version = "v1.0.0"
+	c.Version = "4.1.0"
 	if _, err := c.Recover(context.Background(), execution); err == nil {
 		t.Fatal("old process confirmed target upgrade")
 	}
-	c.Version = "v1.0.1"
+	c.Version = "4.1.1"
 	receipt.Result.BinarySHA256 = strings.Repeat("a", 64)
 	AtomicDocument(filepath.Join(c.RootDir, "upgrades"), request.Task.ID+".json", receipt, 0600)
 	if _, err := c.Recover(context.Background(), execution); err == nil {

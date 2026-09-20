@@ -33,11 +33,12 @@ done
 [ -d /run/systemd/system ] || fail 'a running systemd host is required'
 
 version=@@VERSION@@
+tag=@@TAG@@
 agent_id=@@AGENT_ID@@
 endpoint=@@ENDPOINT@@
 credential=@@CREDENTIAL@@
 environment=@@ENVIRONMENT@@
-case "$version" in @@*) fail 'render this template with the control plane before installation' ;; esac
+case "$version$tag" in *@@*) fail 'render this template with the control plane before installation' ;; esac
 root=/opt/passwall-node
 unit=/etc/systemd/system/passwall-node.service
 pn_link=/usr/local/bin/pn
@@ -93,7 +94,12 @@ if [ -e "$root" ] || [ -L "$root" ]; then
 else
     package="passwall-node_${version}_linux_${arch}"
     asset="${package}.tar.gz"
-    base="https://github.com/KazuhaHub/Passwall-Node/releases/download/${version}"
+    # THE VERSION NAMES THE ASSET AND THE TAG IS WHERE THE RELEASE LIVES. They are
+    # one string in the historical scheme and are never the same string now: a
+    # product release is addressed as release/4.0.0 and its archive is named
+    # passwall-node_4.0.0_linux_amd64.tar.gz. Building the path from the version
+    # asks for a release that does not exist under that name.
+    base="https://github.com/KazuhaHub/Passwall-Node/releases/download/${tag}"
     phase 3 "Download exact release $version (linux/$arch)"
     # Checksums detect corruption against the same trusted HTTPS release; they
     # are not a signature or protection against compromise of the publisher.

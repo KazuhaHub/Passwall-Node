@@ -33,10 +33,11 @@ func TestFetchAddressesTheReleaseByTagAndNamesAssetsByVersion(t *testing.T) {
 	}{
 		{"product", "4.0.0", "release/4.0.0"},
 		{"product high line", "102.1.0", "release/102.1.0"},
-		// The legacy scheme is unaffected: the two identities coincide, and the
-		// bytes downloaded are the ones always downloaded.
-		{"legacy prerelease", "v0.0.1-beta11", "v0.0.1-beta11"},
-		{"legacy stable", "v1.0.0", "v1.0.0"},
+		// The BUILD component travels with the version it names, in the path as
+		// well as in the asset. A case for the legacy form used to sit here, where
+		// the tag and the version were one string; that is the arrangement this
+		// whole test exists to stop assuming.
+		{"product with a build component", "4.0.0.1", "release/4.0.0.1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asset := "passwall-node_" + tc.version + "_linux_" + runtime.GOARCH + ".tar.gz"
@@ -96,9 +97,9 @@ func TestFetchRefusesSomethingThatIsNotAVersion(t *testing.T) {
 		"4.0.0.1.2",     // a fifth segment is a different format, not something to truncate
 		"4.0.0.0",       // a zero fourth is another spelling of 4.0.0
 		"main",
-		// Legacy leading zeroes stay refused: the product scheme is new, and
-		// this is not the change that relaxes the legacy rule.
-		"v01.0.0",
+		// Leading zeroes are refused, as they always were.
+		"01.0.0",
+		"v4.0.0", // the historical form is not a version this project publishes
 	} {
 		t.Run(version, func(t *testing.T) {
 			client := &http.Client{Transport: releaseRoundTrip(func(request *http.Request) (*http.Response, error) {
