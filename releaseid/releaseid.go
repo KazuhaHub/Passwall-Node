@@ -24,6 +24,7 @@ package releaseid
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -48,6 +49,17 @@ const (
 // TagPrefix is the namespace product tags live under. It exists so a product tag
 // can never be mistaken for a Go module version, which also begins with a v.
 const TagPrefix = "release/"
+
+// legacyTagShape is the historical tag form: a v, three numeric segments, and an
+// optional dotted or dotless prerelease — the shape Passwall Node has published.
+//
+// It is written as a shape check rather than imported from the node module's
+// deployment package, which owns the same rule for installation. Two copies of a
+// PATTERN is a lesser hazard than two copies of an ORDERING, which is the thing
+// this package exists to consolidate; if the two ever diverge, this one is the
+// classifier and that one is the installer, and a tag the installer refuses will
+// fail installation whatever this says.
+var legacyTagShape = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 
 var (
 	// ErrUnknownFormat means the input is not a version or tag in any scheme this
@@ -179,7 +191,15 @@ func ParseReleaseTag(raw string) (Tag, error) {
 		}
 		return Tag{Raw: raw, Scheme: SchemeProduct, Product: v}, nil
 	}
-	if strings.HasPrefix(raw, "v") && len(raw) > 1 {
+	if strings.HasPrefix(raw, "v") {
+		// "Keep the old tag as it is" means do not REINTERPRET it — not accept
+		// anything that starts with a v. A tag is an identity, and a string that
+		// merely begins with v is not one: recognising it as legacy would put a
+		// value into the support matrix that no release ever published, and the
+		// refusal is the same one every other unrecognised input gets.
+		if !legacyTagShape.MatchString(raw) {
+			return Tag{}, fmt.Errorf("%w: %q begins with v but is not a version", ErrUnknownFormat, raw)
+		}
 		return Tag{Raw: raw, Scheme: SchemeLegacy}, nil
 	}
 	return Tag{}, fmt.Errorf("%w: %q is neither %sMAJOR.MINOR.PATCH nor a legacy v-tag", ErrUnknownFormat, raw, TagPrefix)
