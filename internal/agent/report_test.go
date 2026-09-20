@@ -12,7 +12,7 @@ import (
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func TestReportUsesLiveCoreStatus(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // parseUptime reads the system's monotonic uptime from /proc/uptime.

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 type recordingRuntime struct {

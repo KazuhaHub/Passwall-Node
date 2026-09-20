@@ -26,7 +26,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/deployment"
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-node/internal/testutil/nodefixture"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // Unlike the permission probe, this launches the real cmd/node daemon and

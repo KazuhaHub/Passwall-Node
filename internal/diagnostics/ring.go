@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // DefaultRingCapacity is how many of the agent's own events are kept.

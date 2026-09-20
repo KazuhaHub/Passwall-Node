@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // Runtime is the B3 boundary. B2 owns ordering, persistence, joins, retries,

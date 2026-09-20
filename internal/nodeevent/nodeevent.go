@@ -1,6 +1,6 @@
 package nodeevent
 
-import "github.com/KazuhaHub/passwall-node/protocol"
+import "github.com/KazuhaHub/passwall-protocol/protocol"
 
 // Recorder is where a component reports something it observed about itself.
 //

@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const retainedClosedCoreConnections = 2000

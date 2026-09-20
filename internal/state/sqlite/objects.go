@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func (s *Store) Object(ctx context.Context, stream, key string) (protocol.ObjectStatus, error) {

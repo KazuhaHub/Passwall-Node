@@ -20,7 +20,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/corecatalog"
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
 	"github.com/KazuhaHub/passwall-node/internal/host"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // DoctorSchemaVersion is the shape of the doctor's JSON output. It is a version
