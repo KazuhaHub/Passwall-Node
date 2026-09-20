@@ -68,9 +68,11 @@ func TestAcceptedReleaseTags(t *testing.T) {
 		"v1.0.0",
 		"v0.0.1-beta11",
 		"v1.0.0-rc1",
-		// The product scheme: release/MAJOR.MINOR.PATCH, three segments, no v.
+		// The product scheme: release/MAJOR.MINOR.PATCH[.BUILD], three or four
+		// segments, no v.
 		"release/4.0.0",
 		"release/102.1.0",
+		"release/4.0.0.1",
 	} {
 		t.Run(tag, func(t *testing.T) {
 			if code, _, stderr := run(t, tag); code != 0 {
@@ -92,6 +94,7 @@ func TestTheReportedVersionIsWhatTheWorkflowStamps(t *testing.T) {
 	for _, tc := range []struct{ tag, want string }{
 		{"release/4.0.0", "4.0.0"},
 		{"release/102.1.0", "102.1.0"},
+		{"release/4.0.0.1", "4.0.0.1"},
 		// Unchanged for the scheme that is already published: the version a
 		// legacy release is stamped with is the tag it was published under.
 		{"v1.0.0", "v1.0.0"},
@@ -124,9 +127,9 @@ func TestRefusedReleaseTags(t *testing.T) {
 		// its v for the same reason.
 		"4.0.0",
 		"102.1.0",
-		// The product tag is always three segments; a fourth is a different
+		// The product tag is three or four segments; a FIFTH is a different
 		// format, not a longer version.
-		"release/4.0.0.1",
+		"release/4.0.0.1.2",
 		"release/4.0",
 		// A v inside the product namespace would make the tag ambiguous with a
 		// Go module version.

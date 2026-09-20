@@ -230,16 +230,17 @@ func ValidLegacyVersion(value string) bool {
 // version began with a v, and no product version does. Anything else — a tag, a
 // channel name, a version with build metadata — is refused rather than repaired.
 //
-// THREE SEGMENTS, ALWAYS. ParseProductVersion pads the short forms, because
-// comparing "4" and "4.0.0" is a thing callers legitimately do; a VERSION is
-// what a release is stamped with and what a download is addressed by, and those
-// are always three. Accepting the short form here would let a caller ask for a
-// release that does not exist under that name.
+// THREE OR FOUR SEGMENTS, NEVER FEWER. ParseProductVersion pads the short forms,
+// because comparing "4" and "4.0.0" is a thing callers legitimately do; a VERSION
+// is what a release is stamped with and what a download is addressed by, and those
+// are never shorthand — accepting "4.0" here would let a caller ask for a release
+// that does not exist under that name. The fourth segment is the optional BUILD
+// component, and a literal zero in it is refused by the parser beside this.
 func ValidVersion(value string) bool {
 	if strings.HasPrefix(value, "v") {
 		return ValidLegacyVersion(value)
 	}
-	if strings.Count(value, ".") != 2 {
+	if dots := strings.Count(value, "."); dots != 2 && dots != 3 {
 		return false
 	}
 	parsed, err := ParseProductVersion(value)
@@ -317,8 +318,8 @@ func ParseReleaseTag(raw string) (Tag, error) {
 		if strings.HasPrefix(body, "v") {
 			return Tag{}, fmt.Errorf("%w: %q puts a v inside the product tag namespace", ErrUnknownFormat, raw)
 		}
-		if strings.Count(body, ".") != 2 {
-			return Tag{}, fmt.Errorf("%w: %q is a product tag, which is always three segments", ErrUnknownFormat, raw)
+		if dots := strings.Count(body, "."); dots != 2 && dots != 3 {
+			return Tag{}, fmt.Errorf("%w: %q is a product tag, which is three or four segments", ErrUnknownFormat, raw)
 		}
 		v, err := ParseProductVersion(body)
 		if err != nil {
