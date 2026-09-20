@@ -200,9 +200,15 @@ func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
 		return nil, errors.New("cannot mint private disposable identity")
 	}
 	f := &nodeE2E{ctx: ctx, nonce: hex.EncodeToString(random[32:40]), agentID: "agt_upgrade_e2e_" + hex.EncodeToString(random[40:]), credential: "pspn_'\"$(false);`false`_" + hex.EncodeToString(random[:32]), units: make(map[string]string), createdUnits: make(map[string]bool)}
-	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "4.1.0")
-	f.newVersion = envOr("PN_E2E_NEW_VERSION", "4.1.3")
-	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "4.1.4")
+	// THESE MUST MATCH WHAT THE WORKFLOW STAMPS. It builds three artifacts with
+	// explicit versions and this fixture asserts each one reports the version it
+	// was asked for, so a default that disagrees with the stamp fails the leg
+	// before anything is upgraded — which is the shape of failure that reads as a
+	// broken mechanism rather than as a stale label. The workflow's
+	// "Build exact real source artifacts" step carries the other half.
+	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "4.0.0")
+	f.newVersion = envOr("PN_E2E_NEW_VERSION", "4.0.1")
+	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "4.0.2")
 	f.oldCommit = envOr("PN_E2E_OLD_COMMIT", "abcdef1234567")
 	f.newCommit = envOr("PN_E2E_NEW_COMMIT", "abcdef1234567")
 	f.failCommit = envOr("PN_E2E_FAIL_COMMIT", "abcdef1234567")
