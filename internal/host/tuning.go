@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // collectTuning reads the host's congestion-control and queueing state.

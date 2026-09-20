@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func TestRuntimeStatsRecordSizesAndRoundTrip(t *testing.T) {

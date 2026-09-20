@@ -13,7 +13,7 @@ import (
 	"time"
 
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const testAPISecret = "0123456789abcdef0123456789abcdef"

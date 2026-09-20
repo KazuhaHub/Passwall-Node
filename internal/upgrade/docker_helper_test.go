@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 type fakeDockerEngine struct {

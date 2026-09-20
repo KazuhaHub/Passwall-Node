@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // Snapshot is one complete, immutable desired runtime. A compiler receives a

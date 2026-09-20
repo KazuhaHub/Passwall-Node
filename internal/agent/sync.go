@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // ProcessResult tells the loop whether newly-produced local evidence should be

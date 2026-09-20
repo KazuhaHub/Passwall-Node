@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // The diagnostic puts two numbers on the wire, and both have to mean what a

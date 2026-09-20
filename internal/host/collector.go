@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // collector assembles one observation from the injected roots.

@@ -396,33 +396,49 @@ func TestReleaseVersionAndPrivateRootValidation(t *testing.T) {
 	}
 }
 
-// The tag is a path SEGMENT. Concatenating it is how a tag containing a separator
-// silently becomes a different URL: the segment ends early and the rest is read
-// as a deeper path, so the download addresses something that does not exist and
-// fails in a way that looks like a missing release.
-func TestReleaseAssetURLKeepsTheTagInOneSegment(t *testing.T) {
+// THE SLASH IN A TAG IS A SEPARATOR, NOT DATA.
+//
+// This test used to assert the opposite — that `release/4.0.0` becomes
+// `release%2F4.0.0`, on the assumption that GitHub resolves the escaped form to
+// the same resource, with a comment saying nothing claimed that and the migration
+// plan required a real download to settle it. The construction that came from the
+// other side of the merge does not need the claim: the tag the publisher created
+// is a ref with a slash, and the URL that names it has two path entries. Escaping
+// it whole asks for a single entry literally called `release%2F4.0.0`, which is a
+// different address.
+//
+// What is still open is whether GitHub serves a slash-bearing tag at all. Building
+// the URL the ref names is the only construction that could be right; this says so
+// instead of assuming the escape is equivalent.
+func TestTheReleaseTagIsAddressedAsAPath(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		version string
-		want    string
-		why     string
+		name string
+		tag  string
+		want string
+		why  string
 	}{
 		{
-			name:    "a legacy tag is unchanged",
-			version: "v0.0.1-beta11",
-			want:    releaseDownloadBase + "v0.0.1-beta11/SHA256SUMS.txt",
-			why:     "dots and hyphens are unreserved, so escaping must not alter it",
+			name: "a legacy tag is unchanged",
+			tag:  "v0.0.1-beta11",
+			want: releaseDownloadBase + "v0.0.1-beta11/SHA256SUMS.txt",
+			why:  "dots and hyphens are unreserved, so escaping must not alter it",
 		},
 		{
-			name:    "a product tag keeps its slash inside the segment",
-			version: "release/4.0.0",
-			want:    releaseDownloadBase + "release%2F4.0.0/SHA256SUMS.txt",
-			why:     "unescaped, the slash ends the tag segment and the URL addresses a path that does not exist",
+			name: "a product tag keeps its slash as a separator",
+			tag:  "release/4.0.0",
+			want: releaseDownloadBase + "release/4.0.0/SHA256SUMS.txt",
+			why:  "the tag is the ref the publisher made; its slash is a real path entry",
+		},
+		{
+			name: "a segment is still escaped",
+			tag:  "release/4.0.0 a",
+			want: releaseDownloadBase + "release/4.0.0%20a/SHA256SUMS.txt",
+			why:  "per-segment escaping neutralises what is inside a segment",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := releaseAssetURL(tc.version, "SHA256SUMS.txt"); got != tc.want {
-				t.Fatalf("releaseAssetURL(%q) = %q, want %q — %s", tc.version, got, tc.want, tc.why)
+			if got := releaseDownloadBase + releaseTagPath(tc.tag) + "/SHA256SUMS.txt"; got != tc.want {
+				t.Fatalf("releaseTagPath(%q) = %q, want %q — %s", tc.tag, got, tc.want, tc.why)
 			}
 		})
 	}

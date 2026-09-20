@@ -9,7 +9,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/internal/agent"
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // Stable task error codes. Like every other code on the wire, a published value

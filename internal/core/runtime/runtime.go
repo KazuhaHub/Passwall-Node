@@ -22,7 +22,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/internal/core/install"
 	"github.com/KazuhaHub/passwall-node/internal/core/xray"
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 type Installer interface {

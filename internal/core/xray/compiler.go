@@ -15,7 +15,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/corecatalog"
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const (

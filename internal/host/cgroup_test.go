@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func TestCollectReadsCgroupV2CPUAndMemory(t *testing.T) {

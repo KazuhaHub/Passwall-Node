@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // atClockTicks is AT_CLKTCK from the kernel's auxiliary vector: how many

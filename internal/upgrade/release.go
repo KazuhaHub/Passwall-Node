@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
 	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
+	"github.com/KazuhaHub/passwall-node/releaseid"
 )
 
 const (
@@ -38,22 +38,22 @@ const (
 	defaultVerifyLimit  = 20 * time.Second
 )
 
-// releaseAssetURL builds the official URL for one asset of one release.
+// releaseTagPath renders a release tag as the path it occupies under
+// releases/download/.
 //
-// THE TAG IS A PATH SEGMENT, NOT PART OF A PATH. Concatenating it is how a tag
-// containing a separator silently becomes a DIFFERENT URL: the segment ends
-// early and the rest is read as a deeper path, so the request addresses something
-// that does not exist and the download fails in a way that looks like a missing
-// release rather than a bad URL.
-//
-// Legacy tags are unaffected — dots and hyphens are unreserved — and the product
-// form carries a slash, which is the case that needs the escape.
-//
-// NOTHING HERE CLAIMS GITHUB RESOLVES THE ESCAPED FORM. The migration plan
-// requires that be settled by a real download test rather than assumed; this
-// builds the only URL that could be right, and says so rather than guessing.
-func releaseAssetURL(version, asset string) string {
-	return releaseDownloadBase + url.PathEscape(version) + "/" + url.PathEscape(asset)
+// THE SLASH IS A SEPARATOR, NOT DATA. GitHub published the tag and serves the
+// ref verbatim, so `release/4.0.0` is two path entries and that is the URL that
+// exists. Escaping the whole tag would ask for a single entry literally named
+// `release%2F4.0.0`, which is a different resource. Escaping PER SEGMENT keeps
+// the separator while still neutralising anything inside a segment — the tag is
+// validated before it gets here, and this makes the URL correct even if a
+// future scheme allows a character that is not.
+func releaseTagPath(tag string) string {
+	segments := strings.Split(tag, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }
 
 // ReleaseFetcherOptions deliberately has no source URL or resolver. An upgrade
@@ -158,7 +158,22 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	if err := ctx.Err(); err != nil {
 		return Candidate{}, err
 	}
-	if len(version) > 128 || !deployment.ValidReleaseVersion(version) {
+	// THE CALLER HOLDS A VERSION, NOT A TAG, and it has to: the archive's own
+	// binary reports the version it was stamped with, and that is compared
+	// against the version requested. The tag is where the release LIVES, and it
+	// is reached from the version rather than sent alongside it, so the two can
+	// never be given to this function out of step.
+	//
+	// Each scheme keeps its own rule. A legacy version is checked by the
+	// installation rule it has always been checked against; a product version is
+	// not that rule's business, because it knows only the v-prefixed shape.
+	tag, err := releaseid.TagForVersion(version)
+	// The length bound is separate from the shape: it is about what this
+	// function will hold, not about whether the string is well formed.
+	if len(version) > 128 || err != nil {
+		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
+	}
+	if tag.Scheme == releaseid.SchemeLegacy && !releaseid.ValidLegacyVersion(version) {
 		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
 	}
 	if err := os.MkdirAll(f.rootDir, 0o700); err != nil {
@@ -177,14 +192,18 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 			_ = os.RemoveAll(dir)
 		}
 	}()
+	// THE ASSET NAME CARRIES THE VERSION AND THE PATH CARRIES THE TAG. They are
+	// one string everywhere the two schemes coincide, which is why this read as
+	// a single identity for as long as only the legacy scheme existed.
 	packageName := "passwall-node_" + version + "_linux_" + f.goarch
 	assetName := packageName + ".tar.gz"
+	releasePath := releaseDownloadBase + releaseTagPath(tag.Raw) + "/"
 	checksumsPath := filepath.Join(dir, "SHA256SUMS.txt")
-	if _, err := f.download(ctx, releaseAssetURL(version, "SHA256SUMS.txt"), checksumsPath, maxChecksumBytes); err != nil {
+	if _, err := f.download(ctx, releasePath+"SHA256SUMS.txt", checksumsPath, maxChecksumBytes); err != nil {
 		return Candidate{}, err
 	}
 	signaturePath := filepath.Join(dir, releaseauth.SignatureAssetName)
-	if _, err := f.download(ctx, releaseAssetURL(version, releaseauth.SignatureAssetName), signaturePath, maxSignatureBytes); err != nil {
+	if _, err := f.download(ctx, releasePath+releaseauth.SignatureAssetName, signaturePath, maxSignatureBytes); err != nil {
 		return Candidate{}, err
 	}
 	checksums, err := os.ReadFile(checksumsPath)
@@ -203,7 +222,7 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 		return Candidate{}, err
 	}
 	archivePath := filepath.Join(dir, "release.tar.gz")
-	archiveDigest, err := f.download(ctx, releaseAssetURL(version, assetName), archivePath, f.archiveLimit)
+	archiveDigest, err := f.download(ctx, releasePath+assetName, archivePath, f.archiveLimit)
 	if err != nil {
 		return Candidate{}, err
 	}

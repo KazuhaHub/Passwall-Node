@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity, atMS int64) error {

@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // cgroupReader resolves the files of one controller inside the cgroup hierarchy.

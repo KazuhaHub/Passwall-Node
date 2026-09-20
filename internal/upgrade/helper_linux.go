@@ -18,8 +18,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
 	"golang.org/x/sys/unix"
+
+	"github.com/KazuhaHub/passwall-node/releaseid"
 )
 
 const nodeService = "passwall-node.service"
@@ -459,7 +460,10 @@ func readManagedVersion(root string) (string, error) {
 		return "", err
 	}
 	value := strings.TrimSuffix(string(data), "\n")
-	if len(value) > 128 || !deployment.ValidReleaseVersion(value) {
+	// The version the install wrote down. It is a VERSION, so both schemes are
+	// canonical here; the installer's own rule knows only the historical shape,
+	// and using it here would declare a product-version installation corrupt.
+	if len(value) > 128 || !releaseid.ValidVersion(value) {
 		return "", errors.New("installed version file is not canonical")
 	}
 	return value, nil
