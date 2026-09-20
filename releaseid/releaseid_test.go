@@ -55,6 +55,13 @@ type vectors struct {
 		B   string `json:"b"`
 		Cmp int    `json:"cmp"`
 	} `json:"legacy_order"`
+
+	Versions []struct {
+		In     string `json:"in"`
+		Scheme string `json:"scheme"`
+		OK     bool   `json:"ok"`
+		Why    string `json:"why"`
+	} `json:"versions"`
 }
 
 func load(t *testing.T) vectors {
@@ -187,6 +194,50 @@ func TestTheVersionStringIsNotATag(t *testing.T) {
 	}
 	if tag.Raw != "release/4.0.0" {
 		t.Fatalf("the raw tag is the published identity and must not be reconstructed: %q", tag.Raw)
+	}
+}
+
+// The version-shape vectors, in both schemes.
+//
+// These are the accepted/rejected pairs BOTH consumers check — Passwall Sub-Panel
+// has its own implementation of this shape while the shared package is not yet in
+// the release it pins, and the only thing keeping two implementations honest is
+// that they read the same data.
+func TestVersionVectorsInBothSchemes(t *testing.T) {
+	vectors := load(t)
+	if len(vectors.Versions) == 0 {
+		t.Fatal("the vectors lost the versions section")
+	}
+	for _, tc := range vectors.Versions {
+		t.Run(tc.In, func(t *testing.T) {
+			if got := releaseid.ValidVersion(tc.In); got != tc.OK {
+				t.Errorf("ValidVersion(%q) = %v, want %v (%s)", tc.In, got, tc.OK, tc.Why)
+			}
+			if !tc.OK {
+				return
+			}
+			// An accepted entry says which rule accepts it, and the other rule
+			// must not: the whole point of separating them is that a caller can
+			// tell a historical identity from a product one.
+			switch tc.Scheme {
+			case "legacy":
+				if !releaseid.ValidLegacyVersion(tc.In) {
+					t.Errorf("%q is accepted as a %s version but not by the legacy rule", tc.In, tc.Scheme)
+				}
+				if tag, err := releaseid.TagForVersion(tc.In); err != nil || tag.Scheme != releaseid.SchemeLegacy {
+					t.Errorf("TagForVersion(%q) = %+v, %v; want a legacy tag", tc.In, tag, err)
+				}
+			case "product":
+				if releaseid.ValidLegacyVersion(tc.In) {
+					t.Errorf("%q is accepted as a product version and also by the legacy rule", tc.In)
+				}
+				if tag, err := releaseid.TagForVersion(tc.In); err != nil || tag.Scheme != releaseid.SchemeProduct {
+					t.Errorf("TagForVersion(%q) = %+v, %v; want a product tag", tc.In, tag, err)
+				}
+			default:
+				t.Fatalf("%q is accepted with no scheme stated", tc.In)
+			}
+		})
 	}
 }
 
