@@ -134,14 +134,32 @@ func TestItResumesTheNumberBoundToTheSourceRevision(t *testing.T) {
 		t.Fatalf("stdout = %q, want v4.0.0", stdout)
 	}
 
-	// Nothing bound to the revision: the next number, in the named scheme.
-	code, stdout, stderr = run(t, "-line", "4.0", "-scheme", "legacy",
-		"-existing", "v4.0.0", "-on-commit", "unrelated-tag")
+	// Nothing bound to the revision: allocate the next number, in the named
+	// scheme. The PRODUCT scheme, because that is the one this allocates.
+	code, stdout, stderr = run(t, "-line", "4.0", "-scheme", "product",
+		"-existing", "release/4.0.0", "-on-commit", "unrelated-tag")
 	if code != 0 {
 		t.Fatalf("refused: %s", stderr)
 	}
-	if stdout != "v4.0.1\n" {
-		t.Fatalf("stdout = %q, want v4.0.1", stdout)
+	if stdout != "release/4.0.1\n" {
+		t.Fatalf("stdout = %q, want release/4.0.1", stdout)
+	}
+
+	// A LEGACY RELEASE CAN BE RESUMED BUT NOT ALLOCATED. The first half matters:
+	// a failed legacy release being re-run must continue its own number. The
+	// second is refused because the legacy line's releases carry a prerelease
+	// counter this allocator does not model, so the answer it would give — 4.0.1
+	// for a v4.0.0 line — names a new PATCH rather than the next beta.
+	code, stdout, stderr = run(t, "-line", "4.0", "-scheme", "legacy",
+		"-existing", "v4.0.0", "-on-commit", "unrelated-tag")
+	if code == 0 {
+		t.Fatalf("the legacy line was allocated: %s", stdout)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("a refusal printed %q on stdout", stdout)
+	}
+	if !strings.Contains(stderr, "prerelease counter") {
+		t.Fatalf("the refusal must name what it cannot model: %s", stderr)
 	}
 }
 

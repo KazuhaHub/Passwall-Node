@@ -49,12 +49,6 @@ func TestAllocatingTheNextPatchOnALine(t *testing.T) {
 			existing: []string{"release/4.0.0", "nightly", "docs-2026", "v4.1.0"},
 			want:     "4.0.1",
 		},
-		{
-			name: "the legacy line allocates in its own scheme",
-			line: "4.0", scheme: releaseid.SchemeLegacy,
-			existing: []string{"v4.0.0", "v4.0.1", "release/4.1.0"},
-			want:     "4.0.2",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			line, err := releaseid.ParseReleaseLine(tc.line)
@@ -220,5 +214,31 @@ func TestResumingRefusesAnAmbiguousCommit(t *testing.T) {
 	tag, err := releaseid.ResumeTag(line, releaseid.SchemeProduct, []string{"release/4.0.1", "release/4.0.2"})
 	if !errors.Is(err, releaseid.ErrAmbiguousRevision) {
 		t.Fatalf("ResumeTag = %q, %v; want ErrAmbiguousRevision", tag.Raw, err)
+	}
+}
+
+// THE LEGACY LINE IS NOT ALLOCATED, and the reason is a wrong answer rather than
+// a missing one.
+//
+// A legacy release is `vMAJOR.MINOR.PATCH-betaN`, and the beta counter is an axis
+// this allocator does not model: asked for the next number on the 0.0 line it
+// finds patch 1 and answers 0.0.2, which is a plausible-looking version that the
+// caller would tag `v0.0.2` — a NEW PATCH, not the next beta of the one that
+// exists. Nothing in the answer says it was the wrong question.
+//
+// The product scheme is what this allocator is for: three integers, a patch
+// increment, and the migration's next release. The legacy line is being retired,
+// and a change on it is a maintainer's decision rather than an increment.
+func TestAllocatingRefusesTheLegacyLine(t *testing.T) {
+	line, err := releaseid.ParseReleaseLine("0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := releaseid.AllocatePatch(line, releaseid.SchemeLegacy, []string{"v0.0.1-beta11"})
+	if err == nil {
+		t.Fatalf("AllocatePatch on the legacy line = %s; the caller would tag v%s, which is a new patch rather than the next beta", got, got)
+	}
+	if !strings.Contains(err.Error(), "beta") && !strings.Contains(err.Error(), "prerelease") {
+		t.Fatalf("the refusal must name what it cannot model: %v", err)
 	}
 }
