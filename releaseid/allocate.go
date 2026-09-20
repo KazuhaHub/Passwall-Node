@@ -78,6 +78,20 @@ func ParseReleaseLine(s string) (Line, error) {
 // function deciding which of somebody's releases does not count. It names the
 // tags so a maintainer can.
 func AllocatePatch(line Line, scheme Scheme, existing []string) (Version, error) {
+	// THE LEGACY LINE IS NOT ALLOCATED, and the reason is a wrong answer rather
+	// than a missing one. A legacy release is `vMAJOR.MINOR.PATCH-betaN`, and the
+	// beta counter is an axis this function does not model: asked for the next
+	// number on the 0.0 line it finds patch 1 and answers 0.0.2, which the caller
+	// would tag `v0.0.2` — a NEW PATCH, not the next beta of the one that exists.
+	// Nothing in that answer says it was the wrong question.
+	//
+	// The product scheme is what this is for: three integers, a patch increment,
+	// and the migration's next release. The legacy line is being retired, so a
+	// change on it is a maintainer's decision rather than an increment.
+	if scheme == SchemeLegacy {
+		return Version{}, fmt.Errorf("%w: the legacy line's releases carry a prerelease counter (vMAJOR.MINOR.PATCH-betaN), "+
+			"which this allocator does not model; a patch increment there would name a new patch rather than the next beta", ErrUnknownFormat)
+	}
 	highest := int64(-1)
 	var foreign []string
 	for _, raw := range existing {
