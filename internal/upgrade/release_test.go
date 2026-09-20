@@ -395,3 +395,35 @@ func TestReleaseVersionAndPrivateRootValidation(t *testing.T) {
 		t.Fatalf("cancellation lost: %v", err)
 	}
 }
+
+// The tag is a path SEGMENT. Concatenating it is how a tag containing a separator
+// silently becomes a different URL: the segment ends early and the rest is read
+// as a deeper path, so the download addresses something that does not exist and
+// fails in a way that looks like a missing release.
+func TestReleaseAssetURLKeepsTheTagInOneSegment(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version string
+		want    string
+		why     string
+	}{
+		{
+			name:    "a legacy tag is unchanged",
+			version: "v0.0.1-beta11",
+			want:    releaseDownloadBase + "v0.0.1-beta11/SHA256SUMS.txt",
+			why:     "dots and hyphens are unreserved, so escaping must not alter it",
+		},
+		{
+			name:    "a product tag keeps its slash inside the segment",
+			version: "release/4.0.0",
+			want:    releaseDownloadBase + "release%2F4.0.0/SHA256SUMS.txt",
+			why:     "unescaped, the slash ends the tag segment and the URL addresses a path that does not exist",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := releaseAssetURL(tc.version, "SHA256SUMS.txt"); got != tc.want {
+				t.Fatalf("releaseAssetURL(%q) = %q, want %q — %s", tc.version, got, tc.want, tc.why)
+			}
+		})
+	}
+}

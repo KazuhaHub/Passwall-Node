@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -36,6 +37,24 @@ const (
 	defaultBinaryLimit  = 256 << 20
 	defaultVerifyLimit  = 20 * time.Second
 )
+
+// releaseAssetURL builds the official URL for one asset of one release.
+//
+// THE TAG IS A PATH SEGMENT, NOT PART OF A PATH. Concatenating it is how a tag
+// containing a separator silently becomes a DIFFERENT URL: the segment ends
+// early and the rest is read as a deeper path, so the request addresses something
+// that does not exist and the download fails in a way that looks like a missing
+// release rather than a bad URL.
+//
+// Legacy tags are unaffected — dots and hyphens are unreserved — and the product
+// form carries a slash, which is the case that needs the escape.
+//
+// NOTHING HERE CLAIMS GITHUB RESOLVES THE ESCAPED FORM. The migration plan
+// requires that be settled by a real download test rather than assumed; this
+// builds the only URL that could be right, and says so rather than guessing.
+func releaseAssetURL(version, asset string) string {
+	return releaseDownloadBase + url.PathEscape(version) + "/" + url.PathEscape(asset)
+}
 
 // ReleaseFetcherOptions deliberately has no source URL or resolver. An upgrade
 // task can select only an exact release from the official PN publisher.
@@ -161,11 +180,11 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	packageName := "passwall-node_" + version + "_linux_" + f.goarch
 	assetName := packageName + ".tar.gz"
 	checksumsPath := filepath.Join(dir, "SHA256SUMS.txt")
-	if _, err := f.download(ctx, releaseDownloadBase+version+"/SHA256SUMS.txt", checksumsPath, maxChecksumBytes); err != nil {
+	if _, err := f.download(ctx, releaseAssetURL(version, "SHA256SUMS.txt"), checksumsPath, maxChecksumBytes); err != nil {
 		return Candidate{}, err
 	}
 	signaturePath := filepath.Join(dir, releaseauth.SignatureAssetName)
-	if _, err := f.download(ctx, releaseDownloadBase+version+"/"+releaseauth.SignatureAssetName, signaturePath, maxSignatureBytes); err != nil {
+	if _, err := f.download(ctx, releaseAssetURL(version, releaseauth.SignatureAssetName), signaturePath, maxSignatureBytes); err != nil {
 		return Candidate{}, err
 	}
 	checksums, err := os.ReadFile(checksumsPath)
@@ -184,7 +203,7 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 		return Candidate{}, err
 	}
 	archivePath := filepath.Join(dir, "release.tar.gz")
-	archiveDigest, err := f.download(ctx, releaseDownloadBase+version+"/"+assetName, archivePath, f.archiveLimit)
+	archiveDigest, err := f.download(ctx, releaseAssetURL(version, assetName), archivePath, f.archiveLimit)
 	if err != nil {
 		return Candidate{}, err
 	}
