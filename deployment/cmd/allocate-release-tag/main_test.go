@@ -50,12 +50,16 @@ func run(t *testing.T, args ...string) (int, string, string) {
 func TestItPrintsOneTagAndNothingElse(t *testing.T) {
 	// The output is captured into a tag by a workflow, so a banner or an extra
 	// line would end up inside the tag name.
+	// 4.0.5 IS THE HIGHEST ON THE LINE, and the next number is a BUILD on it rather
+	// than a new patch: an incremental fix takes the fourth segment, so counting
+	// from the highest is what makes 4.0.4 (if it ever existed) count and 4.0.2
+	// (skipped, or never built) not be filled in.
 	code, stdout, stderr := run(t, "-line", "4.0", "-existing", "release/4.0.0\nrelease/4.0.1\nrelease/4.0.5\n")
 	if code != 0 {
 		t.Fatalf("refused: %s", stderr)
 	}
-	if stdout != "release/4.0.6\n" {
-		t.Fatalf("stdout = %q, want exactly %q — the caller creates a TAG, and the tag is what it must not have to build itself", stdout, "release/4.0.6\n")
+	if stdout != "release/4.0.5.1\n" {
+		t.Fatalf("stdout = %q, want exactly %q — the caller creates a TAG, and the tag is what it must not have to build itself", stdout, "release/4.0.5.1\n")
 	}
 }
 
@@ -72,8 +76,8 @@ func TestItAcceptsWhatAShellHandsOver(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("existing=%q: %s", existing, stderr)
 		}
-		if stdout != "release/4.0.2\n" {
-			t.Fatalf("existing=%q: stdout = %q, want release/4.0.2", existing, stdout)
+		if stdout != "release/4.0.1.1\n" {
+			t.Fatalf("existing=%q: stdout = %q, want release/4.0.1.1", existing, stdout)
 		}
 	}
 }
@@ -117,14 +121,14 @@ func TestItResumesTheNumberBoundToTheSourceRevision(t *testing.T) {
 		t.Fatalf("stdout = %q, want the tag already bound to this revision", stdout)
 	}
 
-	// Nothing bound to the revision: allocate the next number, in the named
-	// scheme. The PRODUCT scheme, because that is the one this allocates.
+	// Nothing bound to the revision: allocate the next number on the line, which
+	// is a build on the highest release the line has.
 	code, stdout, stderr = run(t, "-line", "4.0", "-existing", "release/4.0.0", "-on-commit", "unrelated-tag")
 	if code != 0 {
 		t.Fatalf("refused: %s", stderr)
 	}
-	if stdout != "release/4.0.1\n" {
-		t.Fatalf("stdout = %q, want release/4.0.1", stdout)
+	if stdout != "release/4.0.0.1\n" {
+		t.Fatalf("stdout = %q, want release/4.0.0.1", stdout)
 	}
 
 	// A LEGACY RELEASE CAN NEITHER BE RESUMED NOR ALLOCATED ANY MORE, and a case
