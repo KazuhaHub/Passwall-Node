@@ -107,8 +107,8 @@ func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
 	}
 	text := string(workflow)
 	for _, required := range []string{
-		"type=raw,value=latest,enable=${{ startsWith(needs.setup.outputs.tag, 'v') && !contains(needs.setup.outputs.tag, '-') }}",
-		"type=raw,value=beta,enable=${{ startsWith(needs.setup.outputs.tag, 'v') }}",
+		"type=raw,value=latest,enable=${{ needs.setup.outputs.image_channel == 'true' && needs.setup.outputs.prerelease == 'false' }}",
+		"type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}",
 		"io.kazuhahub.passwall-node.state-schema=${{ needs.setup.outputs.state_schema }}",
 		"io.kazuhahub.passwall-node.upgrade-contract=${{ needs.setup.outputs.upgrade_contract }}",
 		"STATE_SCHEMA=${{ needs.setup.outputs.state_schema }}",
@@ -116,6 +116,27 @@ func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow lost channel or Docker upgrade contract: %s", required)
+		}
+	}
+
+	// THE CHANNEL IS NOT READ OUT OF THE TAG TEXT. `contains(tag, '-')` is a
+	// LEGACY rule — a v-prefixed tag with a hyphen has always meant a pre-release
+	// — and a product-scheme tag has no hyphen at all, so the same test would
+	// publish every testing candidate as STABLE and would tag no image at all.
+	// Both of those are read by consumers as "released", so neither is undone by a
+	// later edit.
+	if strings.Contains(text, "contains(needs.setup.outputs.tag, '-')") {
+		t.Fatal("the release workflow derives the channel from the tag text; a product-scheme tag has no hyphen")
+	}
+	for _, required := range []string{
+		"id: channel",
+		"prerelease: ${{ steps.channel.outputs.prerelease }}",
+		"prerelease: ${{ needs.setup.outputs.prerelease }}",
+		// The recoverable direction for a tag in neither scheme.
+		"*)    prerelease=true ;;",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("the channel is not resolved once and shared: %s", required)
 		}
 	}
 }

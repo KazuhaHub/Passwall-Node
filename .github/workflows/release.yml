@@ -22,6 +22,15 @@ on:
         description: "Release tag, for example v1.0.0"
         required: true
         type: string
+      channel:
+        description: "Publication channel. auto reads it from the tag; stable and testing state it."
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - stable
+          - testing
 
 permissions:
   contents: read
@@ -47,6 +56,8 @@ jobs:
       build_date: ${{ steps.identity.outputs.build_date }}
       state_schema: ${{ steps.identity.outputs.state_schema }}
       upgrade_contract: ${{ steps.identity.outputs.upgrade_contract }}
+      prerelease: ${{ steps.channel.outputs.prerelease }}
+      image_channel: ${{ steps.channel.outputs.images }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,6 +70,20 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # THE CHANNEL IS STATED OR READ FROM THE LEGACY SHAPE, NEVER GUESSED FROM A
+      # HYPHEN. `contains(tag, '-')` is a LEGACY rule: a v-prefixed tag with a
+      # hyphen has always meant a pre-release. A product-scheme tag
+      # (release/MAJOR.MINOR.PATCH) has no hyphen at all, so the same test would
+      # publish every testing candidate as STABLE and would tag no image at all —
+      # and neither is recoverable by a later edit, because `prerelease: false`
+      # and the `latest` image tag are what a consumer reads as "released".
+      #
+      # So: an explicit input wins; the legacy shape decides for a legacy tag; and
+      # anything else defaults to PRE-RELEASE, the direction a deliberate
+      # promotion can correct.
+      #
+      # It lives in setup because BOTH the release and the image job need the same
+      # answer, and two places deciding a channel separately is how they disagree.
       - name: Resolve tag and owner
         id: identity
         shell: bash
@@ -122,6 +147,35 @@ jobs:
             echo "state_schema=${state_schema}"
             echo "upgrade_contract=${upgrade_contract}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the publication channel
+        id: channel
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.channel }}
+          PINNED_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          case "${REQUESTED:-auto}" in
+            stable)  prerelease=false ;;
+            testing) prerelease=true ;;
+            auto)
+              case "$PINNED_TAG" in
+                v*-*) prerelease=true ;;
+                v*)   prerelease=false ;;
+                *)    prerelease=true ;;
+              esac
+              ;;
+            *) echo "unknown publication channel: ${REQUESTED}" >&2; exit 1 ;;
+          esac
+          # Which tags do images get published for at all? The legacy form and the
+          # product namespace; anything else is a scratch dispatch.
+          case "$PINNED_TAG" in
+            v*|release/*) images=true ;;
+            *)            images=false ;;
+          esac
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -248,7 +302,9 @@ jobs:
           tag_name: ${{ needs.setup.outputs.tag }}
           target_commitish: ${{ needs.setup.outputs.sha }}
           name: ${{ needs.setup.outputs.tag }}
-          prerelease: ${{ contains(needs.setup.outputs.tag, '-') }}
+          # Resolved once in setup, where the reason for each answer is written
+          # down; both this job and the image job read that one answer.
+          prerelease: ${{ needs.setup.outputs.prerelease }}
           generate_release_notes: true
           overwrite_files: false
           files: dist/*
@@ -296,8 +352,13 @@ jobs:
             # addresses a repository named `passwall-node/release`. The build
             # would succeed and push to somewhere nobody is watching.
             type=raw,value=${{ needs.setup.outputs.version }}
-            type=raw,value=latest,enable=${{ startsWith(needs.setup.outputs.tag, 'v') && !contains(needs.setup.outputs.tag, '-') }}
-            type=raw,value=beta,enable=${{ startsWith(needs.setup.outputs.tag, 'v') }}
+            # AND THE CHANNEL IS RESOLVED, NOT READ OFF THE TAG TEXT. Both of
+            # these used to test `startsWith(tag, 'v')`, which a product tag has
+            # no prefix for — so neither pointer would have moved. They read the
+            # one answer setup resolved, which is also the answer the release's
+            # prerelease flag uses, so the two cannot disagree.
+            type=raw,value=latest,enable=${{ needs.setup.outputs.image_channel == 'true' && needs.setup.outputs.prerelease == 'false' }}
+            type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}
           labels: |
             org.opencontainers.image.title=passwall-node
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

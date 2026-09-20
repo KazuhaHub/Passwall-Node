@@ -314,3 +314,34 @@ func TestBackupRejectsSymlinkAndStillRestartsService(t *testing.T) {
 		t.Fatalf("incomplete backup remains: %v, %v", entries, err)
 	}
 }
+
+// The channel is not readable from the version string, and pretending otherwise
+// is the failure this guards: an operator who reads "Stable" believes a release
+// was approved.
+func TestDeployChannelReportsOnlyWhatTheVersionCarries(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    string
+		why     string
+	}{
+		{"v0.0.1-beta11", "Beta", "the legacy form, where a hyphen has always marked a pre-release"},
+		{"v0.0.1", "Stable", "the legacy stable form"},
+		{"v4.0.0-beta.25", "Beta", "the dotted legacy form"},
+		{"dev", "Unknown", "a source build has no channel"},
+		{"", "Unknown", "nothing to read"},
+		{
+			// Three integers in a namespace. There is no hyphen to find, and the
+			// artefact is promoted to stable without being rebuilt — so a build
+			// cannot know its channel and must not claim one.
+			"4.0.0", "Unknown",
+			"a product version carries no channel",
+		},
+		{"release/4.0.0", "Unknown", "the product tag carries none either"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			if got := deployChannel(tc.version); got != tc.want {
+				t.Fatalf("deployChannel(%q) = %q, want %q — %s", tc.version, got, tc.want, tc.why)
+			}
+		})
+	}
+}

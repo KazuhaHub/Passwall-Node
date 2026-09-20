@@ -531,12 +531,38 @@ func (a *app) printStatus(details bool) error {
 			fmt.Fprintf(a.out, "      Endpoint %s\n      Agent ID %s\n", connection.endpoint, connection.agentID)
 		}
 	}
-	channel := "Stable"
-	if strings.Contains(buildversion.Version, "-") || buildversion.Version == "dev" {
-		channel = "Beta"
-	}
-	fmt.Fprintf(a.out, "      Channel %s\n", channel)
+	fmt.Fprintf(a.out, "      Channel %s\n", deployChannel(buildversion.Version))
 	return nil
+}
+
+// deployChannel names the published channel of the running binary, as far as it
+// can be known.
+//
+// IT CANNOT BE KNOWN FROM THE VERSION STRING. The hyphen test is a LEGACY rule —
+// right for the v-prefixed form, where a hyphen has always marked a pre-release —
+// and it says nothing at all about a product version, which is three integers
+// with no hyphen. Worse, the same artefact is promoted from testing to stable
+// WITHOUT being rebuilt, so a channel stamped at build time would go stale the
+// moment it was promoted: a binary genuinely cannot know its channel after the
+// fact.
+//
+// So the answer is whatever the version string actually carries, and unknown when
+// it carries nothing. Printing "Stable" for a fact nobody established is the
+// failure this avoids — an operator reading it would believe a release had been
+// approved.
+func deployChannel(version string) string {
+	switch {
+	case version == "" || version == "dev":
+		return "Unknown"
+	case strings.HasPrefix(version, "v"):
+		if strings.Contains(version, "-") {
+			return "Beta"
+		}
+		return "Stable"
+	default:
+		// A product-scheme version: three integers, no hyphen, no channel in it.
+		return "Unknown"
+	}
 }
 
 func (a *app) readRuntimeSummary() (lastSync time.Time, engine, version string) {
