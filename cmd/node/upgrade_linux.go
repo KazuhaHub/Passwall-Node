@@ -13,6 +13,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/deployment"
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	"github.com/KazuhaHub/passwall-node/internal/upgrade"
+	"github.com/KazuhaHub/passwall-node/releaseid"
 )
 
 func remoteUpgradeClient(parsed options, version string, clock state.TaskStartClock, converge func(context.Context) error) *upgrade.Client {
@@ -33,7 +34,7 @@ func remoteUpgradeClient(parsed options, version string, clock state.TaskStartCl
 }
 
 func remoteUpgradeEnabled(parsed options, version string) bool {
-	if parsed.DataDir != filepath.Join(upgrade.InstallRoot, "data") || parsed.CredentialFile != filepath.Join(upgrade.InstallRoot, "config", "credential") || !deployment.ValidReleaseVersion(version) {
+	if parsed.DataDir != filepath.Join(upgrade.InstallRoot, "data") || parsed.CredentialFile != filepath.Join(upgrade.InstallRoot, "config", "credential") || !releaseid.ValidVersion(version) {
 		return false
 	}
 	executable, err := os.Executable()
@@ -65,7 +66,7 @@ func remoteUpgradeEnabled(parsed options, version string) bool {
 func dockerRemoteUpgradeEnabled(parsed options, version string) bool {
 	if os.Getenv("PSP_NODE_DOCKER_REMOTE_UPGRADE") != "true" || os.Geteuid() == 0 ||
 		parsed.DataDir != upgrade.DockerDataDir || parsed.CredentialFile != "/run/passwall-node/credential" ||
-		!deployment.ValidReleaseVersion(version) {
+		!releaseid.ValidVersion(version) {
 		return false
 	}
 	executable, err := os.Executable()

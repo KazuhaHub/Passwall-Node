@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
 	"github.com/KazuhaHub/passwall-node/protocol"
 	"github.com/KazuhaHub/passwall-node/releaseid"
 )
@@ -152,14 +151,14 @@ func ParseArgs(task protocol.Task) (Args, error) {
 	if err != nil {
 		return Args{}, err
 	}
-	if !deployment.ValidReleaseVersion(args.Version) || !deployment.ValidReleaseVersion(args.ExpectedVersion) ||
+	if !releaseid.ValidVersion(args.Version) || !releaseid.ValidVersion(args.ExpectedVersion) ||
 		CompareVersions(args.Version, args.ExpectedVersion) <= 0 {
 		return args, errors.New("upgrade requires an exact newer release and exact expected current release")
 	}
 	return args, nil
 }
 
-// CompareVersions orders two historical v-prefixed release tags.
+// CompareVersions orders two release versions, -1 / 0 / +1.
 //
 // It delegates to releaseid.CompareLegacyTag rather than carrying its own copy
 // of the rule. The rule is the project's release order, and it is applied in
@@ -167,6 +166,14 @@ func ParseArgs(task protocol.Task) (Args, error) {
 // second implementation is a second opinion about whether an upgrade is an
 // upgrade. The dotless prerelease handling (v0.0.1-beta11 above v0.0.1-beta9)
 // lives there, with the vectors that pin it.
+//
+// A product version is ordered correctly by the same rule, and that is a
+// property rather than a coincidence worth relying on silently: the legacy rule
+// compares numeric segments numerically and ranks a release above its own
+// prereleases, and a product version is three numeric segments with no
+// prerelease. TestUpgradeVersionOrderForProductVersions pins it, so a change to
+// the legacy rule that would misorder the product scheme fails there instead of
+// at a node that refuses to upgrade.
 func CompareVersions(a, b string) int {
 	return releaseid.CompareLegacyTag(a, b)
 }

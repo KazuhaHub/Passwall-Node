@@ -22,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
 	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
 	"github.com/KazuhaHub/passwall-node/releaseid"
 )
@@ -174,7 +173,7 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	if len(version) > 128 || err != nil {
 		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
 	}
-	if tag.Scheme == releaseid.SchemeLegacy && !deployment.ValidReleaseVersion(version) {
+	if tag.Scheme == releaseid.SchemeLegacy && !releaseid.ValidLegacyVersion(version) {
 		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
 	}
 	if err := os.MkdirAll(f.rootDir, 0o700); err != nil {

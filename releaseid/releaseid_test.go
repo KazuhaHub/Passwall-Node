@@ -190,6 +190,68 @@ func TestTheVersionStringIsNotATag(t *testing.T) {
 	}
 }
 
+// A release VERSION is what a binary is stamped with and what a caller may ask
+// for. There are two schemes and they are not the same rule:
+//
+//   - a legacy version is the historical v-prefixed form, with a prerelease
+//     whose segments must not carry a redundant leading zero;
+//   - a product version is three segments, and the release line is not zero.
+//
+// ValidVersion accepts either. ValidLegacyVersion is the historical rule alone,
+// and it is the one the INSTALLER keeps using — an installer that accepted a
+// product version would build a download URL from it, and a product version is
+// not the path a release lives at.
+func TestWhichStringsAreVersions(t *testing.T) {
+	for _, tc := range []struct {
+		value  string
+		legacy bool
+		any    bool
+		why    string
+	}{
+		// The historical shape, unchanged.
+		{"v1.0.0", true, true, ""},
+		{"v0.0.1-beta11", true, true, ""},
+		{"v1.0.0-rc1", true, true, ""},
+		{"v102.1.0", true, true, ""},
+		{"v1.0.0-alpha.1", true, true, "a dotted prerelease is the historical form"},
+		{"v1.0.0-alpha.01", false, false, "a redundant leading zero in a numeric prerelease segment"},
+		{"v01.0.0", false, false, "leading zeroes are not the historical form"},
+		{"v1.0", false, false, "the historical form always wrote three segments"},
+		{"v1.0.0+build", false, false, "build metadata is not the historical form"},
+		{"v", false, false, ""},
+		{"version-1", false, false, "a string that merely begins with v is not a version"},
+		// The product shape.
+		{"1.0.0", false, true, ""},
+		{"4.0.0", false, true, ""},
+		{"102.1.0", false, true, ""},
+		{"0.1.0", false, false, "a zero release line is not a released identity"},
+		{"4.0", false, false, "a product version is always three segments"},
+		{"4.0.0.1", false, false, "four segments is a different format"},
+		{"4.0.0-rc1", false, false, "a prerelease belongs to the legacy scheme, which writes a v"},
+		{"04.0.0", false, false, "leading zeroes"},
+		{"1.0.0+build", false, false, "build metadata"},
+		// Neither.
+		{"", false, false, ""},
+		{"latest", false, false, ""},
+		{"main", false, false, ""},
+		{"release/4.0.0", false, false, "a tag is not a version"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			if got := releaseid.ValidLegacyVersion(tc.value); got != tc.legacy {
+				t.Errorf("ValidLegacyVersion(%q) = %v, want %v (%s)", tc.value, got, tc.legacy, tc.why)
+			}
+			if got := releaseid.ValidVersion(tc.value); got != tc.any {
+				t.Errorf("ValidVersion(%q) = %v, want %v (%s)", tc.value, got, tc.any, tc.why)
+			}
+			// The two must agree wherever the legacy rule accepts, or a caller
+			// using the wider one would be reading a different rule.
+			if tc.legacy && !tc.any {
+				t.Errorf("%q is a legacy version but not a version", tc.value)
+			}
+		})
+	}
+}
+
 // The inverse derivation, and the one the DOWNLOAD path needs. A consumer that
 // holds a version — the upgrade helper does, because it compares the version a
 // binary reports against the version it asked for — must be able to reach the

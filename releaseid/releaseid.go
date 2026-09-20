@@ -61,6 +61,21 @@ const TagPrefix = "release/"
 // fail installation whatever this says.
 var legacyTagShape = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 
+// legacyVersionShape is the historical VERSION rule, and it is stricter than
+// legacyTagShape above. The two answer different questions about the same
+// strings, which is why there are two:
+//
+//   - legacyTagShape CLASSIFIES a tag, and is deliberately permissive: it
+//     decides whether a published name is a legacy one, and a tag it wrongly
+//     rejects is a release that can no longer be read.
+//   - legacyVersionShape VALIDATES a version a caller is about to act on, so it
+//     refuses what only looks close: leading zeroes, a missing segment, build
+//     metadata.
+//
+// Collapsing them would either start accepting inputs the installer refuses, or
+// start refusing tags that are already published.
+var legacyVersionShape = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+
 var (
 	// ErrUnknownFormat means the input is not a version or tag in any scheme this
 	// package knows. An unrecognised input is never repaired into a recognised
@@ -160,6 +175,54 @@ type Tag struct {
 	Scheme Scheme
 	// Product is set only for SchemeProduct.
 	Product Version
+}
+
+// ValidLegacyVersion is the historical version rule on its own: a v, three
+// segments with no leading zeroes, and an optional prerelease whose numeric
+// segments also carry no redundant leading zero.
+//
+// The installers keep this rule rather than ValidVersion, and that is
+// deliberate. An installer that accepted a product version would build a
+// download URL out of it, and a product version is not the path a release lives
+// at — the tag is. Until the installers identify a release by both, they must
+// keep refusing the input they cannot place.
+func ValidLegacyVersion(value string) bool {
+	if !legacyVersionShape.MatchString(value) {
+		return false
+	}
+	_, prerelease, exists := strings.Cut(value, "-")
+	if !exists {
+		return true
+	}
+	for _, segment := range strings.Split(prerelease, ".") {
+		if len(segment) > 1 && segment[0] == '0' && strings.Trim(segment, "0123456789") == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidVersion is the version rule for both schemes: what a binary may be
+// stamped with, and what a caller may ask for.
+//
+// The scheme is read from the string, and it cannot be ambiguous: every legacy
+// version began with a v, and no product version does. Anything else — a tag, a
+// channel name, a version with build metadata — is refused rather than repaired.
+//
+// THREE SEGMENTS, ALWAYS. ParseProductVersion pads the short forms, because
+// comparing "4" and "4.0.0" is a thing callers legitimately do; a VERSION is
+// what a release is stamped with and what a download is addressed by, and those
+// are always three. Accepting the short form here would let a caller ask for a
+// release that does not exist under that name.
+func ValidVersion(value string) bool {
+	if strings.HasPrefix(value, "v") {
+		return ValidLegacyVersion(value)
+	}
+	if strings.Count(value, ".") != 2 {
+		return false
+	}
+	parsed, err := ParseProductVersion(value)
+	return err == nil && parsed.Major != 0
 }
 
 // TagForVersion is the inverse of VersionString: the tag a release stamped with
