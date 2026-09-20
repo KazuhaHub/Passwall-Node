@@ -5,17 +5,23 @@ name: Release
 on:
   push:
     tags:
-      # ONLY THE LEGACY SCHEME, FOR NOW, AND THAT IS DELIBERATE. The publish
-      # side already separates the tag from the version, so a product tag would
-      # build and publish correctly — but the PUBLIC installer resolves its
-      # version from the release's `tag_name`, so it cannot yet identify a
-      # product release and would fail on one that installed fine before.
+      # BOTH SCHEMES. `v*` is the legacy shape and stays until the last v-named
+      # release is out of support; `release/*` is the product shape
+      # (release/MAJOR.MINOR.PATCH).
       #
-      # The migration plan sequences the bridge and channel work ahead of the
-      # first new tag for exactly this reason. Adding `release/*` here is the
-      # last step, not the first: deployment/release_identity_test.go fails and
-      # names this until it is true.
+      # IT WAS WITHHELD UNTIL THE INSTALLERS COULD READ ONE. The publish side
+      # separates the tag from the version and could always have built a product
+      # tag correctly — but the PUBLIC installer resolved its version from the
+      # release's `tag_name`, so it could not identify a product release and would
+      # have failed on one that installed fine before.
+      #
+      # It reads both identities now: the version comes out of the asset name and
+      # the address comes out of the release document, so neither is derived from
+      # the tag. That is the condition this trigger was waiting on, and
+      # deployment/release_identity_test.go was rewritten to REQUIRE the pattern
+      # in the same change rather than deleted.
       - "v*"
+      - "release/*"
   workflow_dispatch:
     inputs:
       tag:
