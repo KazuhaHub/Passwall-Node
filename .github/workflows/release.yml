@@ -73,35 +73,6 @@ jobs:
       #
       # It lives in setup because BOTH the release and the image job need the same
       # answer, and two places deciding a channel separately is how they disagree.
-      - name: Resolve the publication channel
-        id: channel
-        shell: bash
-        env:
-          REQUESTED: ${{ inputs.channel }}
-        run: |
-          set -euo pipefail
-          tag="${{ steps.identity.outputs.tag }}"
-          case "${REQUESTED:-auto}" in
-            stable)  prerelease=false ;;
-            testing) prerelease=true ;;
-            auto)
-              case "$tag" in
-                v*-*) prerelease=true ;;
-                v*)   prerelease=false ;;
-                *)    prerelease=true ;;
-              esac
-              ;;
-            *) echo "unknown publication channel: ${REQUESTED}" >&2; exit 1 ;;
-          esac
-          # Which tags do images get published for at all? The legacy form and the
-          # product namespace; anything else is a scratch dispatch.
-          case "$tag" in
-            v*|release/*) images=true ;;
-            *)            images=false ;;
-          esac
-          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
-          echo "images=${images}" >> "$GITHUB_OUTPUT"
-
       - name: Resolve tag and owner
         id: identity
         shell: bash
@@ -146,6 +117,35 @@ jobs:
             echo "state_schema=${state_schema}"
             echo "upgrade_contract=${upgrade_contract}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the publication channel
+        id: channel
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.channel }}
+          PINNED_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          case "${REQUESTED:-auto}" in
+            stable)  prerelease=false ;;
+            testing) prerelease=true ;;
+            auto)
+              case "$PINNED_TAG" in
+                v*-*) prerelease=true ;;
+                v*)   prerelease=false ;;
+                *)    prerelease=true ;;
+              esac
+              ;;
+            *) echo "unknown publication channel: ${REQUESTED}" >&2; exit 1 ;;
+          esac
+          # Which tags do images get published for at all? The legacy form and the
+          # product namespace; anything else is a scratch dispatch.
+          case "$PINNED_TAG" in
+            v*|release/*) images=true ;;
+            *)            images=false ;;
+          esac
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
