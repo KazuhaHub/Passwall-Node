@@ -93,7 +93,8 @@ func TestFetchRefusesSomethingThatIsNotAVersion(t *testing.T) {
 		"",
 		"latest",
 		"release/4.0.0", // a tag is not a version, and passing one is the swap this guards
-		"4.0.0.1",
+		"4.0.0.1.2",     // a fifth segment is a different format, not something to truncate
+		"4.0.0.0",       // a zero fourth is another spelling of 4.0.0
 		"main",
 		// Legacy leading zeroes stay refused: the product scheme is new, and
 		// this is not the change that relaxes the legacy rule.

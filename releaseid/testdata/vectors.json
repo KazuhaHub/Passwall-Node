@@ -16,6 +16,10 @@
       "out": "102.0.0"
     },
     {
+      "in": "102.1.0.1",
+      "out": "102.1.0.1"
+    },
+    {
       "in": "102.1",
       "out": "102.1.0"
     },
@@ -56,10 +60,6 @@
     {
       "in": "102..1",
       "why": "empty segment"
-    },
-    {
-      "in": "102.1.0.1",
-      "why": "a fourth segment is a different format, not something to truncate"
     },
     {
       "in": "102.1.0.0",
@@ -144,6 +144,14 @@
     {
       "in": "102.1.0 ",
       "why": "trailing whitespace"
+    },
+    {
+      "in": "102.1.0.1.2",
+      "why": "a fifth segment is a different format, not something to truncate"
+    },
+    {
+      "in": "102.1.0.0",
+      "why": "a zero fourth segment is another spelling of 102.1.0"
     }
   ],
   "order": [

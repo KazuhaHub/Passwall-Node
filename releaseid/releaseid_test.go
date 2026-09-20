@@ -350,7 +350,8 @@ func TestTagForVersionRefusesWhatIsNotAVersion(t *testing.T) {
 	for _, version := range []string{
 		"",
 		"latest",
-		"4.0.0.1",
+		"4.0.0.1.2",     // a fifth segment: the format has at most four
+		"4.0.0.0",       // a zero fourth is another spelling of 4.0.0
 		"release/4.0.0", // a tag is not a version; passing one is the swap this exists to prevent
 		"main",
 		"102.1.0-rc1", // a prerelease needs the legacy scheme's v
@@ -360,6 +361,23 @@ func TestTagForVersionRefusesWhatIsNotAVersion(t *testing.T) {
 				t.Fatalf("TagForVersion(%q) = %+v, want a refusal", version, tag)
 			}
 		})
+	}
+}
+
+// A FOURTH SEGMENT IS A VERSION NOW, and the tag it makes is the one a caller
+// would build by hand — pinned here rather than left to the parser's own test, so
+// the mapping from version to address is asserted where the address is.
+func TestAFourSegmentVersionMakesItsOwnTag(t *testing.T) {
+	tag, err := releaseid.TagForVersion("4.0.0.1")
+	if err != nil {
+		t.Fatalf("a four-segment version was refused: %v", err)
+	}
+	if tag.Raw != "release/4.0.0.1" {
+		t.Fatalf("TagForVersion(4.0.0.1) = %q, want release/4.0.0.1", tag.Raw)
+	}
+	// And it round-trips, which is what keeps the two identities one decision.
+	if back := tag.VersionString(); back != "4.0.0.1" {
+		t.Fatalf("%q reports its version as %q, want 4.0.0.1", tag.Raw, back)
 	}
 }
 

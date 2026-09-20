@@ -141,6 +141,17 @@ func TestResolveReleaseSelectsTheCanonicalArchive(t *testing.T) {
 			wantAsset: "passwall-node_4.0.0_linux_arm64.tar.gz",
 		},
 		{
+			// A FOURTH SEGMENT IS A VERSION IN THIS PROJECT, so the installer has to
+			// recognise the name it produces — the canonical name carries whatever
+			// the release is stamped with, and a pattern that stopped at three
+			// would refuse a release the publisher considers valid.
+			name: "product tag with a fourth segment",
+			tag:  "release/4.0.0.1", arch: "amd64",
+			assets:    []string{"passwall-node_4.0.0.1_linux_amd64.tar.gz", "SHA256SUMS.txt"},
+			wantVer:   "4.0.0.1",
+			wantAsset: "passwall-node_4.0.0.1_linux_amd64.tar.gz",
+		},
+		{
 			name: "the other platform's archive is not a candidate",
 			tag:  "release/4.0.0", arch: "arm64",
 			assets:    []string{"passwall-node_4.0.0_linux_amd64.tar.gz", "passwall-node_4.1.0_linux_arm64.tar.gz", "SHA256SUMS.txt"},
