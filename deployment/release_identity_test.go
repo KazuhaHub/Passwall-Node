@@ -72,16 +72,19 @@ func TestTheReleaseWorkflowKeepsTheTagAndTheVersionApart(t *testing.T) {
 	}
 }
 
-// The tag trigger and the publication scheme are deliberately NOT yet in sync,
-// and the workflow says why in place. Triggering on `release/*` before the
-// installers can identify a product release would let a tag be pushed that
-// produces artifacts the public installer cannot install — the plan sequences
-// the bridge and channel work AHEAD of the first new tag for exactly that
-// reason.
+// THE TAG TRIGGER AND THE PUBLICATION SCHEME ARE NOW IN SYNC, which is what the
+// previous version of this test was waiting for. It asserted the ABSENCE of
+// `release/*`, because triggering before the installers could identify a product
+// release would let a tag be pushed that produces artifacts the public installer
+// cannot install.
 //
-// So this asserts the absence rather than leaving it to be discovered: when the
-// trigger is added, this test fails and names what has to be true first.
-func TestTheNodeReleaseWorkflowDoesNotTriggerOnProductTagsYet(t *testing.T) {
+// The installers can identify one now: the public installer takes the version out
+// of the asset name and the address out of the release document rather than
+// deriving either from the tag. So this is REWRITTEN to require the pattern
+// rather than deleted — the absence was a decision with a condition attached, and
+// the condition is met rather than waived. A reader who deletes this instead of
+// rewriting it loses the note that says what the condition was.
+func TestTheNodeReleaseWorkflowTriggersOnBothTagSchemes(t *testing.T) {
 	// Only release.yml triggers on tags. The acceptance workflows are
 	// dispatch-only: they are pointed at a published tag ref by hand, which is
 	// why they need no trigger and why they take the tag as an input.
@@ -90,12 +93,16 @@ func TestTheNodeReleaseWorkflowDoesNotTriggerOnProductTagsYet(t *testing.T) {
 		t.Fatal(err)
 	}
 	patterns := triggerTagPatterns(string(workflow))
-	if len(patterns) == 0 {
-		t.Fatal("the release workflow has no tag triggers, so a release tag would run nothing")
-	}
-	for _, pattern := range patterns {
-		if pattern == "release/*" {
-			t.Fatal("the release workflow now triggers on product tags; the public installer cannot yet identify a product release, so read the comment beside the trigger and finish it first")
+	for _, required := range []string{"v*", "release/*"} {
+		found := false
+		for _, pattern := range patterns {
+			if pattern == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("the release workflow does not trigger on %s (found %v). A tag it does not trigger on is a release that does not happen: no run, no artifact, and a tag that names nothing", required, patterns)
 		}
 	}
 }
