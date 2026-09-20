@@ -147,41 +147,63 @@ resolve_release() {
     document=$1
     want_arch=$2
 
-    # EXACTLY ONE RELEASE. The beta channel asks for one release per page and the
-    # API answers newest-first, so this is a belt on top of that rather than the
-    # only defence: a document describing two releases would let one release's
-    # assets be selected against another's tag.
+    # THE NEWEST IS CHOSEN, NOT ASSUMED TO BE FIRST. `releases[0]` was taken for
+    # the newest because the API is documented to answer in that order, and against
+    # the live repository it is not: a release published two hours after another sat
+    # at index one, and nothing in the response explains the ordering. The axis that
+    # cannot be reinterpreted is the release's OWN publication time, which the API
+    # states per release — an ISO-8601 UTC instant, so ordering the strings is
+    # ordering the instants.
     #
-    # NONE AND SEVERAL ARE SEPARATE MESSAGES. `curl --fail` rejects an HTTP error
-    # before this runs, but a proxy or a captive portal answers 200 with a body
-    # that is not a release at all, and "described more than one release" would
-    # send the operator looking for a second release that does not exist.
+    # NONE AND UNPAIRABLE ARE SEPARATE MESSAGES. `curl --fail` rejects an HTTP error
+    # before this runs, but a proxy or a captive portal answers 200 with a body that
+    # is not a release at all, and the operator needs to be sent to the channel
+    # rather than to a second release that does not exist.
     tags=$(sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' "$document")
-    case "$(printf '%s' "$tags" | grep -c '^.' || true)" in
-        0) fail 'the release source did not name a release; check that the channel has a published release' ;;
-        1) ;;
-        *) fail 'the release source described more than one release' ;;
-    esac
-    release_tag=$tags
+    published=$(sed -n 's/.*"published_at": "\([^"]*\)".*/\1/p' "$document")
+    [ -n "$tags" ] || fail 'the release source named no release; check that the channel has a published release'
+    # THE LISTS GO IN THROUGH THE ENVIRONMENT, NOT `-v`. `-v` processes escape
+    # sequences in its value, so a multi-line list arrives broken and awk reports a
+    # newline inside a string — a failure about the mechanism rather than about the
+    # releases. ENVIRON is passed through verbatim.
+    release_tag=$(RELEASE_TAGS="$tags" RELEASE_TIMES="$published" awk 'BEGIN {
+        n = split(ENVIRON["RELEASE_TAGS"], T, "\n"); m = split(ENVIRON["RELEASE_TIMES"], P, "\n")
+        # A RELEASE WITHOUT A TIME CANNOT BE ORDERED, and guessing which one is
+        # newest is how an older build gets installed. The counts are compared
+        # first because a response where they differ is not a page of releases.
+        if (n != m || n == 0) exit 1
+        best = 1
+        for (i = 2; i <= n; i++) if (P[i] > P[best]) best = i
+        print T[best]
+    }') || fail 'the release source did not give a publication time for every release, so the newest cannot be chosen'
+    [ -n "$release_tag" ] || fail 'the release source named no release; check that the channel has a published release' 
 
-    urls=$(sed -n 's/.*"browser_download_url": "\([^"]*\)".*/\1/p' "$document")
-    [ -n "$urls" ] || fail 'the release source advertised no downloadable assets'
-
-    # ORIGIN FIRST, THEN NAMES. Every candidate has to address a download in this
-    # repository before any name is read out of it, so a document that points
-    # elsewhere yields nothing to select rather than something to fetch. The test
-    # is a LITERAL prefix (`index(...) == 1`) rather than a regex: the prefix
-    # contains dots that would match any character, and a lookalike host must not
-    # satisfy a check whose whole job is to pin the origin.
-    mine=$(printf '%s\n' "$urls" | awk -v prefix="$release_repository_prefix" 'index($0, prefix) == 1')
+    # ORIGIN FIRST, THEN THE RELEASE'S OWN NAME. Every candidate has to address a
+    # download in this repository before any name is read out of it, so a document
+    # that points elsewhere yields nothing to select rather than something to
+    # fetch. The test is a LITERAL prefix (`index(...) == 1`) rather than a regex:
+    # the prefix contains dots that would match any character, and a lookalike host
+    # must not satisfy a check whose whole job is to pin the origin.
+    all_urls=$(sed -n 's/.*"browser_download_url": "\([^"]*\)".*/\1/p' "$document")
+    [ -n "$all_urls" ] || fail 'the release source advertised no downloadable assets'
+    mine=$(printf '%s\n' "$all_urls" | awk -v prefix="$release_repository_prefix" 'index($0, prefix) == 1')
     [ -n "$mine" ] || fail 'the release source advertised no download from this repository'
+
+    # AND THEN TO THE CHOSEN RELEASE, BY ITS TAG. The page may describe several, and
+    # every asset's own address carries the tag it belongs to — so the same string
+    # that chose the release chooses its files, and one release's assets can no
+    # longer be paired with another's tag. A page with assets but none under this
+    # release is the tag and the addresses disagreeing about the identity, which
+    # deserves its own message rather than "no downloadable assets".
+    urls=$(printf '%s\n' "$mine" | awk -v prefix="$release_repository_prefix$release_tag/" 'index($0, prefix) == 1')
+    [ -n "$urls" ] || fail "release ${release_tag} does not address the assets it advertises"
 
     # THE ARCHIVE IS THE ONE CANONICAL NAME FOR THIS PLATFORM, AND ONLY ONE.
     # Missing and duplicated are both refusals. The name carries the version, so
     # the shape test admits EITHER scheme — a legacy version keeps its `v` prefix
     # and a product version is three integers — and that is a shape test on a
     # published file name, not the tag-to-version rule its publisher owns.
-    selected=$(printf '%s\n' "$mine" | awk -v arch="$want_arch" '
+    selected=$(printf '%s\n' "$urls" | awk -v arch="$want_arch" '
         {
             name = $0
             sub(/^.*\//, "", name)
@@ -207,14 +229,6 @@ resolve_release() {
     version=${selected%% *}
     release_archive_url=${selected#* }
 
-    # THE TAG MUST ADDRESS WHAT IT ADVERTISES. Nothing is fetched from the tag —
-    # it is the release's name for the operator — so a tag that disagrees with
-    # the address is a document describing something other than what it links to.
-    case "$release_archive_url" in
-        "${release_repository_prefix}${release_tag}/"*) ;;
-        *) fail "release ${release_tag} does not address the asset it advertises" ;;
-    esac
-
     # THE NAME THAT GETS VERIFIED IS THE NAME THAT WAS FOUND, and this is where
     # the two are made to be one string rather than assumed to be.
     case "$release_archive_url" in
@@ -223,7 +237,7 @@ resolve_release() {
     esac
 
     release_manifest_url=$(one_line 'the release must offer exactly one SHA256SUMS.txt' \
-        "$(printf '%s\n' "$mine" | grep '/SHA256SUMS\.txt$' || true)")
+        "$(printf '%s\n' "$urls" | grep '/SHA256SUMS\.txt$' || true)")
 }
 
 if [ "$source_mode" = offline ]; then
@@ -248,7 +262,7 @@ else
     # other release's assets in the document to be mixed up with it.
     case "$channel" in
         stable) releases_url=https://api.github.com/repos/KazuhaHub/Passwall-Node/releases/latest ;;
-        beta) releases_url='https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=1' ;;
+        beta) releases_url='https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=20' ;;
         *) fail 'PN_CHANNEL must be stable or beta' ;;
     esac
     curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
