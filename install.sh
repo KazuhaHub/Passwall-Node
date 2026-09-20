@@ -193,7 +193,7 @@ resolve_release() {
             # silently never matched, so the version came out with the file suffix
             # still attached and the installer refused a release that was fine.
             legacy  = "^passwall-node_v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?_linux_" arch "\\.tar\\.gz$"
-            product = "^passwall-node_(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)_linux_" arch "\\.tar\\.gz$"
+            product = "^passwall-node_(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(\\.(0|[1-9][0-9]*))?_linux_" arch "\\.tar\\.gz$"
             if (name ~ legacy || name ~ product) {
                 version = name
                 sub(/^passwall-node_/, "", version)

@@ -101,33 +101,42 @@ type Version struct {
 	Major int64
 	Minor int64
 	Patch int64
+	// Build is the optional fourth segment. ZERO MEANS ABSENT, which is why a
+	// literal trailing zero is refused: with it accepted, `1.2.3` and `1.2.3.0`
+	// would be two spellings of one version, and the whole point of a release
+	// identity is that one string names one release.
+	Build int64
 }
 
 // String renders the fixed three-segment form. Every published surface — UI, API
 // output, build version, archive names, Docker tags — uses this and nothing else.
 func (v Version) String() string {
+	if v.Build > 0 {
+		return fmt.Sprintf("%d.%d.%d.%d", v.Major, v.Minor, v.Patch, v.Build)
+	}
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
 // ParseProductVersion parses a product version.
 //
-// One to three segments, each a run of ASCII digits, missing trailing segments
-// padded with zero: "102" and "102.0" and "102.0.0" are the same version. A
-// fourth segment is REJECTED rather than truncated — the format has three, and
-// silently dropping a segment would accept an input from a format this build
-// does not understand. Leading zeros, signs, whitespace, non-ASCII digits and
-// scientific notation are all rejected for the same reason: the caller's input
-// is what it is, and guessing at a malformed version is how two sides end up
-// agreeing on a version neither was given.
+// One to FOUR segments, each a run of ASCII digits, missing trailing segments
+// padded with zero: "102", "102.0" and "102.0.0" are the same version, and
+// "102.0.0.1" is a fourth segment beyond them. A FIFTH is rejected rather than
+// truncated — silently dropping a segment would accept an input from a format this
+// build does not understand — and so is a literal zero fourth: see Version.Build
+// for why. Leading zeros, signs, whitespace, non-ASCII digits and scientific
+// notation are all rejected for the same reason: the caller's input is what it is,
+// and guessing at a malformed version is how two sides end up agreeing on a
+// version neither was given.
 func ParseProductVersion(s string) (Version, error) {
 	if s == "" {
 		return Version{}, fmt.Errorf("%w: empty", ErrUnknownFormat)
 	}
 	parts := strings.Split(s, ".")
-	if len(parts) > 3 {
-		return Version{}, fmt.Errorf("%w: %q has %d segments, the format has three", ErrUnknownFormat, s, len(parts))
+	if len(parts) > 4 {
+		return Version{}, fmt.Errorf("%w: %q has %d segments, the format has at most four", ErrUnknownFormat, s, len(parts))
 	}
-	var out [3]int64
+	var out [4]int64
 	for i, part := range parts {
 		n, err := parseSegment(part, s)
 		if err != nil {
@@ -135,7 +144,11 @@ func ParseProductVersion(s string) (Version, error) {
 		}
 		out[i] = n
 	}
-	return Version{Major: out[0], Minor: out[1], Patch: out[2]}, nil
+	if len(parts) == 4 && out[3] == 0 {
+		return Version{}, fmt.Errorf("%w: %q has a zero fourth segment, which is another way to write %d.%d.%d",
+			ErrUnknownFormat, s, out[0], out[1], out[2])
+	}
+	return Version{Major: out[0], Minor: out[1], Patch: out[2], Build: out[3]}, nil
 }
 
 func parseSegment(part, whole string) (int64, error) {
