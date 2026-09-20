@@ -25,6 +25,11 @@ func TestUpgradeAcceptsProductVersions(t *testing.T) {
 	if _, err := ParseArgs(upgradeTask(`{"version":"102.1.0","expected_version":"102.0.3"}`)); err != nil {
 		t.Fatalf("a product-version upgrade across a line was refused: %v", err)
 	}
+	// And with a fourth segment, which is a version like any other — the refusals
+	// below used to include it, and a format nobody accepts is not a format.
+	if _, err := ParseArgs(upgradeTask(`{"version":"4.0.0.1","expected_version":"4.0.0"}`)); err != nil {
+		t.Fatalf("a four-segment upgrade target was refused: %v", err)
+	}
 
 	// The refusals that must survive, restated for the product shape: same
 	// version, an older one, a non-canonical one, and a tag where a version
@@ -33,7 +38,8 @@ func TestUpgradeAcceptsProductVersions(t *testing.T) {
 		`{"version":"4.0.0","expected_version":"4.0.0"}`,
 		`{"version":"4.0.0","expected_version":"4.0.1"}`,
 		`{"version":"4.0","expected_version":"4.0.0"}`,
-		`{"version":"4.0.0.1","expected_version":"4.0.0"}`,
+		`{"version":"4.0.0.1.2","expected_version":"4.0.0"}`,
+		`{"version":"4.0.0.0","expected_version":"4.0.0"}`,
 		`{"version":"release/4.0.0","expected_version":"4.0.0"}`,
 		`{"version":"04.0.0","expected_version":"4.0.0"}`,
 		`{"version":"latest","expected_version":"4.0.0"}`,
@@ -75,12 +81,12 @@ func TestUpgradeVersionOrderForProductVersions(t *testing.T) {
 // version, and refusing a product one would make the managed-container upgrade
 // path unavailable for exactly the releases it is for.
 func TestDockerImageTagAcceptsProductVersions(t *testing.T) {
-	for _, value := range []string{"4.0.0", "102.1.0", "v0.0.1-beta11"} {
+	for _, value := range []string{"4.0.0", "4.0.0.1", "102.1.0", "v0.0.1-beta11"} {
 		if !deploymentVersion(value) {
 			t.Errorf("deploymentVersion(%q) = false, want true", value)
 		}
 	}
-	for _, value := range []string{"", "latest", "release/4.0.0", "4.0", "4.0.0.1", "main"} {
+	for _, value := range []string{"", "latest", "release/4.0.0", "4.0", "4.0.0.1.2", "4.0.0.0", "main"} {
 		if deploymentVersion(value) {
 			t.Errorf("deploymentVersion(%q) = true, want false", value)
 		}
