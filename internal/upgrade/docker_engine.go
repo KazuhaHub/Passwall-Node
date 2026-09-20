@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
+	"github.com/KazuhaHub/passwall-node/releaseid"
 )
 
 const dockerAPIVersion = "v1.41"
@@ -245,6 +245,9 @@ func (d *dockerHTTP) call(ctx context.Context, method, path string, body io.Read
 	return nil
 }
 
+// deploymentVersion is the version an image TAG is allowed to be. The exact tag
+// is the version, not the release tag — a tag containing a slash would be read
+// as a repository separator — so this is the version rule, in both schemes.
 func deploymentVersion(value string) bool {
-	return deployment.ValidReleaseVersion(value)
+	return releaseid.ValidVersion(value)
 }

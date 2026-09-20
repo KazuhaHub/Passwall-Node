@@ -5,6 +5,16 @@ name: Release
 on:
   push:
     tags:
+      # ONLY THE LEGACY SCHEME, FOR NOW, AND THAT IS DELIBERATE. The publish
+      # side already separates the tag from the version, so a product tag would
+      # build and publish correctly — but the PUBLIC installer resolves its
+      # version from the release's `tag_name`, so it cannot yet identify a
+      # product release and would fail on one that installed fine before.
+      #
+      # The migration plan sequences the bridge and channel work ahead of the
+      # first new tag for exactly this reason. Adding `release/*` here is the
+      # last step, not the first: deployment/release_identity_test.go fails and
+      # names this until it is true.
       - "v*"
   workflow_dispatch:
     inputs:
@@ -31,6 +41,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
       owner_lc: ${{ steps.identity.outputs.owner_lc }}
       sha: ${{ steps.identity.outputs.sha }}
       build_date: ${{ steps.identity.outputs.build_date }}
@@ -62,7 +73,25 @@ jobs:
           else
             tag="${GITHUB_REF_NAME}"
           fi
-          go run ./deployment/cmd/release-tag "$tag"
+          # THE TAG AND THE VERSION ARE DIFFERENT IDENTITIES, and this is where
+          # they are told apart. A product tag is `release/4.0.0` and its version
+          # is `4.0.0`; a legacy tag is both. The tag is what appears in a git
+          # ref and a download URL, the version is what goes into the build
+          # stamp, the archive name and the image tag. Using one for the other
+          # addresses a different release — for the product scheme, an image tag
+          # containing a slash is not an error, it is a DIFFERENT REPOSITORY.
+          #
+          # The command refuses an unpublishable tag and prints nothing on
+          # stdout when it does, so a failure here cannot leave `version` empty
+          # and be carried into a filename.
+          version=$(go run ./deployment/cmd/release-tag "$tag")
+          # Belt and braces: the command already refuses rather than printing
+          # nothing, but an empty version reaching ldflags or a filename is a
+          # silently wrong artifact rather than a failure.
+          test -n "$version" || {
+            echo 'the release tag produced no version' >&2
+            exit 1
+          }
           release_sha=$(git rev-parse --verify "refs/tags/${tag}^{commit}")
           if [ "$release_sha" != "$GITHUB_SHA" ]; then
             echo 'select the release tag ref; refusing to stamp a different checkout with this version' >&2
@@ -86,6 +115,7 @@ jobs:
           upgrade_contract=$(printf '%s' "$upgrade_info" | jq -er '.upgrade_contract | select(type == "number" and . > 0)')
           {
             echo "tag=${tag}"
+            echo "version=${version}"
             echo "owner_lc=${owner_lc}"
             echo "sha=${release_sha}"
             echo "build_date=${build_date}"
@@ -126,7 +156,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          VERSION: ${{ needs.setup.outputs.tag }}
+          VERSION: ${{ needs.setup.outputs.version }}
           COMMIT: ${{ needs.setup.outputs.sha }}
           BUILD_DATE: ${{ needs.setup.outputs.build_date }}
         run: |
@@ -178,7 +208,7 @@ jobs:
       - name: Package archives and checksums
         shell: bash
         env:
-          VERSION: ${{ needs.setup.outputs.tag }}
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p build dist
@@ -260,21 +290,26 @@ jobs:
         with:
           images: ghcr.io/${{ needs.setup.outputs.owner_lc }}/passwall-node
           tags: |
-            type=raw,value=${{ needs.setup.outputs.tag }}
+            # THE EXACT IMAGE TAG IS THE VERSION, NOT THE GIT TAG. A product tag
+            # contains a slash, and a slash in a Docker tag is not rejected — it
+            # is read as a REPOSITORY separator, so `passwall-node:release/4.0.0`
+            # addresses a repository named `passwall-node/release`. The build
+            # would succeed and push to somewhere nobody is watching.
+            type=raw,value=${{ needs.setup.outputs.version }}
             type=raw,value=latest,enable=${{ startsWith(needs.setup.outputs.tag, 'v') && !contains(needs.setup.outputs.tag, '-') }}
             type=raw,value=beta,enable=${{ startsWith(needs.setup.outputs.tag, 'v') }}
           labels: |
             org.opencontainers.image.title=passwall-node
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.setup.outputs.sha }}
-            org.opencontainers.image.version=${{ needs.setup.outputs.tag }}
+            org.opencontainers.image.version=${{ needs.setup.outputs.version }}
             org.opencontainers.image.licenses=Apache-2.0
             io.kazuhahub.passwall-node.state-schema=${{ needs.setup.outputs.state_schema }}
             io.kazuhahub.passwall-node.upgrade-contract=${{ needs.setup.outputs.upgrade_contract }}
       - name: Refuse an already published exact image tag
         env:
           IMAGE_REPOSITORY: ${{ needs.setup.outputs.owner_lc }}/passwall-node
-          RELEASE_VERSION: ${{ needs.setup.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.setup.outputs.version }}
         run: node deployment/check-image.mjs "$IMAGE_REPOSITORY" "$RELEASE_VERSION"
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
@@ -286,7 +321,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ needs.setup.outputs.tag }}
+            VERSION=${{ needs.setup.outputs.version }}
             STATE_SCHEMA=${{ needs.setup.outputs.state_schema }}
             UPGRADE_CONTRACT=${{ needs.setup.outputs.upgrade_contract }}
           provenance: false
