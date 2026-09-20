@@ -72,19 +72,19 @@ func TestTheReleaseWorkflowKeepsTheTagAndTheVersionApart(t *testing.T) {
 	}
 }
 
-// THE TAG TRIGGER AND THE PUBLICATION SCHEME ARE NOW IN SYNC, which is what the
-// previous version of this test was waiting for. It asserted the ABSENCE of
-// `release/*`, because triggering before the installers could identify a product
-// release would let a tag be pushed that produces artifacts the public installer
-// cannot install.
+// THE TRIGGER AND THE PUBLICATION SCHEME ARE THE SAME DECISION, AND IT WENT THE
+// OTHER WAY.
 //
-// The installers can identify one now: the public installer takes the version out
-// of the asset name and the address out of the release document rather than
-// deriving either from the tag. So this is REWRITTEN to require the pattern
-// rather than deleted — the absence was a decision with a condition attached, and
-// the condition is met rather than waived. A reader who deletes this instead of
-// rewriting it loses the note that says what the condition was.
-func TestTheNodeReleaseWorkflowTriggersOnBothTagSchemes(t *testing.T) {
+// This test used to require BOTH patterns, and before that it asserted the
+// ABSENCE of `release/*` until the installers could identify a product release.
+// Now it requires that one and REFUSES the other: the scheme a trigger accepts is
+// the scheme the products publish, and a workflow that still triggers on a
+// v-prefixed tag is a way to cut a release the panel cannot read.
+//
+// A reader who deletes this instead of inverting it loses both halves of that
+// history — that the absence was a decision with a condition attached, and that
+// the condition has now moved to the other pattern.
+func TestTheNodeReleaseWorkflowTriggersOnTheCurrentSchemeOnly(t *testing.T) {
 	// Only release.yml triggers on tags. The acceptance workflows are
 	// dispatch-only: they are pointed at a published tag ref by hand, which is
 	// why they need no trigger and why they take the tag as an input.
@@ -93,17 +93,17 @@ func TestTheNodeReleaseWorkflowTriggersOnBothTagSchemes(t *testing.T) {
 		t.Fatal(err)
 	}
 	patterns := triggerTagPatterns(string(workflow))
-	for _, required := range []string{"v*", "release/*"} {
-		found := false
-		for _, pattern := range patterns {
-			if pattern == required {
-				found = true
-				break
-			}
+	found := false
+	for _, pattern := range patterns {
+		if pattern == "v*" {
+			t.Fatalf("the release workflow still triggers on a v-prefixed tag (found %v). A tag it does trigger on is a release it will publish, and this project no longer publishes that scheme", patterns)
 		}
-		if !found {
-			t.Fatalf("the release workflow does not trigger on %s (found %v). A tag it does not trigger on is a release that does not happen: no run, no artifact, and a tag that names nothing", required, patterns)
+		if pattern == "release/*" {
+			found = true
 		}
+	}
+	if !found {
+		t.Fatalf("the release workflow does not trigger on release/* (found %v). A tag it does not trigger on is a release that does not happen: no run, no artifact, and a tag that names nothing", patterns)
 	}
 }
 

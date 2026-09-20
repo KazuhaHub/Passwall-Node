@@ -164,7 +164,7 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           set -eu
-          for node_version in v1.0.0 v1.1.0 v1.2.0; do
+          for node_version in 4.0.0 4.0.1 4.0.2; do
             go build -trimpath -ldflags="-s -w -X github.com/KazuhaHub/passwall-node/internal/version.Version=$node_version -X github.com/KazuhaHub/passwall-node/internal/version.Commit=abcdef1234567" \
               -o "$RUNNER_TEMP/passwall-node-e2e-$node_version" ./cmd/node
             test "$("$RUNNER_TEMP/passwall-node-e2e-$node_version" --version)" = "$node_version (abcdef1234567)"
@@ -176,9 +176,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export PN_E2E_OLD_BINARY="$RUNNER_TEMP/passwall-node-e2e-v1.0.0"
-          export PN_E2E_NEW_BINARY="$RUNNER_TEMP/passwall-node-e2e-v1.1.0"
-          export PN_E2E_FAIL_BINARY="$RUNNER_TEMP/passwall-node-e2e-v1.2.0"
+          export PN_E2E_OLD_BINARY="$RUNNER_TEMP/passwall-node-e2e-4.0.0"
+          export PN_E2E_NEW_BINARY="$RUNNER_TEMP/passwall-node-e2e-4.0.1"
+          export PN_E2E_FAIL_BINARY="$RUNNER_TEMP/passwall-node-e2e-4.0.2"
           export PN_E2E_SOURCE_DIR="$GITHUB_WORKSPACE"
           go test -v ./internal/upgrade -run '^TestUpgradeSystemdRealNodeE2E$' -count=1 -timeout=12m | tee "$RUNNER_TEMP/upgrade-node-e2e-tests.log"
           ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/upgrade-node-e2e-tests.log"

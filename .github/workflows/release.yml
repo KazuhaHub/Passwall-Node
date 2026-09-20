@@ -20,12 +20,15 @@ on:
       # the tag. That is the condition this trigger was waiting on, and
       # deployment/release_identity_test.go was rewritten to REQUIRE the pattern
       # in the same change rather than deleted.
-      - "v*"
+      #
+      # THE HISTORICAL TRIGGER IS GONE WITH THE SCHEME. It accepted a v-prefixed
+      # tag until the products stopped publishing one; a workflow that can still
+      # publish under it is a way to make a release the panel cannot read.
       - "release/*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v1.0.0"
+        description: "Release tag, for example release/4.0.0"
         required: true
         type: string
       channel:

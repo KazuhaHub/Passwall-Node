@@ -31,20 +31,20 @@ func TestAllocatingTheNextPatchOnALine(t *testing.T) {
 			want:     "4.0.4",
 		},
 		{
-			name: "a gap below the highest is not filled",
-			line: "4.0",
+			name:     "a gap below the highest is not filled",
+			line:     "4.0",
 			existing: []string{"release/4.0.0", "release/4.0.1", "release/4.0.5"},
 			want:     "4.0.6",
 		},
 		{
-			name: "other lines do not take part",
-			line: "4.0",
+			name:     "other lines do not take part",
+			line:     "4.0",
 			existing: []string{"release/4.0.0", "release/4.1.0", "release/4.1.9", "release/5.0.0"},
 			want:     "4.0.1",
 		},
 		{
-			name: "a tag that is not a release tag is ignored",
-			line: "4.0",
+			name:     "a tag that is not a release tag is ignored",
+			line:     "4.0",
 			existing: []string{"release/4.0.0", "nightly", "docs-2026", "v4.1.0"},
 			want:     "4.0.1",
 		},
@@ -153,18 +153,18 @@ func TestResumingTheNumberAlreadyBoundToThisSourceRevision(t *testing.T) {
 		found    bool
 	}{
 		{
-			name: "its own product tag",
+			name:     "its own product tag",
 			onCommit: []string{"release/4.0.3", "unrelated"}, want: "release/4.0.3", found: true,
 		},
 		{
-			name: "a tag on another line is not this release",
+			name:     "a tag on another line is not this release",
 			onCommit: []string{"release/4.1.0"},
 		},
 		{
 			// A STRING THAT IS NOT ONE OF OUR TAGS NAMES NO RELEASE, so it is not
 			// this one. This used to read "the other scheme's tag", which was the
 			// same case while there was another scheme.
-			name: "a string that names no release is not this release",
+			name:     "a string that names no release is not this release",
 			onCommit: []string{"nightly", "v4.0.7"},
 		},
 		{
