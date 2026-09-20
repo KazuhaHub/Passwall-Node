@@ -42,8 +42,11 @@ func TestTheReleaseChannelResolution(t *testing.T) {
 		prerelease bool
 		images     bool
 	}{
-		// The scheme this project publishes today.
-		{"legacy stable", "v1.0.0", "auto", false, true},
+		// THE DEFAULT IS A PRE-RELEASE, INCLUDING FOR A PLAIN LEGACY TAG. It used
+		// to be stable for `v1.0.0`, which made a v-tag the one publishable mistake
+		// with an unrecoverable half: it moves a pointer consumers follow.
+		// Publishing stable is now something a maintainer states.
+		{"legacy plain tag", "v1.0.0", "auto", true, true},
 		{"legacy beta", "v0.0.1-beta11", "auto", true, true},
 		{"legacy rc", "v1.0.0-rc1", "auto", true, true},
 		// The scheme it is moving to. A tag with no hyphen is NOT stable by

@@ -132,8 +132,10 @@ func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
 		"id: channel",
 		"prerelease: ${{ steps.channel.outputs.prerelease }}",
 		"prerelease: ${{ needs.setup.outputs.prerelease }}",
-		// The recoverable direction for a tag in neither scheme.
-		"*)    prerelease=true ;;",
+		// THE DEFAULT IS THE RECOVERABLE DIRECTION, AND IT IS NOW THE DEFAULT FOR
+		// EVERY TAG. The arm that made a plain `v*` stable is gone; `stable` is
+		// reachable only through the stated channel input above it.
+		"auto)    prerelease=true ;;",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("the channel is not resolved once and shared: %s", required)
