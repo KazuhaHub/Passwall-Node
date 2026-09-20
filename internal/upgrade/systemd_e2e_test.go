@@ -312,7 +312,16 @@ func (f *nodeE2E) install() error {
 			return err
 		}
 	}
-	gate := "#!/bin/sh\nset -eu\n[ \"$(/usr/bin/cat /opt/passwall-node/config/version)\" != 4.1.4 ]\n"
+	// THE GATE IS WHAT MAKES THE FAILING ARTIFACT FAIL: it refuses to start unless
+	// the version it names is NOT the on-disk one, so a candidate carrying that
+	// version cannot come up and the helper has to roll back.
+	//
+	// A LITERAL HERE IS A SECOND SPELLING OF f.failVersion, and it drifted once:
+	// the two were moved to product versions by separate edits, the gate kept a
+	// version the fail artifact no longer carried, and the "failing" candidate
+	// started cleanly — so the leg that exists to prove a rollback passed by
+	// installing the release it was supposed to reject.
+	gate := fmt.Sprintf("#!/bin/sh\nset -eu\n[ \"$(/usr/bin/cat /opt/passwall-node/config/version)\" != %s ]\n", f.failVersion)
 	if err := os.WriteFile(filepath.Join(InstallRoot, "startup-gate"), []byte(gate), 0755); err != nil {
 		return err
 	}
