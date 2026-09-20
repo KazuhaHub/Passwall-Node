@@ -177,17 +177,17 @@ func TestItAllocatesTheNextPatchAndCreatesTheTag(t *testing.T) {
 	head := repo.commit(t, "second")
 
 	// A NEW COMMIT, so this is a new release rather than a rerun of 4.0.0.
-	if got := repo.tagSHA(t, "release/4.0.1"); got != "" {
+	if got := repo.tagSHA(t, "release/4.0.0.1"); got != "" {
 		t.Fatalf("the tag already existed: %s", got)
 	}
 	tag, stderr, err := repo.allocate(t, "4.0")
 	if err != nil {
 		t.Fatalf("allocate: %v\n%s", err, stderr)
 	}
-	if tag != "release/4.0.1" {
-		t.Fatalf("tag = %q, want release/4.0.1", tag)
+	if tag != "release/4.0.0.1" {
+		t.Fatalf("tag = %q, want release/4.0.0.1", tag)
 	}
-	if got := repo.tagSHA(t, "release/4.0.1"); got != head {
+	if got := repo.tagSHA(t, "release/4.0.0.1"); got != head {
 		t.Fatalf("the tag was not created on the released revision: %s vs %s", got, head)
 	}
 }
@@ -341,10 +341,10 @@ func TestALostRaceReReadsRatherThanOverwriting(t *testing.T) {
 	}
 	// The number the first attempt wanted is now taken, so the second attempt must
 	// have moved past it rather than taken it back.
-	if tag != "release/4.0.2" {
-		t.Fatalf("tag = %q, want release/4.0.2 — the taken number must not be reused (stderr: %s)", tag, stderr)
+	if tag != "release/4.0.0.2" {
+		t.Fatalf("tag = %q, want release/4.0.0.2 — the taken number must not be reused (stderr: %s)", tag, stderr)
 	}
-	if got := repo.tagSHA(t, "release/4.0.1"); got != thief {
+	if got := repo.tagSHA(t, "release/4.0.0.1"); got != thief {
 		t.Fatalf("the tag the other revision took was moved to %s; a number bound to a revision stays bound", got)
 	}
 	if got := repo.tagSHA(t, tag); got != head {

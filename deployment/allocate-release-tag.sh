@@ -38,8 +38,9 @@ tags_on_this_commit() {
 
 attempt=0
 while [ "$attempt" -lt "$max_attempts" ]; do
-  # A NUMBER ALREADY BOUND TO THIS REVISION IS RESUMED; otherwise the next patch on
-  # the line is allocated. Both are one command, because "resume or allocate" is
+  # A NUMBER ALREADY BOUND TO THIS REVISION IS RESUMED; otherwise the next number
+  # on the line is allocated — an INCREMENTAL FIX takes the build segment
+  # (4.1.0.1, 4.1.0.2), and the patch advances only when somebody names one. Both are one command, because "resume or allocate" is
   # one decision and splitting it would be a second place knowing the rule.
   tag=$(go run ./deployment/cmd/allocate-release-tag \
     -line "$line" \
