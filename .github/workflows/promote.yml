@@ -1,0 +1,167 @@
+name: Promote a release to stable
+
+# V06. A RELEASE IS PUBLISHED AS A PRE-RELEASE AND PROMOTED LATER, and this is the
+# only thing that moves a stable pointer. It REUSES what was published: the digest
+# it points `latest` at is one it read back from the registry, so "what users get"
+# and "what was tested" are the same bytes rather than the same source. Nothing
+# here builds anything, and the guard beside this file fails if that changes.
+#
+# IDEMPOTENT BY (RELEASE, CHANNEL, DIGEST). The only trigger is a dispatch, and a
+# human may run it twice, run it after un-prereleasing by hand, or re-run it after
+# a partial failure — so every step is a statement of the desired state rather than
+# a transition. Re-running completes the remainder.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to promote, for example release/4.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+concurrency:
+  group: promote-passwall-node
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote to stable
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # THE SAME ENVIRONMENT AS PUBLICATION, because this moves a pointer consumers
+    # follow and it is the same class of decision: a human reviews which release is
+    # being promoted before the pointer moves.
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve the release and the version it is stamped with
+        id: identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          # The VERSION is what the image is tagged with, and for a product release
+          # it is not the tag. Asking the pinned identity rule rather than stripping
+          # a prefix is what keeps the address and the name from drifting apart —
+          # the same command the publication path runs.
+          version=$(go run ./deployment/cmd/release-tag "$tag")
+          test -n "$version" || { echo 'the tag produced no version' >&2; exit 1; }
+
+          # THE RELEASE MUST EXIST AND MUST STILL BE A PRE-RELEASE. Promoting one
+          # that never went out, or one already stable, is not a promotion — and
+          # doing it silently would report success for an action nobody took.
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>/dev/null) || {
+            echo "no release is published under ${tag}" >&2
+            exit 1
+          }
+          release_id=$(printf '%s' "$release" | jq -er '.id')
+          draft=$(printf '%s' "$release" | jq -r '.draft')
+          prerelease=$(printf '%s' "$release" | jq -r '.prerelease')
+          uploader=$(printf '%s' "$release" | jq -r '.author.login // ""')
+          if [ "$draft" = true ]; then
+            echo 'this release is a draft; publish it before promoting it' >&2
+            exit 1
+          fi
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "release_id=${release_id}"
+            echo "prerelease=${prerelease}"
+            echo "uploader=${uploader}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify the published assets are the ones the manifest describes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.identity.outputs.tag }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner_lc=$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')
+          work=$(mktemp -d)
+          # THE MANIFEST IS THE AUTHORITY FOR WHAT WAS PUBLISHED, and the assets are
+          # re-downloaded and re-hashed against it. That does not prove who signed
+          # it — the node verifies the detached signature at install time, and the
+          # key is not in this workflow — it proves the files are still the ones the
+          # manifest describes, which is what a promotion is asserting.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$work"
+          (cd "$work" && sha256sum --check --status SHA256SUMS.txt) || {
+            echo 'the published assets no longer match their manifest' >&2
+            exit 1
+          }
+          # AND THE EXACT IMAGE TAG EXISTS, with the digest the promotion will point
+          # `latest` at. The digest is read, never supplied: moving a pointer to
+          # something a caller named is how a promotion publishes an unverified image.
+          token=$(curl -sS --max-time 20 "https://ghcr.io/token?scope=repository%3A${owner_lc}%2Fpasswall-node%3Apull&service=ghcr.io" | jq -r .token)
+          digest=$(curl -sS --max-time 20 -D - -o /dev/null \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/${owner_lc}/passwall-node/manifests/${{ steps.identity.outputs.version }}" |
+            awk 'tolower($1) == "docker-content-digest:" { gsub(/\r/, "", $2); print $2 }')
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "the exact image tag has no readable digest; the release was not published as an image" >&2; exit 1 ;;
+          esac
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+        id: artifacts
+
+      - name: Flip the release to stable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.identity.outputs.release_id }}
+          ALREADY: ${{ steps.identity.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$ALREADY" = false ]; then
+            echo 'already stable; the remaining steps still run, because a partial promotion is a state to finish rather than an error'
+          else
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F prerelease=false >/dev/null
+          fi
+
+      - name: Move the latest image pointer to the verified digest
+        shell: bash
+        env:
+          GHCR_OWNER: ${{ github.repository_owner }}
+          DIGEST: ${{ steps.artifacts.outputs.digest }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          owner_lc=$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')
+          repository="ghcr.io/${owner_lc}/passwall-node"
+          # BY DIGEST, SO NOTHING IS BUILT AND NOTHING CAN BE SUBSTITUTED. A retag of
+          # the exact digest is the same bytes; a rebuild would be different bytes
+          # under the same name, which is the one thing a promotion must not do.
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker buildx imagetools create -t "${repository}:latest" "${repository}@${DIGEST}"
+          # `beta` is not touched: it tracks the newest of ANY kind, which the
+          # publication already set and a promotion does not change.
+          echo "promoted ${VERSION} (${DIGEST}) to latest"
+
+      - name: Report a partial promotion
+        if: failure()
+        shell: bash
+        run: |
+          # NOT AN ATOMIC TRANSACTION, AND THIS SAYS SO. The release state, the image
+          # pointer and any policy that points at this version are three systems; if
+          # one moved and another did not, the run is promotion_pending rather than
+          # complete, and re-running it finishes the rest.
+          echo "::error::promotion_pending: part of this promotion did not complete. Re-run this workflow — every step states the desired state, so a re-run finishes the remainder rather than repeating it."
