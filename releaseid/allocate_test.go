@@ -20,32 +20,31 @@ func TestAllocatingTheNextPatchOnALine(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		line     string
-		scheme   releaseid.Scheme
 		existing []string
 		want     string
 	}{
 		{
 			name: "one above the highest, not the first free",
-			line: "4.0", scheme: releaseid.SchemeProduct,
+			line: "4.0",
 			// 4.0.1 and 4.0.2 failed and left gaps. 4.0.3 is next, NOT 4.0.1.
 			existing: []string{"release/4.0.0", "release/4.0.3"},
 			want:     "4.0.4",
 		},
 		{
 			name: "a gap below the highest is not filled",
-			line: "4.0", scheme: releaseid.SchemeProduct,
+			line: "4.0",
 			existing: []string{"release/4.0.0", "release/4.0.1", "release/4.0.5"},
 			want:     "4.0.6",
 		},
 		{
 			name: "other lines do not take part",
-			line: "4.0", scheme: releaseid.SchemeProduct,
+			line: "4.0",
 			existing: []string{"release/4.0.0", "release/4.1.0", "release/4.1.9", "release/5.0.0"},
 			want:     "4.0.1",
 		},
 		{
 			name: "a tag that is not a release tag is ignored",
-			line: "4.0", scheme: releaseid.SchemeProduct,
+			line: "4.0",
 			existing: []string{"release/4.0.0", "nightly", "docs-2026", "v4.1.0"},
 			want:     "4.0.1",
 		},
@@ -55,7 +54,7 @@ func TestAllocatingTheNextPatchOnALine(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := releaseid.AllocatePatch(line, tc.scheme, tc.existing)
+			got, err := releaseid.AllocatePatch(line, tc.existing)
 			if err != nil {
 				t.Fatalf("AllocatePatch(%s): %v", tc.line, err)
 			}
@@ -86,25 +85,13 @@ func TestAllocatingRefusesWhatItCannotKnow(t *testing.T) {
 			wantNamed: []string{"4.0"},
 			why:       "the first version of a line is a decision, not an increment",
 		},
-		{
-			name: "a line whose numbers were used by the other scheme",
-			line: "4.0",
-			// BOTH SCHEMES ON ONE LINE is the migration itself, and the plan's
-			// rule is that a number is bound to one release. Two tags carrying the
-			// same product version are two releases a consumer cannot tell apart,
-			// so this is refused rather than resolved by preference — and the tag
-			// that makes it ambiguous is what has to be named.
-			existing:  []string{"v4.0.0", "release/4.0.1"},
-			wantNamed: []string{"v4.0.0"},
-			why:       "one number, one release",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			line, err := releaseid.ParseReleaseLine(tc.line)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := releaseid.AllocatePatch(line, releaseid.SchemeProduct, tc.existing)
+			got, err := releaseid.AllocatePatch(line, tc.existing)
 			if err == nil {
 				t.Fatalf("AllocatePatch = %s, want a refusal — %s", got, tc.why)
 			}
@@ -125,7 +112,7 @@ func TestAllocatingRefusesPastTheSegmentCeiling(t *testing.T) {
 		t.Fatal(err)
 	}
 	atCeiling := "release/4.0." + strconv.FormatInt(releaseid.MaxSegment, 10)
-	_, err = releaseid.AllocatePatch(line, releaseid.SchemeProduct, []string{atCeiling})
+	_, err = releaseid.AllocatePatch(line, []string{atCeiling})
 	if err == nil {
 		t.Fatal("allocation past the ceiling was accepted")
 	}
@@ -161,33 +148,31 @@ func TestResumingTheNumberAlreadyBoundToThisSourceRevision(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name     string
-		scheme   releaseid.Scheme
 		onCommit []string
 		want     string
 		found    bool
 	}{
 		{
-			name: "its own product tag", scheme: releaseid.SchemeProduct,
+			name: "its own product tag",
 			onCommit: []string{"release/4.0.3", "unrelated"}, want: "release/4.0.3", found: true,
 		},
 		{
-			name: "its own legacy tag", scheme: releaseid.SchemeLegacy,
-			onCommit: []string{"v4.0.7"}, want: "v4.0.7", found: true,
+			name: "a tag on another line is not this release",
+			onCommit: []string{"release/4.1.0"},
 		},
 		{
-			name: "a tag on another line is not this release", scheme: releaseid.SchemeProduct,
-			onCommit: []string{"release/4.1.0", "v4.0.7"},
+			// A STRING THAT IS NOT ONE OF OUR TAGS NAMES NO RELEASE, so it is not
+			// this one. This used to read "the other scheme's tag", which was the
+			// same case while there was another scheme.
+			name: "a string that names no release is not this release",
+			onCommit: []string{"nightly", "v4.0.7"},
 		},
 		{
-			name: "the other scheme's tag is not this release", scheme: releaseid.SchemeProduct,
-			onCommit: []string{"v4.0.7"},
-		},
-		{
-			name: "nothing on the commit", scheme: releaseid.SchemeProduct, onCommit: nil,
+			name: "nothing on the commit", onCommit: nil,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tag, err := releaseid.ResumeTag(line, tc.scheme, tc.onCommit)
+			tag, err := releaseid.ResumeTag(line, tc.onCommit)
 			if tc.found {
 				if err != nil || tag.Raw != tc.want {
 					t.Fatalf("ResumeTag = %q, %v; want %q", tag.Raw, err, tc.want)
@@ -204,41 +189,24 @@ func TestResumingTheNumberAlreadyBoundToThisSourceRevision(t *testing.T) {
 	}
 }
 
-// TWO TAGS ON ONE COMMIT ON THE SAME LINE AND SCHEME IS AMBIGUOUS, and picking one
+// TWO TAGS ON ONE COMMIT ON THE SAME LINE IS AMBIGUOUS, and picking one
 // would be this function choosing which of somebody's releases does not count.
 func TestResumingRefusesAnAmbiguousCommit(t *testing.T) {
 	line, err := releaseid.ParseReleaseLine("4.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	tag, err := releaseid.ResumeTag(line, releaseid.SchemeProduct, []string{"release/4.0.1", "release/4.0.2"})
+	tag, err := releaseid.ResumeTag(line, []string{"release/4.0.1", "release/4.0.2"})
 	if !errors.Is(err, releaseid.ErrAmbiguousRevision) {
 		t.Fatalf("ResumeTag = %q, %v; want ErrAmbiguousRevision", tag.Raw, err)
 	}
 }
 
-// THE LEGACY LINE IS NOT ALLOCATED, and the reason is a wrong answer rather than
-// a missing one.
+// THE ALLOCATOR HAS NO LEGACY LINE TO REFUSE ANY MORE.
 //
-// A legacy release is `vMAJOR.MINOR.PATCH-betaN`, and the beta counter is an axis
-// this allocator does not model: asked for the next number on the 0.0 line it
-// finds patch 1 and answers 0.0.2, which is a plausible-looking version that the
-// caller would tag `v0.0.2` — a NEW PATCH, not the next beta of the one that
-// exists. Nothing in the answer says it was the wrong question.
-//
-// The product scheme is what this allocator is for: three integers, a patch
-// increment, and the migration's next release. The legacy line is being retired,
-// and a change on it is a maintainer's decision rather than an increment.
-func TestAllocatingRefusesTheLegacyLine(t *testing.T) {
-	line, err := releaseid.ParseReleaseLine("0.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := releaseid.AllocatePatch(line, releaseid.SchemeLegacy, []string{"v0.0.1-beta11"})
-	if err == nil {
-		t.Fatalf("AllocatePatch on the legacy line = %s; the caller would tag v%s, which is a new patch rather than the next beta", got, got)
-	}
-	if !strings.Contains(err.Error(), "beta") && !strings.Contains(err.Error(), "prerelease") {
-		t.Fatalf("the refusal must name what it cannot model: %v", err)
-	}
-}
+// A test used to sit here asserting that it refused one, and the reason was a
+// wrong answer rather than a missing one: a legacy release carries a prerelease
+// counter (vMAJOR.MINOR.PATCH-betaN) that this does not model, so a patch
+// increment there named a new patch instead of the next beta. The scheme is gone,
+// and with it the line — a tag of that shape is now simply a string this cannot
+// read, which the cases above already cover.

@@ -16,7 +16,7 @@ func (f dockerRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, e
 }
 
 func TestDockerCreateReplacementPreservesRuntimeConfigAndUsesExactImage(t *testing.T) {
-	oldConfig := json.RawMessage(`{"Image":"ghcr.io/kazuhahub/passwall-node:beta","Env":["A=B"],"Labels":{"custom":"kept","org.opencontainers.image.version":"v1.0.0"},"Entrypoint":["/entrypoint"],"Cmd":["node"]}`)
+	oldConfig := json.RawMessage(`{"Image":"ghcr.io/kazuhahub/passwall-node:beta","Env":["A=B"],"Labels":{"custom":"kept","org.opencontainers.image.version":"4.1.0"},"Entrypoint":["/entrypoint"],"Cmd":["node"]}`)
 	oldHost := json.RawMessage(`{"NetworkMode":"host","ReadonlyRootfs":true,"Binds":["data:/var/lib/passwall-node"]}`)
 	old := dockerContainer{Config: oldConfig, HostConfig: oldHost}
 	image := dockerImage{}
@@ -71,8 +71,8 @@ func TestDockerPullRequiresOfficialExactRelease(t *testing.T) {
 	for _, reference := range []string{
 		DockerImageRepository + ":latest",
 		DockerImageRepository + ":beta",
-		"docker.io/foreign/passwall-node:v1.0.0",
-		DockerImageRepository + ":v1.0.0/foreign",
+		"docker.io/foreign/passwall-node:4.1.0",
+		DockerImageRepository + ":4.1.0/foreign",
 	} {
 		if err := client.PullImage(context.Background(), reference); err == nil {
 			t.Fatalf("PullImage(%q) succeeded", reference)
@@ -80,4 +80,4 @@ func TestDockerPullRequiresOfficialExactRelease(t *testing.T) {
 	}
 }
 
-const targetDockerVersion = "v1.1.0"
+const targetDockerVersion = "4.1.3"

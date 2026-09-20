@@ -44,8 +44,8 @@ func TestUpgradeAcceptsProductVersions(t *testing.T) {
 		`{"version":"04.0.0","expected_version":"4.0.0"}`,
 		`{"version":"latest","expected_version":"4.0.0"}`,
 		// And the historical refusals, which are not being relaxed.
-		`{"version":"v1.0.0-beta.1","expected_version":"v1.0.0"}`,
-		`{"version":"v1.0.1-01","expected_version":"v1.0.0"}`,
+		`{"version":"4.0.6","expected_version":"4.1.0"}`,
+		`{"version":"4.1.1-01","expected_version":"4.1.0"}`,
 	} {
 		if _, err := ParseArgs(upgradeTask(input)); err == nil {
 			t.Fatalf("accepted %s", input)
@@ -81,7 +81,7 @@ func TestUpgradeVersionOrderForProductVersions(t *testing.T) {
 // version, and refusing a product one would make the managed-container upgrade
 // path unavailable for exactly the releases it is for.
 func TestDockerImageTagAcceptsProductVersions(t *testing.T) {
-	for _, value := range []string{"4.0.0", "4.0.0.1", "102.1.0", "v0.0.1-beta11"} {
+	for _, value := range []string{"4.0.0", "4.0.0.1", "102.1.0", "4.0.2"} {
 		if !deploymentVersion(value) {
 			t.Errorf("deploymentVersion(%q) = false, want true", value)
 		}

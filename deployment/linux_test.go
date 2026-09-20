@@ -17,11 +17,11 @@ import (
 )
 
 func installationOptions() Options {
-	return Options{Endpoint: "https://panel.example/psp/v1/node/sync", AgentID: "agt_node-1", Credential: "pspn_" + strings.Repeat("a", 40), Version: "v1.2.3-rc.1"}
+	return Options{Endpoint: "https://panel.example/psp/v1/node/sync", AgentID: "agt_node-1", Credential: "pspn_" + strings.Repeat("a", 40), Version: "4.1.0"}
 }
 
 func TestRenderLinuxValidation(t *testing.T) {
-	for _, version := range []string{"v0.0.0", "v1.2.3", "v1.2.3-beta.0", "v1.2.3-0a", "v1.2.3-a-b"} {
+	for _, version := range []string{"4.0.0", "4.1.0", "4.1.0.1", "102.1.0"} {
 		o := installationOptions()
 		o.Version = version
 		if _, err := RenderLinux(o); err != nil {
@@ -33,11 +33,17 @@ func TestRenderLinuxValidation(t *testing.T) {
 		edit func(*Options)
 	}{
 		{"latest", func(o *Options) { o.Version = "latest" }},
-		{"missing-v", func(o *Options) { o.Version = "1.2.3" }},
-		{"leading-zero", func(o *Options) { o.Version = "v01.2.3" }},
-		{"numeric-prerelease-leading-zero", func(o *Options) { o.Version = "v1.2.3-rc.01" }},
-		{"build-metadata", func(o *Options) { o.Version = "v1.2.3+build" }},
-		{"version-injection", func(o *Options) { o.Version = "v1.2.3;touch /tmp/bad" }},
+		// THE HISTORY THAT MADE THE v REQUIRED. An installer that took one built a
+		// download URL out of a version that was not the path its release lived at;
+		// it takes the tag separately now, and a v-prefixed string is the shape this
+		// project no longer publishes.
+		{"legacy-tag", func(o *Options) { o.Version = "v1.2.3" }},
+		{"legacy-prerelease", func(o *Options) { o.Version = "v0.0.1-beta11" }},
+		{"leading-zero", func(o *Options) { o.Version = "01.2.3" }},
+		{"prerelease", func(o *Options) { o.Version = "4.1.0-rc.1" }},
+		{"build-metadata", func(o *Options) { o.Version = "4.1.0+build" }},
+		{"version-injection", func(o *Options) { o.Version = "4.1.0;touch /tmp/bad" }},
+		{"short-form", func(o *Options) { o.Version = "4.1" }},
 		{"http", func(o *Options) { o.Endpoint = "http://panel.example/v1/node/sync" }},
 		{"query", func(o *Options) { o.Endpoint += "?token=secret" }},
 		{"fragment", func(o *Options) { o.Endpoint += "#fragment" }},
@@ -410,7 +416,10 @@ func TestLinuxInstallPreservesIdentityAndStateOnRerun(t *testing.T) {
 		t.Fatal("installation did not download exactly the pinned archive and checksums")
 	}
 	network, _ := os.ReadFile(filepath.Join(f.dir, "network.log"))
-	for _, required := range []string{"--proto =https", "--proto-redir =https", "--tlsv1.2", "--connect-timeout 15", "--max-time", "https://github.com/KazuhaHub/Passwall-Node/releases/download/" + f.options.Version + "/"} {
+	for _, required := range []string{"--proto =https", "--proto-redir =https", "--tlsv1.2", "--connect-timeout 15", "--max-time", // THE TAG IS THE PATH AND THE VERSION NAMES THE ASSET. A legacy release
+		// was addressed by its version; this one is not, and building the path
+		// from the version is what the template was changed to stop doing.
+		"https://github.com/KazuhaHub/Passwall-Node/releases/download/release/" + f.options.Version + "/"} {
 		if !bytes.Contains(network, []byte(required)) {
 			t.Errorf("download missing security/pinning option %q", required)
 		}
@@ -448,7 +457,10 @@ func TestLinuxInstallPreservesIdentityAndStateOnRerun(t *testing.T) {
 		{"identity", func(o *Options) { o.AgentID += "2" }},
 		{"endpoint", func(o *Options) { o.Endpoint = "https://other.example/v1/node/sync" }},
 		{"credential", func(o *Options) { o.Credential += "2" }},
-		{"version", func(o *Options) { o.Version = "v2.0.0" }},
+		// A DIFFERENT RELEASE, not a malformed one: the case is about a rerun whose
+		// version disagrees with what is installed, so the version has to be one
+		// the template can render or it would fail for a reason of its own.
+		{"version", func(o *Options) { o.Version = "4.2.0" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			original := f.options

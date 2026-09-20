@@ -160,20 +160,27 @@ func ParseArgs(task protocol.Task) (Args, error) {
 
 // CompareVersions orders two release versions, -1 / 0 / +1.
 //
-// It delegates to releaseid.CompareLegacyTag rather than carrying its own copy
-// of the rule. The rule is the project's release order, and it is applied in
-// three places — here, the release CLI, and the panel's admission check — so a
-// second implementation is a second opinion about whether an upgrade is an
-// upgrade. The dotless prerelease handling (v0.0.1-beta11 above v0.0.1-beta9)
-// lives there, with the vectors that pin it.
+// It delegates to releaseid rather than carrying its own copy of the rule. The
+// rule is the project's release order, and it is applied in three places — here,
+// the release CLI, and the panel's admission check — so a second implementation
+// is a second opinion about whether an upgrade is an upgrade.
 //
-// A product version is ordered correctly by the same rule, and that is a
-// property rather than a coincidence worth relying on silently: the legacy rule
-// compares numeric segments numerically and ranks a release above its own
-// prereleases, and a product version is three numeric segments with no
-// prerelease. TestUpgradeVersionOrderForProductVersions pins it, so a change to
-// the legacy rule that would misorder the product scheme fails there instead of
-// at a node that refuses to upgrade.
+// IT PARSES, AND IT USED NOT TO HAVE TO. The old rule compared the strings, which
+// works for a shape whose order the text happens to encode and stops working the
+// moment one does not; releaseid's product rule compares parsed versions, which
+// is the same answer for every input that is a version and no answer at all for
+// one that is not.
+//
+// AN UNPARSEABLE INPUT COMPARES EQUAL, which the caller turns into a refusal: it
+// validates both versions with releaseid.ValidVersion before asking which is
+// newer, so a string that cannot be parsed here is a programming error rather
+// than an operator's input — and the fail-closed reading of "cannot be shown to
+// be newer" is the same one the shape check makes.
 func CompareVersions(a, b string) int {
-	return releaseid.CompareLegacyTag(a, b)
+	left, leftErr := releaseid.ParseProductVersion(a)
+	right, rightErr := releaseid.ParseProductVersion(b)
+	if leftErr != nil || rightErr != nil {
+		return 0
+	}
+	return releaseid.CompareProductVersion(left, right)
 }

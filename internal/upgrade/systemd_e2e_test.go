@@ -200,9 +200,9 @@ func newNodeE2E(ctx context.Context) (*nodeE2E, error) {
 		return nil, errors.New("cannot mint private disposable identity")
 	}
 	f := &nodeE2E{ctx: ctx, nonce: hex.EncodeToString(random[32:40]), agentID: "agt_upgrade_e2e_" + hex.EncodeToString(random[40:]), credential: "pspn_'\"$(false);`false`_" + hex.EncodeToString(random[:32]), units: make(map[string]string), createdUnits: make(map[string]bool)}
-	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "v1.0.0")
-	f.newVersion = envOr("PN_E2E_NEW_VERSION", "v1.1.0")
-	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "v1.2.0")
+	f.oldVersion = envOr("PN_E2E_OLD_VERSION", "4.1.0")
+	f.newVersion = envOr("PN_E2E_NEW_VERSION", "4.1.3")
+	f.failVersion = envOr("PN_E2E_FAIL_VERSION", "4.1.4")
 	f.oldCommit = envOr("PN_E2E_OLD_COMMIT", "abcdef1234567")
 	f.newCommit = envOr("PN_E2E_NEW_COMMIT", "abcdef1234567")
 	f.failCommit = envOr("PN_E2E_FAIL_COMMIT", "abcdef1234567")
@@ -306,7 +306,7 @@ func (f *nodeE2E) install() error {
 			return err
 		}
 	}
-	gate := "#!/bin/sh\nset -eu\n[ \"$(/usr/bin/cat /opt/passwall-node/config/version)\" != v1.2.0 ]\n"
+	gate := "#!/bin/sh\nset -eu\n[ \"$(/usr/bin/cat /opt/passwall-node/config/version)\" != 4.1.4 ]\n"
 	if err := os.WriteFile(filepath.Join(InstallRoot, "startup-gate"), []byte(gate), 0755); err != nil {
 		return err
 	}

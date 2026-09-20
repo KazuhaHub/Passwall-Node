@@ -164,16 +164,12 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	// is reached from the version rather than sent alongside it, so the two can
 	// never be given to this function out of step.
 	//
-	// Each scheme keeps its own rule. A legacy version is checked by the
-	// installation rule it has always been checked against; a product version is
-	// not that rule's business, because it knows only the v-prefixed shape.
+	// TagForVersion is the shape check as well as the mapping: it refuses anything
+	// that is not a product version, which is the rule this has to hold to.
 	tag, err := releaseid.TagForVersion(version)
 	// The length bound is separate from the shape: it is about what this
 	// function will hold, not about whether the string is well formed.
 	if len(version) > 128 || err != nil {
-		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
-	}
-	if tag.Scheme == releaseid.SchemeLegacy && !releaseid.ValidLegacyVersion(version) {
 		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
 	}
 	if err := os.MkdirAll(f.rootDir, 0o700); err != nil {

@@ -66,34 +66,24 @@ func ParseReleaseLine(s string) (Line, error) {
 	return Line{Major: segments[0], Minor: segments[1]}, nil
 }
 
-// AllocatePatch returns the next patch version on a line, for one scheme.
+// AllocatePatch returns the next patch version on a line.
 //
-// existing is every tag that already names a release, in any form: the ones this
-// cannot read are not ours and take no part, and the ones on other lines have
-// their own numbering.
+// existing is every tag that already names a release: the ones this cannot read
+// are not ours and take no part, and the ones on other lines have their own
+// numbering.
 //
-// BOTH SCHEMES ON ONE LINE IS REFUSED. That state is the migration itself — a
-// legacy tag and a product tag carrying the same product version are two releases
-// a consumer cannot tell apart — and resolving it by preference would be this
-// function deciding which of somebody's releases does not count. It names the
-// tags so a maintainer can.
-func AllocatePatch(line Line, scheme Scheme, existing []string) (Version, error) {
-	// THE LEGACY LINE IS NOT ALLOCATED, and the reason is a wrong answer rather
-	// than a missing one. A legacy release is `vMAJOR.MINOR.PATCH-betaN`, and the
-	// beta counter is an axis this function does not model: asked for the next
-	// number on the 0.0 line it finds patch 1 and answers 0.0.2, which the caller
-	// would tag `v0.0.2` — a NEW PATCH, not the next beta of the one that exists.
-	// Nothing in that answer says it was the wrong question.
-	//
-	// The product scheme is what this is for: three integers, a patch increment,
-	// and the migration's next release. The legacy line is being retired, so a
-	// change on it is a maintainer's decision rather than an increment.
-	if scheme == SchemeLegacy {
-		return Version{}, fmt.Errorf("%w: the legacy line's releases carry a prerelease counter (vMAJOR.MINOR.PATCH-betaN), "+
-			"which this allocator does not model; a patch increment there would name a new patch rather than the next beta", ErrUnknownFormat)
-	}
+// A LINE WITH NO RELEASE ON IT IS NOT ALLOCATED, and neither is one whose tags
+// cannot be read: the first version of a line is named rather than derived, and
+// counting past a tag whose number is unknown is how two releases end up with one
+// number.
+//
+// THIS USED TO TAKE A SCHEME AND REFUSE THE LEGACY LINE. The refusal was a wrong
+// answer rather than a missing one — a legacy release is vMAJOR.MINOR.PATCH-betaN,
+// and the beta counter is an axis this does not model, so a patch increment there
+// named a new patch instead of the next beta. With one scheme there is no such
+// line to refuse, and no scheme to be told apart from another.
+func AllocatePatch(line Line, existing []string) (Version, error) {
 	highest := int64(-1)
-	var foreign []string
 	for _, raw := range existing {
 		tag, err := ParseReleaseTag(raw)
 		if err != nil {
@@ -109,19 +99,9 @@ func AllocatePatch(line Line, scheme Scheme, existing []string) (Version, error)
 		if version == nil {
 			continue // another line, with its own numbering
 		}
-		if tag.Scheme != scheme {
-			foreign = append(foreign, raw)
-			continue
-		}
 		if version.Patch > highest {
 			highest = version.Patch
 		}
-	}
-	if len(foreign) > 0 {
-		return Version{}, fmt.Errorf("%w: line %s carries tags from both schemes (%s) — a legacy tag and a product tag on one line "+
-			"carry the same product version, which a consumer cannot tell apart; the numbering is mid-migration, and choosing which "+
-			"of them continues is a maintainer's decision rather than an allocation",
-			ErrUnknownFormat, line, strings.Join(foreign, ", "))
 	}
 	if highest < 0 {
 		return Version{}, fmt.Errorf("%w: line %s has no release to count from, and the first version of a line is named rather than allocated", ErrUnknownFormat, line)
@@ -140,30 +120,11 @@ func AllocatePatch(line Line, scheme Scheme, existing []string) (Version, error)
 // line that cannot be read is a release with an unknown patch, and the caller
 // must refuse rather than count past it.
 func versionOnLine(tag Tag, line Line) (*Version, error) {
-	if tag.Scheme == SchemeProduct {
-		if tag.Product.Major != line.Major || tag.Product.Minor != line.Minor {
-			return nil, nil
-		}
-		product := tag.Product
-		return &product, nil
-	}
-	// A legacy tag is its own version, and its prerelease is part of that version
-	// — `v4.0.1-beta.1` is the release v4.0.1-beta.1. For a LINE and a PATCH only
-	// the numeric part decides which number is taken, and the prerelease decides
-	// nothing: two tags `v4.0.1` and `v4.0.1-beta.1` share the number 4.0.1, which
-	// is why the number is what must not be reused.
-	body := strings.TrimPrefix(tag.Raw, "v")
-	if dash := strings.IndexByte(body, '-'); dash >= 0 {
-		body = body[:dash]
-	}
-	parsed, err := ParseProductVersion(body)
-	if err != nil {
-		return nil, err
-	}
-	if parsed.Major != line.Major || parsed.Minor != line.Minor {
+	if tag.Product.Major != line.Major || tag.Product.Minor != line.Minor {
 		return nil, nil
 	}
-	return &parsed, nil
+	product := tag.Product
+	return &product, nil
 }
 
 // ResumeTag returns the release tag this source revision has ALREADY been
@@ -184,12 +145,12 @@ func versionOnLine(tag Tag, line Line) (*Version, error) {
 // answers, and a bool collapses them: the first version of this returned false for
 // both, and the command above went on to allocate a fresh number for a commit that
 // already carried two — the ambiguity resolved by ignoring it.
-func ResumeTag(line Line, scheme Scheme, onCommit []string) (Tag, error) {
+func ResumeTag(line Line, onCommit []string) (Tag, error) {
 	var found Tag
 	matches := 0
 	for _, raw := range onCommit {
 		tag, err := ParseReleaseTag(raw)
-		if err != nil || tag.Scheme != scheme {
+		if err != nil {
 			continue
 		}
 		version, err := versionOnLine(tag, line)
@@ -205,21 +166,15 @@ func ResumeTag(line Line, scheme Scheme, onCommit []string) (Tag, error) {
 	case 1:
 		return found, nil
 	default:
-		return Tag{}, fmt.Errorf("%w: %d tags on this line and scheme point at the same source revision", ErrAmbiguousRevision, matches)
+		return Tag{}, fmt.Errorf("%w: %d tags on this line point at the same source revision", ErrAmbiguousRevision, matches)
 	}
 }
 
-// TagForVersionInScheme renders the tag a version is published under, in a scheme
-// the caller has already decided.
+// Tag renders the tag this version is published under.
 //
-// TagForVersion reads the scheme off the string, which is right when a version
-// arrives from outside — every legacy version began with a v and no product one
-// does. This is the other case: a caller that has just allocated a number for a
-// named scheme, and whose answer must not depend on how the number happens to
-// look.
-func TagForVersionInScheme(scheme Scheme, version Version) Tag {
-	if scheme == SchemeProduct {
-		return Tag{Raw: TagPrefix + version.String(), Scheme: SchemeProduct, Product: version}
-	}
-	return Tag{Raw: "v" + version.String(), Scheme: SchemeLegacy}
+// It is the typed counterpart of TagForVersion, which takes a string: a caller
+// that has just allocated a number has a Version, not a spelling of one, and its
+// answer must not depend on how the number happens to look.
+func (v Version) Tag() Tag {
+	return Tag{Raw: TagPrefix + v.String(), Scheme: SchemeProduct, Product: v}
 }

@@ -45,7 +45,7 @@ func newHelperFixture(t *testing.T) *helperFixture {
 			t.Fatal(err)
 		}
 	}
-	for name, content := range map[string][]byte{"bin/passwall-node": helperFixtureBinary("v1.0.0", 9), "config/version": []byte("v1.0.0\n"), "licenses/LICENSE": []byte("old license"), "licenses/NOTICE": []byte("old notice"), "config/credential": []byte("private credential"), "config/environment": []byte("private endpoint"), "data/state.db": []byte("persistent counters/identities"), "data/core.state": []byte("unchanged core selection")} {
+	for name, content := range map[string][]byte{"bin/passwall-node": helperFixtureBinary("4.1.0", 9), "config/version": []byte("4.1.0\n"), "licenses/LICENSE": []byte("old license"), "licenses/NOTICE": []byte("old notice"), "config/credential": []byte("private credential"), "config/environment": []byte("private endpoint"), "data/state.db": []byte("persistent counters/identities"), "data/core.state": []byte("unchanged core selection")} {
 		mode := os.FileMode(0600)
 		if name == "bin/passwall-node" {
 			mode = 0700
@@ -54,7 +54,7 @@ func newHelperFixture(t *testing.T) *helperFixture {
 			t.Fatal(err)
 		}
 	}
-	args := Args{Version: "v1.1.0", ExpectedVersion: "v1.0.0"}
+	args := Args{Version: "4.1.3", ExpectedVersion: "4.1.0"}
 	argsJSON, _ := json.Marshal(args)
 	task := protocol.Task{ID: "upgrade-test-001", Kind: TaskKind, Args: argsJSON, NotAfterMS: 100000}
 	task.InputSHA256 = protocol.ComputeTaskInputSHA256(task.Kind, task.Args)
@@ -69,7 +69,7 @@ func newHelperFixture(t *testing.T) *helperFixture {
 		if err := os.Mkdir(dir, 0700); err != nil {
 			return Candidate{}, err
 		}
-		for name, content := range map[string][]byte{"passwall-node": helperFixtureBinary("v1.1.0", f.newSchema), "LICENSE": []byte("new license"), "NOTICE": []byte("new notice")} {
+		for name, content := range map[string][]byte{"passwall-node": helperFixtureBinary("4.1.3", f.newSchema), "LICENSE": []byte("new license"), "NOTICE": []byte("new notice")} {
 			if err := os.WriteFile(filepath.Join(dir, name), content, 0700); err != nil {
 				return Candidate{}, err
 			}
@@ -78,7 +78,7 @@ func newHelperFixture(t *testing.T) *helperFixture {
 		if err != nil {
 			return Candidate{}, err
 		}
-		f.candidate = Candidate{Dir: dir, Version: "v1.1.0", BinaryPath: filepath.Join(dir, "passwall-node"), BinarySHA256: digest, LicensePath: filepath.Join(dir, "LICENSE"), NoticePath: filepath.Join(dir, "NOTICE")}
+		f.candidate = Candidate{Dir: dir, Version: "4.1.3", BinaryPath: filepath.Join(dir, "passwall-node"), BinarySHA256: digest, LicensePath: filepath.Join(dir, "LICENSE"), NoticePath: filepath.Join(dir, "NOTICE")}
 		return f.candidate, nil
 	}
 	f.c.command = func(ctx context.Context, args ...string) (string, error) {
@@ -94,7 +94,7 @@ func newHelperFixture(t *testing.T) *helperFixture {
 			if err != nil {
 				return "", err
 			}
-			if version == "v1.1.0" {
+			if version == "4.1.3" {
 				if f.failNewStart {
 					return "", errors.New("fixture start failure")
 				}
@@ -103,7 +103,7 @@ func newHelperFixture(t *testing.T) *helperFixture {
 					if err := ReadDocument(filepath.Join(f.root, "upgrades"), f.request.Task.ID+".json", &activated); err != nil {
 						return "", err
 					}
-					ready := Ready{TaskID: f.request.Task.ID, InputSHA256: f.request.Task.InputSHA256, Version: "v1.1.0", BinarySHA256: f.candidate.BinarySHA256}
+					ready := Ready{TaskID: f.request.Task.ID, InputSHA256: f.request.Task.InputSHA256, Version: "4.1.3", BinarySHA256: f.candidate.BinarySHA256}
 					ready.ActivationNonce = activated.ActivationNonce
 					ready.PID = 42
 					if f.wrongReady {
@@ -170,7 +170,7 @@ func TestHelperConfirmedUpgradeAndImmutableReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	receipt := f.receipt(t)
-	if receipt.Phase != "succeeded" || receipt.Result == nil || !receipt.Result.Restarted || receipt.Result.Version != "v1.1.0" || receipt.Result.PreviousVersion != "v1.0.0" {
+	if receipt.Phase != "succeeded" || receipt.Result == nil || !receipt.Result.Restarted || receipt.Result.Version != "4.1.3" || receipt.Result.PreviousVersion != "4.1.0" {
 		t.Fatalf("unconfirmed result: %+v", receipt)
 	}
 	if f.fetches != 1 || len(f.commands) != 2 {
@@ -198,7 +198,7 @@ func TestHelperRejectsBeforeStoppingOriginal(t *testing.T) {
 			case "schema":
 				f.newSchema = 10
 			case "CAS":
-				if err := os.WriteFile(filepath.Join(f.root, "config", "version"), []byte("v1.0.1\n"), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(f.root, "config", "version"), []byte("4.1.1\n"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			case "boot":
@@ -233,7 +233,7 @@ func TestHelperRejectsBeforeStoppingOriginal(t *testing.T) {
 				t.Fatal("customized or foreign service downloaded an upgrade candidate")
 			}
 			info, err := readBuildInfo(context.Background(), filepath.Join(f.root, "bin", "passwall-node"))
-			if err != nil || info.Version != "v1.0.0" {
+			if err != nil || info.Version != "4.1.0" {
 				t.Fatal("original binary changed")
 			}
 			f.assertProtected(t)
@@ -271,7 +271,7 @@ func TestHelperRechecksAuthorizationAfterFilePreparation(t *testing.T) {
 				t.Fatalf("invalid deadline outcome: %+v", receipt)
 			}
 			info, err := readBuildInfo(context.Background(), filepath.Join(f.root, "bin", "passwall-node"))
-			if err != nil || info.Version != "v1.0.0" {
+			if err != nil || info.Version != "4.1.0" {
 				t.Fatalf("old binary changed after preparation expired: %+v %v", info, err)
 			}
 			f.assertProtected(t)
@@ -307,14 +307,14 @@ func TestHelperReadinessFailuresRestoreManagedFiles(t *testing.T) {
 			if len(f.commands) != 4 {
 				t.Fatalf("did not stop/start and rollback stop/start: %v", f.commands)
 			}
-			for name, want := range map[string]string{"config/version": "v1.0.0\n", "licenses/LICENSE": "old license", "licenses/NOTICE": "old notice"} {
+			for name, want := range map[string]string{"config/version": "4.1.0\n", "licenses/LICENSE": "old license", "licenses/NOTICE": "old notice"} {
 				got, err := os.ReadFile(filepath.Join(f.root, name))
 				if err != nil || string(got) != want {
 					t.Fatalf("managed old file not restored: %s", name)
 				}
 			}
 			info, err := readBuildInfo(context.Background(), filepath.Join(f.root, "bin", "passwall-node"))
-			if err != nil || info.Version != "v1.0.0" {
+			if err != nil || info.Version != "4.1.0" {
 				t.Fatal("old executable not restored")
 			}
 			f.assertProtected(t)
@@ -324,7 +324,7 @@ func TestHelperReadinessFailuresRestoreManagedFiles(t *testing.T) {
 
 func TestHelperInterruptedActivationDoesNotRedownload(t *testing.T) {
 	f := newHelperFixture(t)
-	candidate, err := f.c.fetch(context.Background(), "v1.1.0")
+	candidate, err := f.c.fetch(context.Background(), "4.1.3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,14 +332,14 @@ func TestHelperInterruptedActivationDoesNotRedownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backup := helperBackup{PreviousVersion: "v1.0.0", OldSHA256: oldDigest, NewSHA256: candidate.BinarySHA256, StateSchema: 9}
+	backup := helperBackup{PreviousVersion: "4.1.0", OldSHA256: oldDigest, NewSHA256: candidate.BinarySHA256, StateSchema: 9}
 	if err := f.c.prepareBackup(f.request.Task.ID, backup, uint32(os.Getegid())); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.c.installCandidate(candidate, uint32(os.Getegid())); err != nil {
 		t.Fatal(err)
 	}
-	receipt := Receipt{Request: f.request, Phase: "activated", Result: &Result{Version: "v1.1.0", PreviousVersion: "v1.0.0", BinarySHA256: candidate.BinarySHA256}}
+	receipt := Receipt{Request: f.request, Phase: "activated", Result: &Result{Version: "4.1.3", PreviousVersion: "4.1.0", BinarySHA256: candidate.BinarySHA256}}
 	if err := f.c.writeReceipt(receipt, uint32(os.Getegid())); err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestHelperCompletedBackupRetentionKeepsForeignAndLiveEvidence(t *testing.T)
 		t.Helper()
 		request := f.request
 		request.Task.ID = id
-		backup := helperBackup{PreviousVersion: "v1.0.0", OldSHA256: oldDigest, NewSHA256: oldDigest, StateSchema: 9}
+		backup := helperBackup{PreviousVersion: "4.1.0", OldSHA256: oldDigest, NewSHA256: oldDigest, StateSchema: 9}
 		if err := f.c.prepareBackup(id, backup, uint32(os.Getegid())); err != nil {
 			t.Fatal(err)
 		}

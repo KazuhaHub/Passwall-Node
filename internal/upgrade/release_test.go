@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
+	"github.com/KazuhaHub/passwall-node/releaseid"
 )
 
 type releaseRoundTrip func(*http.Request) (*http.Response, error)
@@ -121,13 +122,23 @@ func fakeReleaseClientWithSignature(t *testing.T, version string, archive []byte
 		if request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.Host != "github.com" {
 			t.Fatalf("not a fixed official HTTPS request: %s", request.URL.Redacted())
 		}
+		// THE TAG IS THE PATH AND THE VERSION NAMES THE ASSET. This served
+		// `.../download/<version>/...`, which was right while a version was also
+		// its own address; the fetcher builds the path from the tag, so a mock that
+		// still built it from the version refused every request and the case under
+		// test failed on the fixture rather than on itself.
+		tag, err := releaseid.TagForVersion(version)
+		if err != nil {
+			t.Fatalf("the fixture version %q has no tag: %v", version, err)
+		}
+		base := releaseDownloadBase + releaseTagPath(tag.Raw) + "/"
 		var content []byte
 		switch request.URL.String() {
-		case releaseDownloadBase + version + "/SHA256SUMS.txt":
+		case base + "SHA256SUMS.txt":
 			content = []byte(checksums)
-		case releaseDownloadBase + version + "/" + releaseauth.SignatureAssetName:
+		case base + releaseauth.SignatureAssetName:
 			content = []byte(signature)
-		case releaseDownloadBase + version + "/" + asset:
+		case base + asset:
 			content = archive
 		default:
 			t.Fatalf("unexpected release resource: %s", request.URL.Redacted())
@@ -140,7 +151,7 @@ func TestReleaseFetchPrivateCandidate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native shell fixture requires Unix")
 	}
-	version := "v0.0.1-beta3"
+	version := "4.0.0"
 	archive := releaseArchive(t, validReleaseEntries(version))
 	root := filepath.Join(t.TempDir(), "staging")
 	fetcher := newTestReleaseFetcher(t, ReleaseFetcherOptions{RootDir: root, HTTPClient: fakeReleaseClient(t, version, archive, "")})
@@ -164,7 +175,7 @@ func TestReleaseFetchPrivateCandidate(t *testing.T) {
 }
 
 func TestReleaseRejectsBadArchiveAndCleansStage(t *testing.T) {
-	version := "v0.0.1-beta3"
+	version := "4.0.0"
 	prefix := "passwall-node_" + version + "_linux_" + runtime.GOARCH + "/"
 	tests := map[string]func([]releaseEntry) []releaseEntry{
 		"duplicate-selected": func(es []releaseEntry) []releaseEntry { return append(es, es[1]) },
@@ -213,7 +224,7 @@ func TestReleaseRejectsBadArchiveAndCleansStage(t *testing.T) {
 }
 
 func TestReleaseChecksumExactUnique(t *testing.T) {
-	asset := "passwall-node_v1.2.3_linux_amd64.tar.gz"
+	asset := "passwall-node_4.1.5_linux_amd64.tar.gz"
 	digest := strings.Repeat("a", 64)
 	for _, content := range []string{digest + "  " + asset, strings.ToUpper(digest) + " *" + asset + "\n"} {
 		got, err := releaseChecksum([]byte(content), asset)
@@ -229,7 +240,7 @@ func TestReleaseChecksumExactUnique(t *testing.T) {
 }
 
 func TestReleaseDigestAndLimits(t *testing.T) {
-	version := "v0.0.1-beta3"
+	version := "4.0.0"
 	archive := releaseArchive(t, validReleaseEntries(version))
 	asset := "passwall-node_" + version + "_linux_" + runtime.GOARCH + ".tar.gz"
 	for _, options := range []ReleaseFetcherOptions{
@@ -254,7 +265,7 @@ func TestReleaseRejectsMatchingTamperedArchiveAndChecksumBeforeExecution(t *test
 	if runtime.GOOS == "windows" {
 		t.Skip("native shell fixture requires Unix")
 	}
-	version := "v0.0.1-beta3"
+	version := "4.0.0"
 	marker := filepath.Join(t.TempDir(), "executed")
 	entries := validReleaseEntries(version)
 	entries[1].data = "#!/bin/sh\ntouch '" + marker + "'\nprintf '%s\\n' '" + version + " (dc5270c)'\n"
@@ -290,7 +301,7 @@ func TestReleaseRejectsMatchingTamperedArchiveAndChecksumBeforeExecution(t *test
 }
 
 func TestReleaseGzipTrailerAndStreamingLimit(t *testing.T) {
-	version := "v0.0.1-beta3"
+	version := "4.0.0"
 	archive := releaseArchive(t, validReleaseEntries(version))
 	corrupt := append([]byte(nil), archive...)
 	corrupt[len(corrupt)-1] ^= 1
@@ -329,7 +340,7 @@ func TestReleaseHTTPSRedirectAndErrorSanitization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = f.Fetch(context.Background(), "v1.2.3")
+		_, err = f.Fetch(context.Background(), "4.1.5")
 		if err == nil || calls != 1 || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), location) {
 			t.Fatalf("redirect/error unsafe: calls=%d err=%v", calls, err)
 		}
@@ -344,9 +355,9 @@ func TestReleaseNativeExactVersionAndTimeout(t *testing.T) {
 		t.Skip("native shell fixture requires Unix")
 	}
 	for name, source := range map[string]string{
-		"wrong":      "#!/bin/sh\nprintf '%s\\n' v1.2.4\n",
-		"extra":      "#!/bin/sh\nprintf '%s\\n' 'v1.2.3 garbage'\n",
-		"multiline":  "#!/bin/sh\nprintf '%s\\n' v1.2.3 v1.2.3\n",
+		"wrong":      "#!/bin/sh\nprintf '%s\\n' 4.1.6\n",
+		"extra":      "#!/bin/sh\nprintf '%s\\n' '4.1.5 garbage'\n",
+		"multiline":  "#!/bin/sh\nprintf '%s\\n' 4.1.5 4.1.5\n",
 		"timeout":    "#!/bin/sh\nexec /bin/sleep 5\n",
 		"no-execute": "not an executable\n",
 		"too-loud":   "#!/bin/sh\ni=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done\n",
@@ -356,7 +367,7 @@ func TestReleaseNativeExactVersionAndTimeout(t *testing.T) {
 			if err := os.WriteFile(binary, []byte(source), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := verifyReleaseBinary(context.Background(), binary, "v1.2.3", 30*time.Millisecond); err == nil {
+			if err := verifyReleaseBinary(context.Background(), binary, "4.1.5", 30*time.Millisecond); err == nil {
 				t.Fatal("invalid version/native candidate accepted")
 			}
 		})
@@ -364,7 +375,7 @@ func TestReleaseNativeExactVersionAndTimeout(t *testing.T) {
 }
 
 func TestReleaseVersionAndPrivateRootValidation(t *testing.T) {
-	for _, version := range []string{"latest", "beta", "v01.2.3", "v1.2.3+build", "v1.2.3;echo bad", "v1.2.3-beta.01"} {
+	for _, version := range []string{"latest", "beta", "01.2.3", "4.1.5+build", "4.1.5;echo bad", "4.1.5-beta.01"} {
 		f, err := NewReleaseFetcher(ReleaseFetcherOptions{RootDir: filepath.Join(t.TempDir(), "stage")})
 		if err != nil {
 			t.Fatal(err)
@@ -386,12 +397,12 @@ func TestReleaseVersionAndPrivateRootValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Fetch(context.Background(), "v1.2.3"); err == nil {
+	if _, err := f.Fetch(context.Background(), "4.1.5"); err == nil {
 		t.Fatal("non-private staging root accepted")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := f.Fetch(ctx, "v1.2.3"); err != context.Canceled {
+	if _, err := f.Fetch(ctx, "4.1.5"); err != context.Canceled {
 		t.Fatalf("cancellation lost: %v", err)
 	}
 }
@@ -419,8 +430,8 @@ func TestTheReleaseTagIsAddressedAsAPath(t *testing.T) {
 	}{
 		{
 			name: "a legacy tag is unchanged",
-			tag:  "v0.0.1-beta11",
-			want: releaseDownloadBase + "v0.0.1-beta11/SHA256SUMS.txt",
+			tag:  "4.0.2",
+			want: releaseDownloadBase + "4.0.2/SHA256SUMS.txt",
 			why:  "dots and hyphens are unreserved, so escaping must not alter it",
 		},
 		{

@@ -13,37 +13,36 @@ import (
 	"github.com/KazuhaHub/passwall-node/releaseid"
 )
 
-// ValidReleaseVersion is what the INSTALLER accepts, and the installer must keep
-// refusing a product version. An installer that accepted one would render a
-// download URL out of it, and a product version is not the path a release lives
-// at — the tag is. Refusing is the direction that fails loudly: the operator is
-// told the release source returned no usable version, rather than being handed
-// a URL to somewhere that does not exist.
+// ValidReleaseVersion is what the INSTALLER accepts, and what it accepts is the
+// project's version — the same rule a caller asking for a release is held to.
 //
-// This pins the behaviour so the rule can move to one implementation without the
-// installer quietly widening. It is written as a table rather than a property
-// because the interesting cases are the near misses.
-func TestTheInstallerStillAcceptsOnlyLegacyVersions(t *testing.T) {
+// IT USED TO ACCEPT ONLY THE LEGACY SHAPE, and refusing the product form was the
+// point: the installer built a download URL out of the version, so a version that
+// was not also the path a release lives at produced a URL to somewhere that does
+// not exist. The template takes the tag separately now, so the version is a
+// version, and the direction of the refusal has reversed: the legacy shape is the
+// string this installer cannot place.
+func TestTheInstallerAcceptsTheProjectsVersions(t *testing.T) {
 	for _, tc := range []struct {
 		value string
 		ok    bool
 		why   string
 	}{
-		{"v0.0.1-beta11", true, "the released shape"},
-		{"v1.0.0", true, ""},
-		{"v102.1.0", true, ""},
-		{"v1.0.0-rc1", true, ""},
-		{"v1.0.0-alpha.1", true, "a dotted prerelease"},
-		// The product scheme, which the installer cannot place yet.
-		{"4.0.0", false, "a product version is not a path a release lives at"},
-		{"102.1.0", false, ""},
-		{"0.1.0", false, ""},
+		{"4.0.0", true, "the released shape"},
+		{"102.1.0", true, ""},
+		{"4.0.0.1", true, "the optional build component"},
+		{"1.0.0", true, ""},
+		// The legacy shape, which no longer names anything the installer places.
+		{"v0.0.1-beta11", false, "the scheme this project stopped publishing"},
+		{"v1.0.0", false, ""},
+		{"v102.1.0", false, ""},
+		{"v1.0.0-rc1", false, ""},
 		// Near misses that were already refused and must stay refused.
-		{"v01.0.0", false, "leading zeroes"},
-		{"v1.0", false, "three segments"},
-		{"v1.0.0-alpha.01", false, "a redundant leading zero in a numeric prerelease segment"},
-		{"v1.0.0+build", false, "build metadata"},
-		{"1.0.0", false, ""},
+		{"01.0.0", false, "leading zeroes"},
+		{"4.0", false, "three segments"},
+		{"4.0.0+build", false, "build metadata"},
+		{"0.1.0", false, "the product line starts at one"},
+		{"4.0.0.0", false, "a literal zero build is another spelling of three segments"},
 		{"latest", false, ""},
 		{"release/4.0.0", false, "a tag is not a version"},
 		{"", false, ""},
@@ -56,17 +55,17 @@ func TestTheInstallerStillAcceptsOnlyLegacyVersions(t *testing.T) {
 	}
 }
 
-// The rule is the legacy one, and there is one implementation of it. If these
-// two ever disagree, the installer and the release tooling would be reading
-// different rules about the same string — which is the class of defect this
-// moved to prevent, not one it should reintroduce.
-func TestTheInstallerRuleIsTheSharedLegacyRule(t *testing.T) {
+// The rule is shared, and there is one implementation of it. If these two ever
+// disagree, the installer and the callers that judge a requested version would be
+// reading different rules about the same string — which is the class of defect
+// this consolidates against.
+func TestTheInstallerRuleIsTheSharedRule(t *testing.T) {
 	for _, value := range []string{
-		"v1.0.0", "v0.0.1-beta11", "v1.0.0-rc1", "v01.0.0", "v1.0", "v1.0.0-alpha.01",
-		"4.0.0", "102.1.0", "latest", "", "release/4.0.0",
+		"4.0.0", "4.0.0.1", "102.1.0", "01.0.0", "4.0", "4.0.0+build", "0.1.0",
+		"v1.0.0", "v0.0.1-beta11", "v1.0.0-rc1", "latest", "", "release/4.0.0",
 	} {
-		if got, want := ValidReleaseVersion(value), releaseid.ValidLegacyVersion(value); got != want {
-			t.Errorf("ValidReleaseVersion(%q) = %v but releaseid.ValidLegacyVersion = %v", value, got, want)
+		if got, want := ValidReleaseVersion(value), releaseid.ValidVersion(value); got != want {
+			t.Errorf("ValidReleaseVersion(%q) = %v but releaseid.ValidVersion = %v", value, got, want)
 		}
 	}
 }

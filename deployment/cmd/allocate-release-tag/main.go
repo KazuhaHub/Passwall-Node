@@ -25,7 +25,6 @@ import (
 
 func main() {
 	line := flag.String("line", "", "release line, MAJOR.MINOR (for example 4.0)")
-	scheme := flag.String("scheme", "", "release scheme: product or legacy")
 	existing := flag.String("existing", "", "existing release tags, whitespace- or comma-separated")
 	onCommit := flag.String("on-commit", "", "tags pointing at the revision being released; one already on this line is resumed rather than replaced")
 	flag.Parse()
@@ -35,15 +34,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	parsedScheme := releaseid.Scheme(*scheme)
-	if parsedScheme != releaseid.SchemeProduct && parsedScheme != releaseid.SchemeLegacy {
-		fmt.Fprintf(os.Stderr, "scheme must be %s or %s, not %q\n", releaseid.SchemeProduct, releaseid.SchemeLegacy, *scheme)
-		os.Exit(1)
-	}
 	// A NUMBER ALREADY BOUND TO THIS SOURCE REVISION IS RESUMED, not replaced:
 	// a rerun of a failed release continues its own number, and the tag pointing
 	// at the commit is what records which one that is.
-	if tag, err := releaseid.ResumeTag(parsedLine, parsedScheme, splitTags(*onCommit)); err == nil {
+	if tag, err := releaseid.ResumeTag(parsedLine, splitTags(*onCommit)); err == nil {
 		fmt.Println(tag.Raw)
 		return
 	} else if !errors.Is(err, releaseid.ErrNotAllocated) {
@@ -53,12 +47,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	version, err := releaseid.AllocatePatch(parsedLine, parsedScheme, splitTags(*existing))
+	version, err := releaseid.AllocatePatch(parsedLine, splitTags(*existing))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(releaseid.TagForVersionInScheme(parsedScheme, version).Raw)
+	fmt.Println(version.Tag().Raw)
 }
 
 // splitTags accepts what a shell hands over: newlines from a tag listing, commas

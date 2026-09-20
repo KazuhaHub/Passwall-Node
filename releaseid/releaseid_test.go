@@ -44,24 +44,18 @@ type vectors struct {
 		Why string `json:"why"`
 	} `json:"reject_tags"`
 
-	Channels []struct {
-		Draft      bool   `json:"draft"`
-		Prerelease bool   `json:"prerelease"`
-		Channel    string `json:"channel"`
-	} `json:"channels"`
-
-	LegacyOrder []struct {
-		A   string `json:"a"`
-		B   string `json:"b"`
-		Cmp int    `json:"cmp"`
-	} `json:"legacy_order"`
-
 	Versions []struct {
 		In     string `json:"in"`
 		Scheme string `json:"scheme"`
 		OK     bool   `json:"ok"`
 		Why    string `json:"why"`
 	} `json:"versions"`
+
+	Channels []struct {
+		Draft      bool   `json:"draft"`
+		Prerelease bool   `json:"prerelease"`
+		Channel    string `json:"channel"`
+	} `json:"channels"`
 }
 
 func load(t *testing.T) vectors {
@@ -165,9 +159,7 @@ func TestTheStampedVersionOfATag(t *testing.T) {
 	}{
 		{"release/4.0.0", "4.0.0", "the product tag carries a namespace the version does not"},
 		{"release/102.1.0", "102.1.0", "the release line is part of the version, not of the tag alone"},
-		{"v1.0.0", "v1.0.0", "legacy releases are stamped exactly as they always were"},
-		{"v0.0.1-beta11", "v0.0.1-beta11", "including the prerelease, which the legacy scheme keeps in the version"},
-		{"v1.0.0-rc1", "v1.0.0-rc1", "and the rc shape"},
+		{"release/4.0.0.1", "4.0.0.1", "the build component travels with the version it names"},
 	} {
 		t.Run(tc.tag, func(t *testing.T) {
 			tag, err := releaseid.ParseReleaseTag(tc.tag)
@@ -197,13 +189,12 @@ func TestTheVersionStringIsNotATag(t *testing.T) {
 	}
 }
 
-// The version-shape vectors, in both schemes.
+// The version-shape vectors.
 //
-// These are the accepted/rejected pairs BOTH consumers check — Passwall Sub-Panel
-// has its own implementation of this shape while the shared package is not yet in
-// the release it pins, and the only thing keeping two implementations honest is
-// that they read the same data.
-func TestVersionVectorsInBothSchemes(t *testing.T) {
+// These are the accepted/rejected pairs the consumers share — the panel has its
+// own implementation of this shape, and the only thing keeping two
+// implementations honest is that they read the same data.
+func TestVersionVectors(t *testing.T) {
 	vectors := load(t)
 	if len(vectors.Versions) == 0 {
 		t.Fatal("the vectors lost the versions section")
@@ -216,90 +207,65 @@ func TestVersionVectorsInBothSchemes(t *testing.T) {
 			if !tc.OK {
 				return
 			}
-			// An accepted entry says which rule accepts it, and the other rule
-			// must not: the whole point of separating them is that a caller can
-			// tell a historical identity from a product one.
-			switch tc.Scheme {
-			case "legacy":
-				if !releaseid.ValidLegacyVersion(tc.In) {
-					t.Errorf("%q is accepted as a %s version but not by the legacy rule", tc.In, tc.Scheme)
-				}
-				if tag, err := releaseid.TagForVersion(tc.In); err != nil || tag.Scheme != releaseid.SchemeLegacy {
-					t.Errorf("TagForVersion(%q) = %+v, %v; want a legacy tag", tc.In, tag, err)
-				}
-			case "product":
-				if releaseid.ValidLegacyVersion(tc.In) {
-					t.Errorf("%q is accepted as a product version and also by the legacy rule", tc.In)
-				}
-				if tag, err := releaseid.TagForVersion(tc.In); err != nil || tag.Scheme != releaseid.SchemeProduct {
-					t.Errorf("TagForVersion(%q) = %+v, %v; want a product tag", tc.In, tag, err)
-				}
-			default:
-				t.Fatalf("%q is accepted with no scheme stated", tc.In)
+			// An accepted version has a tag, and it is addressed under the
+			// namespace: the version names the release and the tag is where it is.
+			tag, err := releaseid.TagForVersion(tc.In)
+			if err != nil || tag.Scheme != releaseid.SchemeProduct {
+				t.Fatalf("TagForVersion(%q) = %+v, %v; want a product tag", tc.In, tag, err)
+			}
+			if tag.Raw != releaseid.TagPrefix+tc.In {
+				t.Fatalf("TagForVersion(%q) = %q, want %s%s", tc.In, tag.Raw, releaseid.TagPrefix, tc.In)
 			}
 		})
 	}
 }
 
 // A release VERSION is what a binary is stamped with and what a caller may ask
-// for. There are two schemes and they are not the same rule:
+// for. ONE RULE: three integers, or four with the BUILD component, with no prefix,
+// no suffix and a release line that is not zero.
 //
-//   - a legacy version is the historical v-prefixed form, with a prerelease
-//     whose segments must not carry a redundant leading zero;
-//   - a product version is three segments, and the release line is not zero.
-//
-// ValidVersion accepts either. ValidLegacyVersion is the historical rule alone,
-// and it is the one the INSTALLER keeps using — an installer that accepted a
-// product version would build a download URL from it, and a product version is
-// not the path a release lives at.
+// THE HISTORICAL SHAPE IS HERE AS A REFUSAL. Every row that begins with a v used
+// to be accepted by a second rule — the one the INSTALLER kept, because a version
+// was also the path its release lived at. The installer takes the tag separately
+// now, so there is one rule, and the historical form is a string this project no
+// longer publishes.
 func TestWhichStringsAreVersions(t *testing.T) {
 	for _, tc := range []struct {
-		value  string
-		legacy bool
-		any    bool
-		why    string
+		value string
+		ok    bool
+		why   string
 	}{
-		// The historical shape, unchanged.
-		{"v1.0.0", true, true, ""},
-		{"v0.0.1-beta11", true, true, ""},
-		{"v1.0.0-rc1", true, true, ""},
-		{"v102.1.0", true, true, ""},
-		{"v1.0.0-alpha.1", true, true, "a dotted prerelease is the historical form"},
-		{"v1.0.0-alpha.01", false, false, "a redundant leading zero in a numeric prerelease segment"},
-		{"v01.0.0", false, false, "leading zeroes are not the historical form"},
-		{"v1.0", false, false, "the historical form always wrote three segments"},
-		{"v1.0.0+build", false, false, "build metadata is not the historical form"},
-		{"v", false, false, ""},
-		{"version-1", false, false, "a string that merely begins with v is not a version"},
-		// The product shape.
-		{"1.0.0", false, true, ""},
-		{"4.0.0", false, true, ""},
-		{"102.1.0", false, true, ""},
-		{"0.1.0", false, false, "a zero release line is not a released identity"},
-		{"4.0", false, false, "a version is never shorthand, so a short form names nothing anyone published"},
-		{"4.0.0.1", false, true, ""},
-		{"4.0.0.1.2", false, false, "a fifth segment is a different format, not something to truncate"},
-		{"4.0.0.0", false, false, "a zero fourth segment is another spelling of 4.0.0"},
-		{"4.0.0-rc1", false, false, "a prerelease belongs to the legacy scheme, which writes a v"},
-		{"04.0.0", false, false, "leading zeroes"},
-		{"1.0.0+build", false, false, "build metadata"},
+		{"1.0.0", true, ""},
+		{"4.0.0", true, ""},
+		{"102.1.0", true, ""},
+		{"4.0.0.1", true, "the optional BUILD component"},
+		{"0.1.0", false, "a zero release line is not a released identity"},
+		{"4.0", false, "a version is never shorthand, so a short form names nothing anyone published"},
+		{"4.0.0.1.2", false, "a fifth segment is a different format, not something to truncate"},
+		{"4.0.0.0", false, "a zero fourth segment is another spelling of 4.0.0"},
+		{"4.0.0-rc1", false, "a candidate is a channel, not a suffix"},
+		{"04.0.0", false, "leading zeroes"},
+		{"1.0.0+build", false, "build metadata"},
+		// The historical shape, in the forms it was published under.
+		{"v1.0.0", false, ""},
+		{"v0.0.1-beta11", false, ""},
+		{"v1.0.0-rc1", false, ""},
+		{"v102.1.0", false, ""},
+		{"v1.0.0-alpha.1", false, "a dotted prerelease"},
+		{"v01.0.0", false, ""},
+		{"v1.0", false, ""},
+		{"v1.0.0+build", false, ""},
+		{"v", false, ""},
+		{"version-1", false, "a string that merely begins with v is not a version"},
 		// Neither.
-		{"", false, false, ""},
-		{"latest", false, false, ""},
-		{"main", false, false, ""},
-		{"release/4.0.0", false, false, "a tag is not a version"},
+		{"", false, ""},
+		{"latest", false, ""},
+		{"main", false, ""},
+		{"release/4.0.0", false, "a tag is not a version"},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
-			if got := releaseid.ValidLegacyVersion(tc.value); got != tc.legacy {
-				t.Errorf("ValidLegacyVersion(%q) = %v, want %v (%s)", tc.value, got, tc.legacy, tc.why)
-			}
-			if got := releaseid.ValidVersion(tc.value); got != tc.any {
-				t.Errorf("ValidVersion(%q) = %v, want %v (%s)", tc.value, got, tc.any, tc.why)
-			}
-			// The two must agree wherever the legacy rule accepts, or a caller
-			// using the wider one would be reading a different rule.
-			if tc.legacy && !tc.any {
-				t.Errorf("%q is a legacy version but not a version", tc.value)
+			if got := releaseid.ValidVersion(tc.value); got != tc.ok {
+				t.Errorf("ValidVersion(%q) = %v, want %v (%s)", tc.value, got, tc.ok, tc.why)
 			}
 		})
 	}
@@ -322,9 +288,7 @@ func TestTheTagForAStampedVersion(t *testing.T) {
 	}{
 		{"4.0.0", "release/4.0.0", "a bare version belongs to the product namespace"},
 		{"102.1.0", "release/102.1.0", "including a release line above one"},
-		{"v0.0.1-beta11", "v0.0.1-beta11", "a v-prefixed version is already its own legacy tag"},
-		{"v1.0.0", "v1.0.0", "and so is a plain one"},
-		{"v1.0.0-rc1", "v1.0.0-rc1", "and the rc shape"},
+		{"4.0.0.1", "release/4.0.0.1", "and the build component is part of the address"},
 	} {
 		t.Run(tc.version, func(t *testing.T) {
 			tag, err := releaseid.TagForVersion(tc.version)
@@ -402,14 +366,22 @@ func TestChannelComesFromTheReleaseMetadataNotTheTagText(t *testing.T) {
 	}
 }
 
-// The legacy comparator is a DIFFERENT function, not this one with a flag: the
-// historical tags are dotless prereleases whose project order is numeric, and
-// the product scheme has no prereleases at all. This test keeps the two from
-// being merged into one approximation later.
-func TestLegacyOrderingStillHolds(t *testing.T) {
-	for _, tc := range load(t).LegacyOrder {
-		if got := releaseid.CompareLegacyTag(tc.A, tc.B); got != tc.Cmp {
-			t.Errorf("CompareLegacyTag(%q, %q) = %d, want %d", tc.A, tc.B, got, tc.Cmp)
+// THE ORDER THE VECTORS PIN, through the parsed comparator.
+//
+// A test used to sit here walking a legacy-order section, keeping that rule from
+// being merged into this one. There is one rule now, and what it owes is the
+// product order: numeric segments, and the BUILD component as the last of them —
+// which this forgot until a rebuild and its base compared equal.
+func TestTheOrderingTheVectorsPin(t *testing.T) {
+	for _, tc := range load(t).Order {
+		left, leftErr := releaseid.ParseProductVersion(tc.A)
+		right, rightErr := releaseid.ParseProductVersion(tc.B)
+		if leftErr != nil || rightErr != nil {
+			t.Errorf("the vectors order %q against %q, and one is not a version: %v %v", tc.A, tc.B, leftErr, rightErr)
+			continue
+		}
+		if got := releaseid.CompareProductVersion(left, right); got != tc.Cmp {
+			t.Errorf("CompareProductVersion(%q, %q) = %d, want %d", tc.A, tc.B, got, tc.Cmp)
 		}
 	}
 }
