@@ -514,6 +514,24 @@ func (s *Supervisor) start(runCtx, waitCtx context.Context, engine, binary, conf
 		_ = s.stop(child)
 		return nil, runCtx.Err()
 	case <-timer.C:
+		// THE TIMER FIRING DOES NOT MEAN THE CHILD IS ALIVE, and a select cannot
+		// be asked which of two ready cases it prefers — it picks at random. A
+		// core that exited as the grace period ended left BOTH this case and the
+		// exit case ready, so the same input was accepted or refused depending on
+		// which one the runtime happened to take. That is a crashing core handed a
+		// handle as though it had started, roughly whenever the scheduler felt
+		// like it.
+		//
+		// So the exit is checked AGAIN here, unselectively, and the refusal wins.
+		// A child that dies in the window this still misses is caught by the
+		// supervisor loop, which observes the exit and marks the process degraded
+		// — but the ANSWER stops being a coin toss, and the direction it is
+		// settled in is the safe one.
+		select {
+		case err := <-child.done:
+			return nil, errors.New("exited during startup: " + processExitDetail(err))
+		default:
+		}
 		// Recorded only once the child has survived its grace period, so a core
 		// that died during startup never publishes a handle it never had.
 		s.recordHandle(command.Process.Pid)
