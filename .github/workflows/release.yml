@@ -76,17 +76,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # THE CHANNEL IS STATED OR READ FROM THE LEGACY SHAPE, NEVER GUESSED FROM A
-      # HYPHEN. `contains(tag, '-')` is a LEGACY rule: a v-prefixed tag with a
-      # hyphen has always meant a pre-release. A product-scheme tag
-      # (release/MAJOR.MINOR.PATCH) has no hyphen at all, so the same test would
-      # publish every testing candidate as STABLE and would tag no image at all —
-      # and neither is recoverable by a later edit, because `prerelease: false`
-      # and the `latest` image tag are what a consumer reads as "released".
+      # THE DEFAULT IS A PRE-RELEASE, STATED OR NOT. A release published without an
+      # explicit channel goes out as one, because that is the direction a deliberate
+      # promotion can correct and the one that cannot move `latest` or
+      # /releases/latest — pointers consumers follow, which no later edit takes back.
       #
-      # So: an explicit input wins; the legacy shape decides for a legacy tag; and
-      # anything else defaults to PRE-RELEASE, the direction a deliberate
-      # promotion can correct.
+      # SO THE TAG TEXT NO LONGER DECIDES THE CHANNEL AT ALL. It used to:
+      # `contains(tag, '-')` read a hyphen as pre-release and a plain `v*` as STABLE.
+      # That made a v-tag the one publishable mistake with an unrecoverable half, and
+      # it is the same legacy shape rule the product scheme had to be exempted from.
+      # Publishing stable is now something a maintainer states through the input.
+      #
+      # The tag is still read for one thing — whether it addresses a release at all,
+      # in the image-channel case — and that is about the ADDRESS, not the channel.
       #
       # It lives in setup because BOTH the release and the image job need the same
       # answer, and two places deciding a channel separately is how they disagree.
@@ -165,13 +167,7 @@ jobs:
           case "${REQUESTED:-auto}" in
             stable)  prerelease=false ;;
             testing) prerelease=true ;;
-            auto)
-              case "$PINNED_TAG" in
-                v*-*) prerelease=true ;;
-                v*)   prerelease=false ;;
-                *)    prerelease=true ;;
-              esac
-              ;;
+            auto)    prerelease=true ;;
             *) echo "unknown publication channel: ${REQUESTED}" >&2; exit 1 ;;
           esac
           # Which tags do images get published for at all? The legacy form and the
