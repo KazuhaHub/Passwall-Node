@@ -110,6 +110,122 @@ fi
 mkdir "$lock" 2>/dev/null || fail 'another installation is running; inspect the installation lock manually'
 stage=$(mktemp -d /opt/.passwall-node-public.XXXXXX) || fail 'cannot create a private staging directory'
 
+# --- Release identity, resolved from the release document ---------------------
+#
+# THE INSTALLER NO LONGER DERIVES THE VERSION FROM THE TAG, and it no longer
+# builds the download address. It reads the release's asset URLs, requires every
+# one of them to address a download in this repository, and takes the platform's
+# archive from the URL it is about to fetch. The version is then read out of that
+# asset's NAME, and it is a CANDIDATE rather than a fact: nothing that depends on
+# it happens until the checksum and the archive members have verified, and the
+# binary reports the same version back.
+#
+# ONE NAME CANNOT BOTH ADDRESS AND NAME THE FILE, which is what the old shape got
+# wrong. It built `releases/download/<tag>/<asset>` from a single value taken out
+# of `tag_name` and called the version, so for a product release — tag
+# `release/4.0.0`, version `4.0.0` — that value was wrong for one of the two jobs
+# whichever it was, and the slash in the tag is two path segments rather than an
+# error anyone would see.
+
+release_repository_prefix='https://github.com/KazuhaHub/Passwall-Node/releases/download/'
+
+# one_line <failure> <values> — require exactly one non-empty line, then print it.
+#
+# Every selection rule below is "there is exactly one of these", because a rule
+# that takes the first of several picks by an order nobody stated.
+one_line() {
+    if [ "$(printf '%s' "$2" | grep -c '^.' || true)" != 1 ]; then
+        fail "$1"
+    fi
+    printf '%s\n' "$2"
+}
+
+# resolve_release <release-document> <arch>
+#
+# Sets: release_tag, version, release_archive_url, release_manifest_url
+resolve_release() {
+    document=$1
+    want_arch=$2
+
+    # EXACTLY ONE RELEASE. The beta channel asks for one release per page and the
+    # API answers newest-first, so this is a belt on top of that rather than the
+    # only defence: a document describing two releases would let one release's
+    # assets be selected against another's tag.
+    #
+    # NONE AND SEVERAL ARE SEPARATE MESSAGES. `curl --fail` rejects an HTTP error
+    # before this runs, but a proxy or a captive portal answers 200 with a body
+    # that is not a release at all, and "described more than one release" would
+    # send the operator looking for a second release that does not exist.
+    tags=$(sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' "$document")
+    case "$(printf '%s' "$tags" | grep -c '^.' || true)" in
+        0) fail 'the release source did not name a release; check that the channel has a published release' ;;
+        1) ;;
+        *) fail 'the release source described more than one release' ;;
+    esac
+    release_tag=$tags
+
+    urls=$(sed -n 's/.*"browser_download_url": "\([^"]*\)".*/\1/p' "$document")
+    [ -n "$urls" ] || fail 'the release source advertised no downloadable assets'
+
+    # ORIGIN FIRST, THEN NAMES. Every candidate has to address a download in this
+    # repository before any name is read out of it, so a document that points
+    # elsewhere yields nothing to select rather than something to fetch. The test
+    # is a LITERAL prefix (`index(...) == 1`) rather than a regex: the prefix
+    # contains dots that would match any character, and a lookalike host must not
+    # satisfy a check whose whole job is to pin the origin.
+    mine=$(printf '%s\n' "$urls" | awk -v prefix="$release_repository_prefix" 'index($0, prefix) == 1')
+    [ -n "$mine" ] || fail 'the release source advertised no download from this repository'
+
+    # THE ARCHIVE IS THE ONE CANONICAL NAME FOR THIS PLATFORM, AND ONLY ONE.
+    # Missing and duplicated are both refusals. The name carries the version, so
+    # the shape test admits EITHER scheme — a legacy version keeps its `v` prefix
+    # and a product version is three integers — and that is a shape test on a
+    # published file name, not the tag-to-version rule its publisher owns.
+    selected=$(printf '%s\n' "$mine" | awk -v arch="$want_arch" '
+        {
+            name = $0
+            sub(/^.*\//, "", name)
+            # EVERY INTERPOLATED PATTERN IS A STRING, NEVER A LITERAL, and that is
+            # not style. In a regex LITERAL (`/x\\.y/`) the `\\.` is a backslash
+            # followed by any character; in a STRING the same text reaches the
+            # matcher as `\.`, a literal dot. Mixing the two forms — a literal
+            # opened and then concatenated with `arch` — produced a pattern that
+            # silently never matched, so the version came out with the file suffix
+            # still attached and the installer refused a release that was fine.
+            legacy  = "^passwall-node_v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?_linux_" arch "\\.tar\\.gz$"
+            product = "^passwall-node_(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)_linux_" arch "\\.tar\\.gz$"
+            if (name ~ legacy || name ~ product) {
+                version = name
+                sub(/^passwall-node_/, "", version)
+                sub("_linux_" arch "\\.tar\\.gz$", "", version)
+                print version " " $0
+            }
+        }')
+    if [ "$(printf '%s' "$selected" | grep -c '^.' || true)" != 1 ]; then
+        fail "the release must offer exactly one linux/${want_arch} archive with a canonical name"
+    fi
+    version=${selected%% *}
+    release_archive_url=${selected#* }
+
+    # THE TAG MUST ADDRESS WHAT IT ADVERTISES. Nothing is fetched from the tag —
+    # it is the release's name for the operator — so a tag that disagrees with
+    # the address is a document describing something other than what it links to.
+    case "$release_archive_url" in
+        "${release_repository_prefix}${release_tag}/"*) ;;
+        *) fail "release ${release_tag} does not address the asset it advertises" ;;
+    esac
+
+    # THE NAME THAT GETS VERIFIED IS THE NAME THAT WAS FOUND, and this is where
+    # the two are made to be one string rather than assumed to be.
+    case "$release_archive_url" in
+        */"passwall-node_${version}_linux_${want_arch}.tar.gz") ;;
+        *) fail 'the selected asset name does not match the platform it was selected for' ;;
+    esac
+
+    release_manifest_url=$(one_line 'the release must offer exactly one SHA256SUMS.txt' \
+        "$(printf '%s\n' "$mine" | grep '/SHA256SUMS\.txt$' || true)")
+}
+
 if [ "$source_mode" = offline ]; then
     phase 2 'Inspect the extracted offline release package'
     script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || fail 'cannot resolve the offline package directory'
@@ -125,38 +241,49 @@ if [ "$source_mode" = offline ]; then
 else
     phase 2 'Resolve a published release'
     channel=${channel_override:-${PN_CHANNEL:-stable}}
+    # ONE RELEASE PER PAGE. The beta channel wants the newest release including
+    # pre-releases, which `releases/latest` will not answer, so it asks the list
+    # endpoint for a single element instead of paging twenty and taking the first
+    # — that is the same release (the API answers newest-first either way) with no
+    # other release's assets in the document to be mixed up with it.
     case "$channel" in
         stable) releases_url=https://api.github.com/repos/KazuhaHub/Passwall-Node/releases/latest ;;
-        beta) releases_url=https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=20 ;;
+        beta) releases_url='https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=1' ;;
         *) fail 'PN_CHANNEL must be stable or beta' ;;
     esac
     curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
         --connect-timeout 15 --max-time 60 --max-filesize 1048576 --output "$stage/releases.json" "$releases_url" || \
         fail "cannot resolve the latest $channel release"
-    version=$(awk -F '"' '$2 == "tag_name" { print $4; exit }' "$stage/releases.json")
+    resolve_release "$stage/releases.json" "$arch"
 fi
-case "$version" in
-    v[0-9]*.[0-9]*.[0-9]*) ;;
-    *) fail 'the selected release source returned no valid version' ;;
-esac
-case "$version" in *[!0-9A-Za-z._-]*) fail 'the selected release source returned an unsafe version' ;; esac
-printf '%s\n' "$version" | awk '/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/ { ok=1 } END { exit !ok }' || \
-    fail 'the selected release source returned a non-canonical version'
+# THE VERSION IS EITHER SCHEME, and this check sits here because BOTH sources
+# reach it: the offline path reads it from the binary beside the script, the
+# network path reads it out of the asset name. A legacy version carries its `v`
+# prefix; a product version is three integers with no prefix.
+case "$version" in *[!0-9A-Za-z._-]*) fail "the selected release source returned an unsafe version: $version" ;; esac
+printf '%s\n' "$version" | awk '
+    /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/ { ok = 1 }
+    /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { ok = 1 }
+    END { exit !ok }' || \
+    fail "the selected release source returned a non-canonical version: $version"
 
 package="passwall-node_${version}_linux_${arch}"
 asset="${package}.tar.gz"
-base="https://github.com/KazuhaHub/Passwall-Node/releases/download/${version}"
+# THE ADDRESSES COME FROM THE RELEASE DOCUMENT, not from a template. They were
+# checked to address this repository, to carry the release's own tag and to end in
+# the canonical name the version was read from, so nothing here has to reconstruct
+# a URL — and nothing here can get the reconstruction wrong.
 if [ "$source_mode" = github ]; then
     phase 3 "Download $version ($channel, linux/$arch)"
     curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --connect-timeout 15 --max-time 120 --max-filesize 1048576 --output "$stage/SHA256SUMS.txt" "$base/SHA256SUMS.txt" || \
+        --connect-timeout 15 --max-time 120 --max-filesize 1048576 --output "$stage/SHA256SUMS.txt" "$release_manifest_url" || \
         fail 'checksum manifest download failed'
     if [ -t 2 ]; then
         curl --disable --fail --progress-bar --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --connect-timeout 15 --max-time 300 --output "$stage/$asset" "$base/$asset" || fail 'release archive download failed'
+            --connect-timeout 15 --max-time 300 --output "$stage/$asset" "$release_archive_url" || fail 'release archive download failed'
     else
         curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --connect-timeout 15 --max-time 300 --output "$stage/$asset" "$base/$asset" || fail 'release archive download failed'
+            --connect-timeout 15 --max-time 300 --output "$stage/$asset" "$release_archive_url" || fail 'release archive download failed'
     fi
 else
     phase 3 "Stage $version from the offline package (linux/$arch)"
