@@ -6,8 +6,8 @@ name: Published container acceptance
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Published exact version; select the same release tag ref"
+      tag:
+        description: "Published release tag; select the same tag ref"
         required: true
         type: string
         default: v0.0.1-beta4
@@ -31,7 +31,7 @@ jobs:
           - { runner: ubuntu-24.04, arch: amd64 }
           - { runner: ubuntu-24.04-arm, arch: arm64 }
     env:
-      REQUESTED_VERSION: ${{ inputs.version }}
+      TAG: ${{ inputs.tag }}
       ACCEPTANCE_ARCH: ${{ matrix.arch }}
       IMAGE_REPOSITORY: ghcr.io/kazuhahub/passwall-node
     steps:
@@ -50,9 +50,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go run ./deployment/cmd/release-tag "$REQUESTED_VERSION"
-          test "$GITHUB_REF" = "refs/tags/$REQUESTED_VERSION"
-          test "$(git rev-parse --verify "refs/tags/${REQUESTED_VERSION}^{commit}")" = "$GITHUB_SHA"
+          # The input is the TAG, because that is what a git ref and a
+          # downloadable artifact are addressed by. The accepted version is
+          # what the image tag, the version label and the binary's own
+          # `--version` are compared against, and it is derived once here
+          # rather than re-derived per assertion.
+          version=$(go run ./deployment/cmd/release-tag "$TAG")
+          test -n "$version"
+          test "$GITHUB_REF" = "refs/tags/$TAG"
+          test "$(git rev-parse --verify "refs/tags/${TAG}^{commit}")" = "$GITHUB_SHA"
           test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
           test "$(go env GOHOSTOS)" = linux
           test "$(go env GOHOSTARCH)" = "$ACCEPTANCE_ARCH"
@@ -68,11 +74,11 @@ jobs:
           export DOCKER_CONFIG="$docker_config"
           test ! -e "$DOCKER_CONFIG/config.json"
           docker info > /dev/null
-          image="${IMAGE_REPOSITORY}:${REQUESTED_VERSION}"
+          image="${IMAGE_REPOSITORY}:${version}"
           docker pull --platform "linux/$ACCEPTANCE_ARCH" "$image"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$ACCEPTANCE_ARCH"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$GITHUB_SHA"
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$REQUESTED_VERSION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$version"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image")" = Apache-2.0
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image")" = "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           upgrade_info="$(docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges "$image" --upgrade-info)"
@@ -90,6 +96,6 @@ jobs:
             --security-opt no-new-privileges \
             "$image" --version > "$version_file"
           # Compare exact stdout bytes, including its one trailing newline.
-          printf '%s (%s)\n' "$REQUESTED_VERSION" "${GITHUB_SHA:0:7}" | cmp - "$version_file"
+          printf '%s (%s)\n' "$version" "${GITHUB_SHA:0:7}" | cmp - "$version_file"
           printf '%s\n' "$digest"
           cat "$version_file"

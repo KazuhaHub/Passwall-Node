@@ -141,6 +141,115 @@ func TestTagsThatAreNotTagsAreRejected(t *testing.T) {
 	}
 }
 
+// The version a release is STAMPED with is not the tag it is PUBLISHED under.
+// They coincide in the legacy scheme, which is exactly why conflating them went
+// unnoticed: every comparison of the two agreed, because both were v-prefixed
+// strings. The product scheme separates them — the tag is `release/4.0.0` and
+// the version is `4.0.0` — and a build that stamped the tag would report a
+// version no surface expects.
+//
+// The legacy answer stays the tag, unchanged. Historical artifacts are not
+// renamed, and a release stamped `v0.0.1-beta11` must keep saying so.
+func TestTheStampedVersionOfATag(t *testing.T) {
+	for _, tc := range []struct {
+		tag  string
+		want string
+		why  string
+	}{
+		{"release/4.0.0", "4.0.0", "the product tag carries a namespace the version does not"},
+		{"release/102.1.0", "102.1.0", "the release line is part of the version, not of the tag alone"},
+		{"v1.0.0", "v1.0.0", "legacy releases are stamped exactly as they always were"},
+		{"v0.0.1-beta11", "v0.0.1-beta11", "including the prerelease, which the legacy scheme keeps in the version"},
+		{"v1.0.0-rc1", "v1.0.0-rc1", "and the rc shape"},
+	} {
+		t.Run(tc.tag, func(t *testing.T) {
+			tag, err := releaseid.ParseReleaseTag(tc.tag)
+			if err != nil {
+				t.Fatalf("ParseReleaseTag(%q): %v", tc.tag, err)
+			}
+			if got := tag.VersionString(); got != tc.want {
+				t.Errorf("VersionString() = %q, want %q (%s)", got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// A version string is never the tag, and the two are not interchangeable in
+// either direction: `4.0.0` is not a publishable tag, and the product tag is not
+// a version. A caller that swapped them would address a different URL.
+func TestTheVersionStringIsNotATag(t *testing.T) {
+	tag, err := releaseid.ParseReleaseTag("release/4.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version := tag.VersionString(); version == tag.Raw {
+		t.Fatalf("the product version and its tag must differ, both were %q", version)
+	}
+	if tag.Raw != "release/4.0.0" {
+		t.Fatalf("the raw tag is the published identity and must not be reconstructed: %q", tag.Raw)
+	}
+}
+
+// The inverse derivation, and the one the DOWNLOAD path needs. A consumer that
+// holds a version — the upgrade helper does, because it compares the version a
+// binary reports against the version it asked for — must be able to reach the
+// tag that says where that release lives.
+//
+// The round trip is the property, not the individual answers: whatever a tag
+// stamps, looking that stamp back up must return the same tag, in both schemes.
+// A version with a v is a legacy tag; a bare three-segment version is a product
+// tag, because those are the only two things a published version can be.
+func TestTheTagForAStampedVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    string
+		why     string
+	}{
+		{"4.0.0", "release/4.0.0", "a bare version belongs to the product namespace"},
+		{"102.1.0", "release/102.1.0", "including a release line above one"},
+		{"v0.0.1-beta11", "v0.0.1-beta11", "a v-prefixed version is already its own legacy tag"},
+		{"v1.0.0", "v1.0.0", "and so is a plain one"},
+		{"v1.0.0-rc1", "v1.0.0-rc1", "and the rc shape"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			tag, err := releaseid.TagForVersion(tc.version)
+			if err != nil {
+				t.Fatalf("TagForVersion(%q): %v", tc.version, err)
+			}
+			if tag.Raw != tc.want {
+				t.Errorf("TagForVersion(%q) = %q, want %q (%s)", tc.version, tag.Raw, tc.want, tc.why)
+			}
+			// The round trip: this tag stamps exactly the version we started
+			// with. Without it, a download could address a release whose own
+			// binary reports a different version, and the helper's identity
+			// check would reject it after the bytes were already fetched.
+			if back := tag.VersionString(); back != tc.version {
+				t.Errorf("TagForVersion(%q).VersionString() = %q, a round trip must be lossless", tc.version, back)
+			}
+		})
+	}
+}
+
+// Inputs that are neither a version nor a legacy tag are refused rather than
+// repaired into a URL. Today the same input builds a path segment that 404s, so
+// the failure moves earlier and says what was wrong.
+func TestTagForVersionRefusesWhatIsNotAVersion(t *testing.T) {
+	for _, version := range []string{
+		"",
+		"latest",
+		"4.0.0.1",
+		"release/4.0.0", // a tag is not a version; passing one is the swap this exists to prevent
+		"main",
+		"102.1.0-rc1", // a prerelease needs the legacy scheme's v
+	} {
+		t.Run(version, func(t *testing.T) {
+			if tag, err := releaseid.TagForVersion(version); err == nil {
+				t.Fatalf("TagForVersion(%q) = %+v, want a refusal", version, tag)
+			}
+		})
+	}
+}
+
 func TestChannelComesFromTheReleaseMetadataNotTheTagText(t *testing.T) {
 	for _, tc := range load(t).Channels {
 		got, err := releaseid.ResolveChannel(tc.Draft, tc.Prerelease)

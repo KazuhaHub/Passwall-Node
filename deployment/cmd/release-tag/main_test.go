@@ -33,20 +33,21 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func run(t *testing.T, tag string) (int, string) {
+func run(t *testing.T, tag string) (int, string, string) {
 	t.Helper()
 	cmd := exec.Command(releaseTagBinary, tag)
-	var stderr bytes.Buffer
+	var stderr, stdout bytes.Buffer
 	cmd.Stderr = &stderr
+	cmd.Stdout = &stdout
 	err := cmd.Run()
 	if err == nil {
-		return 0, stderr.String()
+		return 0, stdout.String(), stderr.String()
 	}
 	var exit *exec.ExitError
 	if !asExitError(err, &exit) {
 		t.Fatalf("running release-tag %q: %v", tag, err)
 	}
-	return exit.ExitCode(), stderr.String()
+	return exit.ExitCode(), stdout.String(), stderr.String()
 }
 
 func asExitError(err error, target **exec.ExitError) bool {
@@ -72,8 +73,42 @@ func TestAcceptedReleaseTags(t *testing.T) {
 		"release/102.1.0",
 	} {
 		t.Run(tag, func(t *testing.T) {
-			if code, stderr := run(t, tag); code != 0 {
+			if code, _, stderr := run(t, tag); code != 0 {
 				t.Fatalf("release-tag %q was refused (exit %d): %s", tag, code, stderr)
+			}
+		})
+	}
+}
+
+// The command reports the version the release is stamped with, because the
+// alternative is the workflow deriving it in shell — a second implementation of
+// a rule that has exactly one, in this repository, and two answers that could
+// disagree about the same tag.
+//
+// Its callers read it as output, so what it writes must be ONLY the version: a
+// banner or a trailing newline-bearing sentence would end up inside a filename
+// or an ldflags value.
+func TestTheReportedVersionIsWhatTheWorkflowStamps(t *testing.T) {
+	for _, tc := range []struct{ tag, want string }{
+		{"release/4.0.0", "4.0.0"},
+		{"release/102.1.0", "102.1.0"},
+		// Unchanged for the scheme that is already published: the version a
+		// legacy release is stamped with is the tag it was published under.
+		{"v1.0.0", "v1.0.0"},
+		{"v0.0.1-beta11", "v0.0.1-beta11"},
+	} {
+		t.Run(tc.tag, func(t *testing.T) {
+			code, stdout, stderr := run(t, tc.tag)
+			if code != 0 {
+				t.Fatalf("release-tag %q was refused: %s", tc.tag, stderr)
+			}
+			if got := strings.TrimSuffix(stdout, "\n"); got != tc.want {
+				t.Errorf("release-tag %q printed %q, want %q", tc.tag, got, tc.want)
+			}
+			// Exactly one trailing newline and nothing else, so a caller that
+			// captured this into a filename or an ldflags value gets the version.
+			if stdout != tc.want+"\n" {
+				t.Errorf("release-tag %q output %q, want exactly %q", tc.tag, stdout, tc.want+"\n")
 			}
 		})
 	}
@@ -106,12 +141,17 @@ func TestRefusedReleaseTags(t *testing.T) {
 		"",
 	} {
 		t.Run(tag, func(t *testing.T) {
-			code, stderr := run(t, tag)
+			code, stdout, stderr := run(t, tag)
 			if code == 0 {
 				t.Fatalf("release-tag %q was accepted", tag)
 			}
 			if strings.TrimSpace(stderr) == "" {
 				t.Fatal("a refusal must say why; the publisher sees only this")
+			}
+			// A refusal that still writes a version is the worst case: the
+			// workflow's `$(...)` would capture it and build anyway.
+			if strings.TrimSpace(stdout) != "" {
+				t.Fatalf("a refused tag printed %q on stdout, which a caller would read as a version", stdout)
 			}
 		})
 	}

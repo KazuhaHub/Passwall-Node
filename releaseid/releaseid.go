@@ -162,6 +162,60 @@ type Tag struct {
 	Product Version
 }
 
+// TagForVersion is the inverse of VersionString: the tag a release stamped with
+// this version was published under.
+//
+// IT EXISTS BECAUSE THE DOWNLOAD PATH HOLDS A VERSION, NOT A TAG. The upgrade
+// helper compares the version a binary reports against the version it asked
+// for, so the version is the identity it has; the URL needs the other one. A
+// consumer that concatenated the version into the path would address
+// `.../download/4.0.0/...` for a release that lives at `release/4.0.0`, and the
+// failure would look like a missing release rather than a wrong URL.
+//
+// WHICH SCHEME IS NOT GUESSED FROM THE SHAPE OF THE NUMBER. It is decided by
+// what a published version can be: a v-prefixed string is a legacy version and
+// is already its own tag; anything else must be a product version, because the
+// legacy scheme always wrote the v. The two answers are total — there is no
+// third case — and the round trip through VersionString is lossless, so a
+// caller cannot end up fetching a release whose own binary reports a different
+// version than the one requested.
+func TagForVersion(version string) (Tag, error) {
+	if strings.HasPrefix(version, "v") {
+		return ParseReleaseTag(version)
+	}
+	v, err := ParseProductVersion(version)
+	if err != nil {
+		return Tag{}, err
+	}
+	// The same refusal ParseReleaseTag makes, so the round trip holds: a tag
+	// this would build has to be one that package would accept.
+	if v.Major == 0 {
+		return Tag{}, fmt.Errorf("%w: %q has a zero release line, which is not a released identity", ErrUnknownFormat, version)
+	}
+	return Tag{Raw: TagPrefix + v.String(), Scheme: SchemeProduct, Product: v}, nil
+}
+
+// VersionString is the string this release is STAMPED with: the build version,
+// the archive name, the Docker tag.
+//
+// IT IS NOT THE TAG, AND THE TWO DIVERGE IN EXACTLY ONE DIRECTION. A product
+// tag is `release/4.0.0` and its version is `4.0.0`, because the namespace
+// exists so a product tag cannot be mistaken for a Go module version — it is
+// not part of the version. A legacy tag has no namespace, so its version IS the
+// tag, and this returns it unchanged rather than stripping a v: releases
+// already published were stamped `v0.0.1-beta11`, historical artifacts are not
+// renamed, and a derivation that "normalised" them would describe builds that
+// do not exist.
+//
+// Callers that need a URL path segment want Raw. Callers that need a version
+// want this. Substituting one for the other addresses a different release.
+func (t Tag) VersionString() string {
+	if t.Scheme == SchemeProduct {
+		return t.Product.String()
+	}
+	return t.Raw
+}
+
 // ParseReleaseTag parses a release tag.
 //
 // "release/MAJOR.MINOR.PATCH" is the current scheme, and the version part must
