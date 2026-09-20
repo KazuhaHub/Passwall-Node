@@ -151,3 +151,61 @@ func versionOnLine(tag Tag, line Line) (*Version, error) {
 	}
 	return &parsed, nil
 }
+
+// ResumeTag returns the release tag this source revision has ALREADY been
+// allocated, if it has one.
+//
+// A FAILED RELEASE THAT IS RE-RUN MUST CONTINUE ITS OWN NUMBER rather than take
+// another one, or every retry burns a number and the rule that a failed build may
+// leave a gap becomes an avalanche of them. What records the number is the source
+// revision itself: a tag points at a commit, so a rerun asks which tags point at
+// the commit it is about to build, and nothing else has to be written down.
+//
+// TWO CANDIDATES IS REFUSED RATHER THAN RESOLVED. Two tags on one commit, on one
+// line, in one scheme, are two releases that were given the same source — and
+// choosing between them would be this function deciding which of somebody's
+// releases does not count.
+// IT REPORTS THREE THINGS, NOT TWO. "Nothing is bound to this revision, so
+// allocate a number" and "two tags claim this revision, so refuse" are different
+// answers, and a bool collapses them: the first version of this returned false for
+// both, and the command above went on to allocate a fresh number for a commit that
+// already carried two — the ambiguity resolved by ignoring it.
+func ResumeTag(line Line, scheme Scheme, onCommit []string) (Tag, error) {
+	var found Tag
+	matches := 0
+	for _, raw := range onCommit {
+		tag, err := ParseReleaseTag(raw)
+		if err != nil || tag.Scheme != scheme {
+			continue
+		}
+		version, err := versionOnLine(tag, line)
+		if err != nil || version == nil {
+			continue
+		}
+		found = tag
+		matches++
+	}
+	switch matches {
+	case 0:
+		return Tag{}, ErrNotAllocated
+	case 1:
+		return found, nil
+	default:
+		return Tag{}, fmt.Errorf("%w: %d tags on this line and scheme point at the same source revision", ErrAmbiguousRevision, matches)
+	}
+}
+
+// TagForVersionInScheme renders the tag a version is published under, in a scheme
+// the caller has already decided.
+//
+// TagForVersion reads the scheme off the string, which is right when a version
+// arrives from outside — every legacy version began with a v and no product one
+// does. This is the other case: a caller that has just allocated a number for a
+// named scheme, and whose answer must not depend on how the number happens to
+// look.
+func TagForVersionInScheme(scheme Scheme, version Version) Tag {
+	if scheme == SchemeProduct {
+		return Tag{Raw: TagPrefix + version.String(), Scheme: SchemeProduct, Product: version}
+	}
+	return Tag{Raw: "v" + version.String(), Scheme: SchemeLegacy}
+}

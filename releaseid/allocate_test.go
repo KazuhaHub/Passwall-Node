@@ -152,3 +152,73 @@ func TestReleaseLinesAreParsedInTheOneFormTheyHave(t *testing.T) {
 		}
 	}
 }
+
+// A RERUN CONTINUES ITS OWN NUMBER. A failed release that is re-run must resume
+// the number it already took rather than allocate another one — otherwise every
+// retry burns a number and the "gap" rule becomes an avalanche.
+//
+// WHAT RECORDS THE NUMBER IS THE SOURCE REVISION. A tag points at a commit, so a
+// rerun of the same release finds its own tag by asking which tags point at the
+// commit it is about to build. Nothing else has to be written down.
+func TestResumingTheNumberAlreadyBoundToThisSourceRevision(t *testing.T) {
+	line, err := releaseid.ParseReleaseLine("4.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		scheme   releaseid.Scheme
+		onCommit []string
+		want     string
+		found    bool
+	}{
+		{
+			name: "its own product tag", scheme: releaseid.SchemeProduct,
+			onCommit: []string{"release/4.0.3", "unrelated"}, want: "release/4.0.3", found: true,
+		},
+		{
+			name: "its own legacy tag", scheme: releaseid.SchemeLegacy,
+			onCommit: []string{"v4.0.7"}, want: "v4.0.7", found: true,
+		},
+		{
+			name: "a tag on another line is not this release", scheme: releaseid.SchemeProduct,
+			onCommit: []string{"release/4.1.0", "v4.0.7"},
+		},
+		{
+			name: "the other scheme's tag is not this release", scheme: releaseid.SchemeProduct,
+			onCommit: []string{"v4.0.7"},
+		},
+		{
+			name: "nothing on the commit", scheme: releaseid.SchemeProduct, onCommit: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tag, err := releaseid.ResumeTag(line, tc.scheme, tc.onCommit)
+			if tc.found {
+				if err != nil || tag.Raw != tc.want {
+					t.Fatalf("ResumeTag = %q, %v; want %q", tag.Raw, err, tc.want)
+				}
+				return
+			}
+			// NOTHING BOUND IS ITS OWN ANSWER, not a refusal: the caller allocates
+			// a number. Collapsing it into "no" is what let the command allocate a
+			// fresh number for an ambiguous commit.
+			if !errors.Is(err, releaseid.ErrNotAllocated) {
+				t.Fatalf("ResumeTag = %q, %v; want ErrNotAllocated", tag.Raw, err)
+			}
+		})
+	}
+}
+
+// TWO TAGS ON ONE COMMIT ON THE SAME LINE AND SCHEME IS AMBIGUOUS, and picking one
+// would be this function choosing which of somebody's releases does not count.
+func TestResumingRefusesAnAmbiguousCommit(t *testing.T) {
+	line, err := releaseid.ParseReleaseLine("4.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, err := releaseid.ResumeTag(line, releaseid.SchemeProduct, []string{"release/4.0.1", "release/4.0.2"})
+	if !errors.Is(err, releaseid.ErrAmbiguousRevision) {
+		t.Fatalf("ResumeTag = %q, %v; want ErrAmbiguousRevision", tag.Raw, err)
+	}
+}

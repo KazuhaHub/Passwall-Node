@@ -85,6 +85,14 @@ var (
 	ErrSegmentRange = errors.New("releaseid: version segment out of range")
 	// ErrNotTagged means a release has not been published, so it has no channel.
 	ErrNotTagged = errors.New("releaseid: release is still a draft")
+	// ErrNotAllocated means nothing has been allocated to the source revision
+	// being released yet, so the caller allocates a number. It is not a refusal:
+	// it is the ordinary case of a first attempt.
+	ErrNotAllocated = errors.New("releaseid: no number is bound to this source revision yet")
+	// ErrAmbiguousRevision means more than one tag on one line and scheme claims
+	// the same source revision — two releases given one source, which is somebody's
+	// decision to make rather than this package's to resolve.
+	ErrAmbiguousRevision = errors.New("releaseid: this source revision carries more than one release on the same line")
 )
 
 // Version is a normalized product version. It always has all three segments;
