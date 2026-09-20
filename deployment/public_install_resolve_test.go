@@ -96,11 +96,16 @@ const downloadPrefix = "https://github.com/KazuhaHub/Passwall-Node/releases/down
 
 // releaseDocument renders one release the way the GitHub API does: pretty
 // printed, top level object first, assets last.
-func releaseDocument(tag string, assets ...string) string {
+// releaseDocumentAt is one release with a stated publication time. The time is what
+// chooses the release now, so a fixture without one describes a document the
+// resolver refuses — and a fixture that gave them all the same instant would test
+// the tie-break rather than the choice.
+func releaseDocumentAt(tag, publishedAt string, assets ...string) string {
 	var b strings.Builder
 	b.WriteString("[\n  {\n")
 	b.WriteString(`    "url": "https://api.github.com/repos/KazuhaHub/Passwall-Node/releases/1",` + "\n")
 	b.WriteString(`    "tag_name": "` + tag + `",` + "\n")
+	b.WriteString(`    "published_at": "` + publishedAt + `",` + "\n")
 	b.WriteString(`    "name": "Passwall Node ` + tag + `",` + "\n")
 	b.WriteString("    \"assets\": [\n")
 	for i, asset := range assets {
@@ -115,6 +120,10 @@ func releaseDocument(tag string, assets ...string) string {
 	}
 	b.WriteString("    ]\n  }\n]\n")
 	return b.String()
+}
+
+func releaseDocument(tag string, assets ...string) string {
+	return releaseDocumentAt(tag, "2026-09-20T07:08:15Z", assets...)
 }
 
 func TestResolveReleaseSelectsTheCanonicalArchive(t *testing.T) {
@@ -279,20 +288,49 @@ func TestResolveReleaseRefusesATagThatDoesNotAddressItsAssets(t *testing.T) {
 	}
 }
 
-// TWO RELEASES IN ONE DOCUMENT IS THE MIXING HAZARD. The beta channel asks for a
-// page of releases; if that ever returns more than one, one release's assets
-// could be selected against another's tag.
-func TestResolveReleaseRefusesADocumentDescribingTwoReleases(t *testing.T) {
-	document := releaseDocument("release/4.0.0",
-		"passwall-node_4.0.0_linux_amd64.tar.gz", "SHA256SUMS.txt") +
-		releaseDocument("release/4.1.0",
-			"passwall-node_4.1.0_linux_amd64.tar.gz", "SHA256SUMS.txt")
-	output, err := driver(t, document, "amd64").CombinedOutput()
-	if err == nil {
-		t.Fatalf("resolution accepted a document describing two releases:\n%s", output)
+// THE PAGE IS NOT IN PUBLICATION ORDER, AND THE NEWEST IS CHOSEN BY TIME.
+//
+// This used to refuse a document describing two releases, because the resolver
+// assumed `releases[0]` was the newest and two releases would let one release's
+// assets be selected against another's tag. Against the live API that assumption
+// was wrong — a release published two hours later sat at index 1 — so the newest
+// is now chosen by its own publication time, and the assets are scoped by the tag
+// that chose it.
+func TestResolveReleaseChoosesTheNewestByPublicationTime(t *testing.T) {
+	older := releaseDocumentAt("v0.0.1-beta11", "2026-09-18T10:31:27Z",
+		"passwall-node_v0.0.1-beta11_linux_amd64.tar.gz", "SHA256SUMS.txt")
+	newer := releaseDocumentAt("release/4.0.0", "2026-09-20T09:01:33Z",
+		"passwall-node_4.0.0_linux_amd64.tar.gz", "SHA256SUMS.txt")
+
+	// The newer one SECOND, which is the arrangement the live API served.
+	output, err := driver(t, older+newer, "amd64").CombinedOutput()
+	if err != nil {
+		t.Fatalf("a page of releases was refused instead of ordered: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "more than one release") {
-		t.Errorf("refusal did not say the document described more than one release:\n%s", output)
+	for _, want := range []string{
+		"tag=release/4.0.0",
+		"version=4.0.0",
+		"archive=" + downloadPrefix + "release/4.0.0/passwall-node_4.0.0_linux_amd64.tar.gz",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Errorf("the newer release was not chosen; missing %q:\n%s", want, output)
+		}
+	}
+	// AND THE OTHER RELEASE'S ASSETS ARE NOT CANDIDATES. Selecting by tag is what
+	// makes that true rather than lucky.
+	if strings.Contains(string(output), "v0.0.1-beta11") {
+		t.Errorf("an asset from the other release was selected:\n%s", output)
+	}
+
+	// A RELEASE WITH NO PUBLICATION TIME CANNOT BE ORDERED, so the page is refused
+	// rather than resolved by position — which is the assumption that failed.
+	timeless := strings.Replace(newer, `"published_at": "2026-09-20T09:01:33Z",`, "", 1)
+	output, err = driver(t, older+timeless, "amd64").CombinedOutput()
+	if err == nil {
+		t.Fatalf("a page with an unorderable release was resolved:\n%s", output)
+	}
+	if !strings.Contains(string(output), "publication time") {
+		t.Errorf("the refusal does not say what stopped it:\n%s", output)
 	}
 }
 
@@ -307,7 +345,7 @@ func TestResolveReleaseRefusesABodyThatNamesNoRelease(t *testing.T) {
 	if err == nil {
 		t.Fatalf("resolution accepted a body that names no release:\n%s", output)
 	}
-	if !strings.Contains(string(output), "did not name a release") {
+	if !strings.Contains(string(output), "named no release") {
 		t.Errorf("refusal did not distinguish an absent release from an ambiguous one:\n%s", output)
 	}
 }
