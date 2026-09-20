@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/internal/nodeevent"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // HostCollector is what the reporter needs from a platform collector.

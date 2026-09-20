@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/KazuhaHub/passwall-node/corecatalog"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func validateConfig(body *protocol.ConfigBody) error {

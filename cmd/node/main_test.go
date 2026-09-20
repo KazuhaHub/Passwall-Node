@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // The shape below is the contract operators read out of the journal, and it is

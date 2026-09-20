@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func TestOpenMigratesV2QuotaStateWithoutLosingClients(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // mintSampleID produces the per-collection identity the panel is idempotent on.

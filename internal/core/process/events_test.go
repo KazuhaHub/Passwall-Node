@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 type recordingSink struct{ events []protocol.DiagnosticsEvent }

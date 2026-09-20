@@ -12,7 +12,7 @@ import (
 	"time"
 
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func TestRealityCompatibilityFor(t *testing.T) {

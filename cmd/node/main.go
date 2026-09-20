@@ -36,7 +36,7 @@ import (
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-node/internal/upgrade"
 	buildversion "github.com/KazuhaHub/passwall-node/internal/version"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const defaultXrayAPIListen = "127.0.0.1:10085"
