@@ -55,11 +55,28 @@ jobs:
           # what the image tag, the version label and the binary's own
           # `--version` are compared against, and it is derived once here
           # rather than re-derived per assertion.
+          #
+          # THE WORKFLOW IS DISPATCHED FROM A BRANCH AND BINDS ITSELF TO THE TAG.
+          # It used to require dispatch FROM the tag so that GITHUB_REF and
+          # GITHUB_SHA named the release -- which also meant the workflow that
+          # ran was the one frozen at that tag, so the job could never be fixed
+          # without cutting a new release, and a defect in it could only be
+          # found by a run that could not be repaired. It resolves and checks
+          # out the tag here instead, and carries that commit forward as
+          # RELEASE_SHA.
+          #
+          # BOTH VARIABLES CROSS A STEP BOUNDARY, so they go through GITHUB_ENV:
+          # a shell assignment in this step is gone by the next one, and every
+          # later step reads them under `set -u`.
+          git checkout --detach "refs/tags/${TAG}"
+          release_sha=$(git rev-parse HEAD)
+          test "$release_sha" = "$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
           version=$(go run ./deployment/cmd/release-tag "$TAG")
           test -n "$version"
-          test "$GITHUB_REF" = "refs/tags/$TAG"
-          test "$(git rev-parse --verify "refs/tags/${TAG}^{commit}")" = "$GITHUB_SHA"
-          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          {
+            echo "version=$version"
+            echo "RELEASE_SHA=$release_sha"
+          } >> "$GITHUB_ENV"
           test "$(go env GOHOSTOS)" = linux
           test "$(go env GOHOSTARCH)" = "$ACCEPTANCE_ARCH"
           test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
@@ -77,7 +94,7 @@ jobs:
           image="${IMAGE_REPOSITORY}:${version}"
           docker pull --platform "linux/$ACCEPTANCE_ARCH" "$image"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$ACCEPTANCE_ARCH"
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$RELEASE_SHA"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$version"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image")" = Apache-2.0
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image")" = "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
@@ -96,6 +113,6 @@ jobs:
             --security-opt no-new-privileges \
             "$image" --version > "$version_file"
           # Compare exact stdout bytes, including its one trailing newline.
-          printf '%s (%s)\n' "$version" "${GITHUB_SHA:0:7}" | cmp - "$version_file"
+          printf '%s (%s)\n' "$version" "${RELEASE_SHA:0:7}" | cmp - "$version_file"
           printf '%s\n' "$digest"
           cat "$version_file"
