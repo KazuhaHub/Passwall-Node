@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 type recordingSink struct{ events []protocol.DiagnosticsEvent }

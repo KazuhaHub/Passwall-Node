@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // SegmentFailure rejects exactly one stream. Other streams in the same

@@ -9,7 +9,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/internal/host"
 	"github.com/KazuhaHub/passwall-node/internal/manage"
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // newDiagnosticsHandler builds the redacted remote diagnostic.

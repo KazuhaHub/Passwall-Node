@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // parseSNMP reads the header/value line pairs of /proc/net/snmp.

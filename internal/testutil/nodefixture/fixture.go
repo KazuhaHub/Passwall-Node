@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/corecatalog"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const Path = "/acceptance-prefix/v1/node/sync"

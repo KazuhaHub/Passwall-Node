@@ -10,7 +10,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
 	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func agentTask(id, kind string, args []byte) protocol.Task {

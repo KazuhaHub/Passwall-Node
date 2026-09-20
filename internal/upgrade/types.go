@@ -11,8 +11,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
 	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const TaskKind = protocol.TaskKindAgentUpgradeV1

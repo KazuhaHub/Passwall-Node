@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // LocalIssueKind is internal policy, not public wire surface. The executable's

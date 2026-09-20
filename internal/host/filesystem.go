@@ -1,6 +1,6 @@
 package host
 
-import "github.com/KazuhaHub/passwall-node/protocol"
+import "github.com/KazuhaHub/passwall-protocol/protocol"
 
 // collectFilesystem measures the filesystem holding the agent's data directory.
 //

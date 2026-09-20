@@ -3,7 +3,7 @@ package host
 import (
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // The kernel's column order is not this protocol's column order: receive comes

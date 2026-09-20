@@ -11,7 +11,7 @@ import (
 
 	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const defaultOutboxBatch = 256

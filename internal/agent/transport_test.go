@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func TestHTTPSyncerRoundTrip(t *testing.T) {

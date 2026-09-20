@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 type expiryClockFunc func() (state.TaskTimeBounds, error)

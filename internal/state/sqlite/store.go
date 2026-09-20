@@ -17,7 +17,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 const schemaVersion = 9

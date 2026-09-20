@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 // RuntimeStats records the agent's own sync behaviour for the runtime section.

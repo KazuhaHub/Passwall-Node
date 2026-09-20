@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/protocol"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 func TestValidateCoreSelectionUsesAuditedCatalogAndExplicitRestriction(t *testing.T) {
