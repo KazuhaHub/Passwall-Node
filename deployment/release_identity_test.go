@@ -124,7 +124,7 @@ func TestContainerAcceptanceDerivesTheVersionFromTheTag(t *testing.T) {
 	for _, required := range []string{
 		`image="${IMAGE_REPOSITORY}:${version}"`,
 		`"org.opencontainers.image.version" }}' "$image")" = "$version"`,
-		`printf '%s (%s)\n' "$version" "${GITHUB_SHA:0:7}"`,
+		`printf '%s (%s)\n' "$version" "${RELEASE_SHA:0:7}"`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("a version-bearing acceptance check still uses the tag: missing %q", required)
@@ -132,11 +132,65 @@ func TestContainerAcceptanceDerivesTheVersionFromTheTag(t *testing.T) {
 	}
 	// The ref assertions are the tag's job.
 	for _, required := range []string{
-		`test "$GITHUB_REF" = "refs/tags/$TAG"`,
 		`refs/tags/${TAG}^{commit}`,
+		`git checkout --detach "refs/tags/${TAG}"`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("the tag ref assertions were changed: missing %q", required)
+		}
+	}
+}
+
+// THE VALUES A LATER STEP READS MUST BE EXPORTED, NOT ASSIGNED.
+//
+// This job was dispatch-only and had never run, so this was latent: `version`
+// was a shell assignment in the binding step and a variable in the next one, and
+// shell assignments do not survive a step boundary — the pull step died on
+// `version: unbound variable` under `set -u` before printing anything, which is
+// why its CI log showed nothing but an exit code. A workflow whose steps pass
+// values by assignment passes review and fails a runner.
+func TestTheContainerAcceptanceExportsWhatLaterStepsRead(t *testing.T) {
+	workflow, err := os.ReadFile("../.github/workflows/container-acceptance.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported []string
+	for _, line := range strings.Split(string(workflow), "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), `echo "RELEASE_SHA=`); ok {
+			_ = value
+			exported = append(exported, "RELEASE_SHA")
+		}
+	}
+	if len(exported) == 0 {
+		t.Fatal("the release commit is not exported to later steps; a shell assignment in the binding step is gone by the next one")
+	}
+	if !strings.Contains(string(workflow), `} >> "$GITHUB_ENV"`) {
+		t.Fatal("the binding step does not write to GITHUB_ENV, so nothing it derives reaches the steps that check it")
+	}
+}
+
+// AND IT CAN BE FIXED, WHICH REQUIRES THAT IT CAN BE RUN FROM SOMEWHERE MUTABLE.
+//
+// It used to assert `GITHUB_REF = refs/tags/$TAG`, which is a requirement to
+// dispatch FROM the tag — and the workflow a tag runs is the one frozen at that
+// tag, so a defect in this job could only ever be found by a run nobody could
+// repair. It binds itself to the tag instead, so the file under test is the one
+// on the branch.
+func TestTheContainerAcceptanceBindsItselfToTheTag(t *testing.T) {
+	workflow, err := os.ReadFile("../.github/workflows/container-acceptance.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	if strings.Contains(text, `test "$GITHUB_REF" = "refs/tags/$TAG"`) {
+		t.Fatal("the job still requires dispatch from the tag, so the workflow it runs is the one frozen at that tag and cannot be repaired")
+	}
+	for _, required := range []string{
+		`release_sha=$(git rev-parse HEAD)`,
+		`test "$release_sha" = "$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("the job does not bind its checkout to the tag's own commit: missing %q", required)
 		}
 	}
 }
