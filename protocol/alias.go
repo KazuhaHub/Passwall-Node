@@ -49,6 +49,7 @@ type ETag = p.ETag
 type Envelope = p.Envelope
 type FilesystemObservation = p.FilesystemObservation
 type GateState = p.GateState
+type GenerationRange = p.GenerationRange
 type HostObservation = p.HostObservation
 type HostScope = p.HostScope
 type IPShadowEntry = p.IPShadowEntry
@@ -235,8 +236,11 @@ const UnavailableTuningQdisc = p.UnavailableTuningQdisc
 
 var DiagnosticsCheckCodes = p.DiagnosticsCheckCodes
 
-func AgentUpgradeCapabilities() []string                         { return p.AgentUpgradeCapabilities() }
-func AssessCompatibility(a0 int, a1 []string) Compatibility      { return p.AssessCompatibility(a0, a1) }
+func AgentUpgradeCapabilities() []string                    { return p.AgentUpgradeCapabilities() }
+func AssessCompatibility(a0 int, a1 []string) Compatibility { return p.AssessCompatibility(a0, a1) }
+func AssessCompatibilityIn(a0 int, a1 []string, a2 GenerationRange) Compatibility {
+	return p.AssessCompatibilityIn(a0, a1, a2)
+}
 func ComputeTaskInputSHA256(a0 string, a1 []byte) string         { return p.ComputeTaskInputSHA256(a0, a1) }
 func Converged(a0, a1 ETag) bool                                 { return p.Converged(a0, a1) }
 func DecodeAgentUpgradeArgs(a0 []byte) (AgentUpgradeArgs, error) { return p.DecodeAgentUpgradeArgs(a0) }
@@ -259,6 +263,7 @@ func NewSubjectKey(a0 int64) SubjectKey                    { return p.NewSubject
 func ShouldSendFull(a0 Envelope, a1 int) bool              { return p.ShouldSendFull(a0, a1) }
 func ShouldSendHost(a0 Envelope, a1 int) bool              { return p.ShouldSendHost(a0, a1) }
 func SortDiagnosticsEvents(a0 []DiagnosticsEvent)          { p.SortDiagnosticsEvents(a0) }
+func SupportedGenerationRange() GenerationRange            { return p.SupportedGenerationRange() }
 func TaskCapability(a0 string) string                      { return p.TaskCapability(a0) }
 func ValidateDiagnosticsArgs(a0 DiagnosticsArgs) error     { return p.ValidateDiagnosticsArgs(a0) }
 func ValidateDiagnosticsResult(a0 DiagnosticsResult) error { return p.ValidateDiagnosticsResult(a0) }
