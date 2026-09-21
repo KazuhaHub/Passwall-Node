@@ -72,26 +72,24 @@ func TestTheReleaseWorkflowKeepsTheTagAndTheVersionApart(t *testing.T) {
 	}
 }
 
-// THE TRIGGER AND THE PUBLICATION SCHEME ARE THE SAME DECISION, AND IT WENT THE
-// OTHER WAY.
+// THE TRIGGER AND THE PUBLICATION SCHEME ARE ONE DECISION, AND IT HAS REVERSED
+// TWICE.
 //
-// This test used to require BOTH patterns, and before that it asserted the
-// ABSENCE of `release/*` until the installers could identify a product release.
-// Now it requires that one and REFUSES the other: the scheme a trigger accepts is
-// the scheme the products publish, and a workflow that still triggers on a
-// v-prefixed tag is a way to cut a release the panel cannot read.
+// It first asserted the ABSENCE of `release/*` — for as long as the installers
+// could not identify a product release — then REQUIRED it and refused a v-prefixed
+// tag, and now requires `v*` and refuses `release/*`: the namespace the first four
+// releases live in, and where nothing new is written. A reader who deletes this
+// instead of inverting it loses the history — each absence was a decision with a
+// condition attached, and the conditions moved rather than expired.
 //
-// A reader who deletes this instead of inverting it loses both halves of that
-// history — that the absence was a decision with a condition attached, and that
-// the condition has now moved to the other pattern.
-//
-// AND THE REFUSAL IS NOW LOAD-BEARING FOR A SECOND REASON. Every release is also a
-// Go MODULE version, so the allocator pushes a `v`-prefixed tag beside it —
-// `v4.0.1` for `release/4.0.1`, because a module whose path ends in /vMAJOR accepts
-// only vMAJOR.*. A `v*` trigger would therefore fire a whole release off a tag that
-// is not a release: the workflow runs, resolves a version from a name it does not
-// understand, and publishes under it.
-func TestTheNodeReleaseWorkflowTriggersOnTheCurrentSchemeOnly(t *testing.T) {
+// THE REASON THE v-PREFIXED TRIGGER WAS REFUSED IS GONE, WHICH IS WHY THE PATTERN
+// MOVED. Every release used to push a `v`-prefixed GO MODULE tag BESIDE its product
+// tag — `v4.0.1` for `release/4.0.1`, because a module whose path ends in /vMAJOR
+// accepts only vMAJOR.* — so a `v*` trigger would have fired a whole release off a
+// tag that is not a release. The two identities are the same string now: the module
+// path carries the product major, one tag names both, and there is no second tag to
+// mistake for one.
+func TestTheNodeReleaseWorkflowTriggersOnTheCurrentNamespaceOnly(t *testing.T) {
 	// Only release.yml triggers on tags. The acceptance workflows are
 	// dispatch-only: they are pointed at a published tag ref by hand, which is
 	// why they need no trigger and why they take the tag as an input.
@@ -102,15 +100,15 @@ func TestTheNodeReleaseWorkflowTriggersOnTheCurrentSchemeOnly(t *testing.T) {
 	patterns := triggerTagPatterns(string(workflow))
 	found := false
 	for _, pattern := range patterns {
-		if pattern == "v*" {
-			t.Fatalf("the release workflow still triggers on a v-prefixed tag (found %v). This project publishes only `release/*`, AND every release also pushes a `v`-prefixed GO MODULE tag beside it — so this trigger would fire a release off a tag that is not one", patterns)
-		}
 		if pattern == "release/*" {
+			t.Fatalf("the release workflow still triggers on release/* (found %v). That namespace holds the four releases published before the address changed, and a published tag cannot be moved — so a tag it does trigger on is a new release published into a namespace whose only members are fixed", patterns)
+		}
+		if pattern == "v*" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("the release workflow does not trigger on release/* (found %v). A tag it does not trigger on is a release that does not happen: no run, no artifact, and a tag that names nothing", patterns)
+		t.Fatalf("the release workflow does not trigger on v* (found %v). A tag it does not trigger on is a release that does not happen: no run, no artifact, and a tag that names nothing", patterns)
 	}
 }
 

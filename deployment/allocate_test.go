@@ -177,17 +177,17 @@ func TestItAllocatesTheNextPatchAndCreatesTheTag(t *testing.T) {
 	head := repo.commit(t, "second")
 
 	// A NEW COMMIT, so this is a new release rather than a rerun of 4.0.0.
-	if got := repo.tagSHA(t, "release/4.0.0.1"); got != "" {
+	if got := repo.tagSHA(t, "v4.0.0.1"); got != "" {
 		t.Fatalf("the tag already existed: %s", got)
 	}
 	tag, stderr, err := repo.allocate(t, "4.0")
 	if err != nil {
 		t.Fatalf("allocate: %v\n%s", err, stderr)
 	}
-	if tag != "release/4.0.0.1" {
-		t.Fatalf("tag = %q, want release/4.0.0.1", tag)
+	if tag != "v4.0.0.1" {
+		t.Fatalf("tag = %q, want v4.0.0.1", tag)
 	}
-	if got := repo.tagSHA(t, "release/4.0.0.1"); got != head {
+	if got := repo.tagSHA(t, "v4.0.0.1"); got != head {
 		t.Fatalf("the tag was not created on the released revision: %s vs %s", got, head)
 	}
 }
@@ -341,10 +341,10 @@ func TestALostRaceReReadsRatherThanOverwriting(t *testing.T) {
 	}
 	// The number the first attempt wanted is now taken, so the second attempt must
 	// have moved past it rather than taken it back.
-	if tag != "release/4.0.0.2" {
-		t.Fatalf("tag = %q, want release/4.0.0.2 — the taken number must not be reused (stderr: %s)", tag, stderr)
+	if tag != "v4.0.0.2" {
+		t.Fatalf("tag = %q, want v4.0.0.2 — the taken number must not be reused (stderr: %s)", tag, stderr)
 	}
-	if got := repo.tagSHA(t, "release/4.0.0.1"); got != thief {
+	if got := repo.tagSHA(t, "v4.0.0.1"); got != thief {
 		t.Fatalf("the tag the other revision took was moved to %s; a number bound to a revision stays bound", got)
 	}
 	if got := repo.tagSHA(t, tag); got != head {
@@ -381,94 +381,62 @@ func TestTheShellRefusesToMoveAPublishedTag(t *testing.T) {
 	}
 }
 
-// ONE RELEASE, TWO TAGS, THE SAME NUMBER.
+// ONE TAG NAMES THE RELEASE AND THE MODULE VERSION.
 //
-// The products publish `release/MAJOR.MINOR.PATCH`, which is a git ref and NOT a
-// Go module version: Go resolves a dependency from a tag that starts with `v`, and
-// a module whose path ends in `/vMAJOR` accepts only `vMAJOR.*`. So a release that
-// is also a dependency needs both tags, naming the same revision — the module line
-// IS the product line, and nothing should have to remember to keep them in step.
+// The tag is `vMAJOR.MINOR.PATCH`, which is both the release's ADDRESS and — for a
+// three-segment release — this module's VERSION: the module path ends in `/v4`, so
+// `go get .../v4@v4.0.1` resolves it. The two identities coincide by construction,
+// which is why a release binds ONE tag. The script used to push a second one beside
+// it (`v4.0.1` for `release/4.0.1`); under this namespace that pushes the same ref
+// twice and leaves two tags naming one release on one revision, which the resume
+// path reads as an AMBIGUITY rather than as a rerun.
 //
-// THE MODULE TAG IS DERIVED FROM THE ONE THE SCRIPT RETURNED rather than written
-// out here. Which number a release gets is the allocator's rule and not this
-// change's subject, so restating it would make these cases fail for a reason that
-// has nothing to do with them.
-func moduleTagFor(tag string) string {
-	return "v" + strings.TrimPrefix(tag, "release/")
-}
-
-func TestItBindsTheModuleTagAtTheSameRevisionAsTheReleaseTag(t *testing.T) {
+// A FOUR-SEGMENT RELEASE IS NOT A MODULE VERSION and cannot be made into one: the
+// build component is part of the address, and Go's rule for a module whose path ends
+// in /vMAJOR is vMAJOR.MINOR.PATCH. Nothing ever resolved `v4.0.1.1` either, so the
+// property is older than this change.
+func TestOneTagNamesTheReleaseAndTheModuleVersion(t *testing.T) {
 	repo := newReleaseRepo(t)
 	first := strings.TrimSpace(gitIn(t, repo.work, "rev-parse", "HEAD"))
-	repo.tagOnRemote(t, first, "release/4.0.0")
-	head := repo.commit(t, "second")
-
-	tag, stderr, err := repo.allocate(t, "4.0")
-	if err != nil {
-		t.Fatalf("allocate: %v\n%s", err, stderr)
-	}
-	if got := repo.tagSHA(t, tag); got != head {
-		t.Fatalf("the release tag %s = %q, want %s", tag, got, head)
-	}
-	if got := repo.tagSHA(t, moduleTagFor(tag)); got != head {
-		t.Fatalf("the module tag %s = %q, want the released revision %s (the Go module version is what `go get` resolves, and without it the pin stays a pseudo-version)", moduleTagFor(tag), got, head)
-	}
-}
-
-// A RELEASE THAT GOT ONLY THE PRODUCT TAG IS COMPLETED BY A RERUN.
-//
-// The module tag is created after the number is bound, so it can be missing while
-// the release itself is fine — a failed step, an interrupted run. This drives the
-// RESUME path: the number is already bound to this revision, which the allocator
-// has always resumed, and the run's job here is only the second tag.
-func TestARerunAddsTheModuleTagToAReleaseThatIsMissingIt(t *testing.T) {
-	repo := newReleaseRepo(t)
-	head := strings.TrimSpace(gitIn(t, repo.work, "rev-parse", "HEAD"))
-	// The state that leaves behind: the number is bound, the module line has not
-	// caught up.
-	repo.tagOnRemote(t, head, "release/4.0.0")
-
-	tag, stderr, err := repo.allocate(t, "4.0")
-	if err != nil {
-		t.Fatalf("allocate: %v\n%s", err, stderr)
-	}
-	if tag != "release/4.0.0" {
-		t.Fatalf("a rerun took another number: %q", tag)
-	}
-	if got := repo.tagSHA(t, "v4.0.0"); got != head {
-		t.Fatalf("the module tag is still missing: %q, want %s", got, head)
-	}
-}
-
-// A MODULE TAG ON ANOTHER REVISION IS REFUSED, NOT MOVED.
-//
-// That state is the module line disagreeing with the product line, and it is the
-// one thing this must not paper over: moving the tag would rewrite what a
-// dependency version means for anybody who already resolved it, and skipping it
-// silently would leave the two lines apart with nothing saying so.
-func TestAModuleTagOnAnotherRevisionIsRefusedRatherThanMoved(t *testing.T) {
-	repo := newReleaseRepo(t)
-	first := strings.TrimSpace(gitIn(t, repo.work, "rev-parse", "HEAD"))
-	// The module line bound early, and the release that then claimed the same
-	// number at a different revision.
 	repo.tagOnRemote(t, first, "v4.0.0")
 	head := repo.commit(t, "second")
-	repo.tagOnRemote(t, head, "release/4.0.0")
 
 	tag, stderr, err := repo.allocate(t, "4.0")
-	if err == nil {
-		t.Fatalf("a module tag bound to another revision was accepted: %q", tag)
+	if err != nil {
+		t.Fatalf("allocate: %v\n%s", err, stderr)
 	}
-	if !strings.Contains(stderr, "v4.0.0") {
-		t.Errorf("the refusal does not name the tag that diverged:\n%s", stderr)
+	if tag != "v4.0.0.1" {
+		t.Fatalf("tag = %q, want the next number on the line", tag)
 	}
-	if got := repo.tagSHA(t, "v4.0.0"); got != first {
-		t.Fatalf("the module tag was moved to %q", got)
+	if got := repo.tagSHA(t, tag); got != head {
+		t.Fatalf("the tag %s = %q, want %s", tag, got, head)
 	}
-	// AND THE NUMBER IS STILL BOUND. The product tag is the decision, and it is not
-	// what is wrong — refusing before it would leave the release with no tag at all
-	// and the same divergence to resolve.
-	if got := repo.tagSHA(t, "release/4.0.0"); got != head {
-		t.Fatalf("the release tag = %q, want the released revision %s", got, head)
+	// AND IT IS THE ONLY TAG THE RUN CREATED. A second tag naming the same release
+	// is what makes a rerun ambiguous instead of resumable.
+	listed := gitIn(t, repo.work, "ls-remote", "--tags", "--refs", "origin")
+	if count := strings.Count(listed, "refs/tags/"); count != 2 {
+		t.Fatalf("the run left %d tags, want the one it counted from and the one it bound:\n%s", count, listed)
+	}
+}
+
+// A RERUN RESUMES ITS OWN TAG, WHICH IS THE PROPERTY THE SECOND TAG BROKE.
+//
+// The number is bound to a revision by the tag, so a failed build that is retried
+// continues its own rather than taking the next one.
+func TestARerunOfAReleaseBindsNoSecondTag(t *testing.T) {
+	repo := newReleaseRepo(t)
+	head := strings.TrimSpace(gitIn(t, repo.work, "rev-parse", "HEAD"))
+	repo.tagOnRemote(t, head, "v4.0.0")
+
+	tag, stderr, err := repo.allocate(t, "4.0")
+	if err != nil {
+		t.Fatalf("rerun: %v\n%s", err, stderr)
+	}
+	if tag != "v4.0.0" {
+		t.Fatalf("a rerun took another number: %q", tag)
+	}
+	listed := gitIn(t, repo.work, "ls-remote", "--tags", "--refs", "origin")
+	if count := strings.Count(listed, "refs/tags/"); count != 1 {
+		t.Fatalf("the rerun left %d tags, want the one already bound:\n%s", count, listed)
 	}
 }

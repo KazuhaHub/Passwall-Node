@@ -56,6 +56,11 @@ func releaseTagPath(tag string) string {
 	return strings.Join(segments, "/")
 }
 
+// errReleaseMissing is the address having no such release, which is a FACT about
+// the address rather than about the download. It is the one failure another address
+// can answer for.
+var errReleaseMissing = errors.New("upgrade release download returned HTTP 404")
+
 // ReleaseFetcherOptions deliberately has no source URL or resolver. An upgrade
 // task can select only an exact release from the official PN publisher.
 type ReleaseFetcherOptions struct {
@@ -161,15 +166,19 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	// THE CALLER HOLDS A VERSION, NOT A TAG, and it has to: the archive's own
 	// binary reports the version it was stamped with, and that is compared
 	// against the version requested. The tag is where the release LIVES, and it
-	// is reached from the version rather than sent alongside it, so the two can
+	// is found from the version rather than sent alongside it, so the two can
 	// never be given to this function out of step.
 	//
-	// TagForVersion is the shape check as well as the mapping: it refuses anything
-	// that is not a product version, which is the rule this has to hold to.
-	tag, err := releaseid.TagForVersion(version)
+	// THE SHAPE CHECK COMES FIRST, and it is the one thing both addresses agree
+	// on: a string that is not a canonical version has no address in either
+	// namespace. It is TagForVersion's rule as much as the mapping's.
+	//
 	// The length bound is separate from the shape: it is about what this
 	// function will hold, not about whether the string is well formed.
-	if len(version) > 128 || err != nil {
+	if len(version) > 128 {
+		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
+	}
+	if _, err := releaseid.TagForVersion(version); err != nil {
 		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
 	}
 	if err := os.MkdirAll(f.rootDir, 0o700); err != nil {
@@ -188,16 +197,27 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 			_ = os.RemoveAll(dir)
 		}
 	}()
-	// THE ASSET NAME CARRIES THE VERSION AND THE PATH CARRIES THE TAG. They are
-	// one string everywhere the two schemes coincide, which is why this read as
-	// a single identity for as long as only the legacy scheme existed.
-	packageName := "passwall-node_" + version + "_linux_" + f.goarch
-	assetName := packageName + ".tar.gz"
-	releasePath := releaseDownloadBase + releaseTagPath(tag.Raw) + "/"
+	// THE ADDRESS IS FOUND RATHER THAN ASSUMED. A version no longer determines one:
+	// four releases were published under `release/` and everything since under `v`,
+	// and this caller holds a version and nothing else. The current namespace goes
+	// first — every release from here on lives there — and the historical one
+	// second, which is the only way this can still install one of those four.
+	//
+	// THE PROBE IS THE DOWNLOAD ITSELF. Every release publishes `SHA256SUMS.txt`,
+	// it is small, and a response that is not 200 does not create the file — so
+	// trying the other address costs one request and leaves nothing behind.
 	checksumsPath := filepath.Join(dir, "SHA256SUMS.txt")
-	if _, err := f.download(ctx, releasePath+"SHA256SUMS.txt", checksumsPath, maxChecksumBytes); err != nil {
+	releasePath, err := f.resolveReleasePath(ctx, version, checksumsPath)
+	if err != nil {
 		return Candidate{}, err
 	}
+	// THE ASSET NAME CARRIES THE VERSION AND THE PATH CARRIES THE TAG, and they
+	// are different strings: the archive a release serves is
+	// `passwall-node_4.0.0_linux_amd64.tar.gz` while the path it lives at is the
+	// tag. Using one for the other asks for a file that does not exist under a
+	// name that does.
+	packageName := "passwall-node_" + version + "_linux_" + f.goarch
+	assetName := packageName + ".tar.gz"
 	signaturePath := filepath.Join(dir, releaseauth.SignatureAssetName)
 	if _, err := f.download(ctx, releasePath+releaseauth.SignatureAssetName, signaturePath, maxSignatureBytes); err != nil {
 		return Candidate{}, err
@@ -245,6 +265,47 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	return candidate, nil
 }
 
+// resolveReleasePath is the download path of the release that publishes this
+// version, with its checksums staged at target.
+//
+// TWO ADDRESSES ARE TRIED, IN ORDER, AND THE FIRST THAT ANSWERS WINS. They are the
+// only two this project has ever published under: the current namespace, where
+// every release from now on lives, and the historical one, where the four from
+// before the address changed live and cannot be moved. A caller holding a version
+// has no way to tell which of them its release went out under — which is exactly
+// why the version is not used to build the address directly.
+//
+// MORE THAN TWO WOULD BE A GUESS. A release that answers at neither address is
+// reported by the failure of the LAST attempt, so the caller sees a download that
+// failed rather than a chain of them.
+func (f *ReleaseFetcher) resolveReleasePath(ctx context.Context, version, target string) (string, error) {
+	var lastErr error
+	for _, address := range []func(string) (releaseid.Tag, error){releaseid.TagForVersion, releaseid.HistoricalTagFor} {
+		tag, err := address(version)
+		if err != nil {
+			// Unreachable behind Fetch's shape check, which asks the same rule
+			// first. Kept as a refusal rather than a fallback: building a path from
+			// a string that is not a version addresses a release that does not
+			// exist, and the 404 would read as a missing release.
+			return "", errors.New("upgrade requires an exact canonical PN release version")
+		}
+		path := releaseDownloadBase + releaseTagPath(tag.Raw) + "/"
+		if _, err := f.download(ctx, path+"SHA256SUMS.txt", target, maxChecksumBytes); err != nil {
+			// ONLY "NOT HERE" MOVES ON. An origin that could not be reached, a
+			// redirect that left trusted HTTPS or a body past its bound are the same
+			// answer at the other address, and reporting the second attempt's failure
+			// would hide the first.
+			if !errors.Is(err, errReleaseMissing) {
+				return "", err
+			}
+			lastErr = err
+			continue
+		}
+		return path, nil
+	}
+	return "", lastErr
+}
+
 func (f *ReleaseFetcher) download(ctx context.Context, source, target string, limit int64) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
@@ -260,6 +321,11 @@ func (f *ReleaseFetcher) download(ctx context.Context, source, target string, li
 		return "", errors.New("upgrade release HTTPS download failed")
 	}
 	defer response.Body.Close()
+	// A 404 IS THE ONE ANSWER THAT MEANS "NOT AT THIS ADDRESS" rather than "this
+	// download did not work", and it is the only one the caller retries elsewhere.
+	if response.StatusCode == http.StatusNotFound {
+		return "", errReleaseMissing
+	}
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("upgrade release download returned HTTP status %d", response.StatusCode)
 	}

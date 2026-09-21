@@ -58,8 +58,8 @@ func TestItPrintsOneTagAndNothingElse(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("refused: %s", stderr)
 	}
-	if stdout != "release/4.0.5.1\n" {
-		t.Fatalf("stdout = %q, want exactly %q — the caller creates a TAG, and the tag is what it must not have to build itself", stdout, "release/4.0.5.1\n")
+	if stdout != "v4.0.5.1\n" {
+		t.Fatalf("stdout = %q, want exactly %q — the caller creates a TAG, and the tag is what it must not have to build itself", stdout, "v4.0.5.1\n")
 	}
 }
 
@@ -76,8 +76,8 @@ func TestItAcceptsWhatAShellHandsOver(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("existing=%q: %s", existing, stderr)
 		}
-		if stdout != "release/4.0.1.1\n" {
-			t.Fatalf("existing=%q: stdout = %q, want release/4.0.1.1", existing, stdout)
+		if stdout != "v4.0.1.1\n" {
+			t.Fatalf("existing=%q: stdout = %q, want v4.0.1.1", existing, stdout)
 		}
 	}
 }
@@ -127,8 +127,8 @@ func TestItResumesTheNumberBoundToTheSourceRevision(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("refused: %s", stderr)
 	}
-	if stdout != "release/4.0.0.1\n" {
-		t.Fatalf("stdout = %q, want release/4.0.0.1", stdout)
+	if stdout != "v4.0.0.1\n" {
+		t.Fatalf("stdout = %q, want v4.0.0.1", stdout)
 	}
 
 	// A LEGACY RELEASE CAN NEITHER BE RESUMED NOR ALLOCATED ANY MORE, and a case

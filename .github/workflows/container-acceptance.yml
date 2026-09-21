@@ -10,7 +10,7 @@ on:
         description: "Published release tag; select the same tag ref"
         required: true
         type: string
-        default: release/4.0.0
+        default: release/4.0.1.2
 
 permissions:
   contents: read

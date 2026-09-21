@@ -44,6 +44,18 @@ type vectors struct {
 		Why string `json:"why"`
 	} `json:"reject_tags"`
 
+	// TagNamespace is the namespace a version is published under NOW, and it is
+	// data rather than a second copy of the constant so the two cannot disagree.
+	TagNamespace string `json:"tag_namespace"`
+
+	// Derive is the address a version is published at, which is the CURRENT
+	// namespace's and not always the one a release went out under.
+	Derive []struct {
+		In  string `json:"in"`
+		Tag string `json:"tag"`
+		Why string `json:"why"`
+	} `json:"derive"`
+
 	Versions []struct {
 		In     string `json:"in"`
 		Scheme string `json:"scheme"`
@@ -130,6 +142,62 @@ func TestTagsCarryTheirScheme(t *testing.T) {
 		}
 		if tc.Version != "" && got.Product.String() != tc.Version {
 			t.Errorf("ParseReleaseTag(%q).Product = %q, want %q", tc.In, got.Product, tc.Version)
+		}
+	}
+}
+
+// The namespace this build publishes under is the one the data names.
+//
+// IT IS THE ONE THING THAT CANNOT BE CHECKED AGAINST A STRING: every other
+// assertion here goes through the constant, so a build whose constant disagreed
+// with the file would agree with itself all the way down and publish to an address
+// no release is written to.
+func TestTheVectorsNameTheCurrentNamespace(t *testing.T) {
+	v := load(t)
+	if v.TagNamespace == "" {
+		t.Fatal("the vectors no longer name the current tag namespace")
+	}
+	if releaseid.TagPrefix != v.TagNamespace {
+		t.Fatalf("TagPrefix = %q, and the shared vectors name %q", releaseid.TagPrefix, v.TagNamespace)
+	}
+	if releaseid.HistoricalTagPrefix == v.TagNamespace {
+		t.Fatalf("the historical namespace %q is being published under", releaseid.HistoricalTagPrefix)
+	}
+}
+
+// Every address the released data derives, and the other address beside it.
+//
+// THE TWO ARE DIFFERENT ANSWERS TO ONE QUESTION, which is the whole reason a
+// version no longer determines an address: `derive` is what a release published
+// from here on gets, and HistoricalTagFor names where the four from before the
+// change live.
+func TestDerivedAddressesAreTheCurrentNamespace(t *testing.T) {
+	v := load(t)
+	if len(v.Derive) == 0 {
+		t.Fatal("the vectors lost the derive section")
+	}
+	for _, tc := range v.Derive {
+		tag, err := releaseid.TagForVersion(tc.In)
+		if err != nil || tag.Raw != tc.Tag {
+			t.Errorf("TagForVersion(%q) = %q, %v; the released data says %q (%s)", tc.In, tag.Raw, err, tc.Tag, tc.Why)
+			continue
+		}
+		historical, err := releaseid.HistoricalTagFor(tc.In)
+		if err != nil {
+			t.Errorf("HistoricalTagFor(%q): %v", tc.In, err)
+			continue
+		}
+		// THE OTHER ADDRESS IS A DIFFERENT STRING, which is what makes the two
+		// worth asking apart: for a version published before the change, both exist
+		// as addresses and only one of them is a release.
+		if historical.Raw == tag.Raw {
+			t.Errorf("HistoricalTagFor(%q) = TagForVersion(%q) = %q: the two namespaces are one", tc.In, tc.In, tag.Raw)
+		}
+		if historical.Raw != releaseid.HistoricalTagPrefix+tc.In || historical.VersionString() != tc.In {
+			t.Errorf("HistoricalTagFor(%q) = %q, want %s%q naming the same version", tc.In, historical.Raw, releaseid.HistoricalTagPrefix, tc.In)
+		}
+		if parsed, err := releaseid.ParseReleaseTag(historical.Raw); err != nil || parsed.VersionString() != tc.In {
+			t.Errorf("the other address %q does not read back as %q: %v", historical.Raw, tc.In, err)
 		}
 	}
 }
@@ -286,9 +354,13 @@ func TestTheTagForAStampedVersion(t *testing.T) {
 		want    string
 		why     string
 	}{
-		{"4.0.0", "release/4.0.0", "a bare version belongs to the product namespace"},
-		{"102.1.0", "release/102.1.0", "including a release line above one"},
-		{"4.0.0.1", "release/4.0.0.1", "and the build component is part of the address"},
+		{"4.0.0", "v4.0.0", "a bare version belongs to the product namespace, and the address is the version behind it"},
+		{"102.1.0", "v102.1.0", "including a release line above one"},
+		{"4.0.0.1", "v4.0.0.1", "and the build component is part of the address"},
+		// AND THE OTHER NAMESPACE IS NAMED, NOT DERIVED: a release published before
+		// the address changed is reached by asking for that address, because no
+		// version string says which namespace its release went out under.
+		{"4.0.1.2", "v4.0.1.2", "the current address for a version that was published under the historical one"},
 	} {
 		t.Run(tc.version, func(t *testing.T) {
 			tag, err := releaseid.TagForVersion(tc.version)
@@ -338,8 +410,8 @@ func TestAFourSegmentVersionMakesItsOwnTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a four-segment version was refused: %v", err)
 	}
-	if tag.Raw != "release/4.0.0.1" {
-		t.Fatalf("TagForVersion(4.0.0.1) = %q, want release/4.0.0.1", tag.Raw)
+	if tag.Raw != "v4.0.0.1" {
+		t.Fatalf("TagForVersion(4.0.0.1) = %q, want v4.0.0.1", tag.Raw)
 	}
 	// And it round-trips, which is what keeps the two identities one decision.
 	if back := tag.VersionString(); back != "4.0.0.1" {

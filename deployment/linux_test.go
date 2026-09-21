@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 func installationOptions() Options {
@@ -422,10 +424,18 @@ func TestLinuxInstallPreservesIdentityAndStateOnRerun(t *testing.T) {
 		t.Fatal("installation did not download exactly the pinned archive and checksums")
 	}
 	network, _ := os.ReadFile(filepath.Join(f.dir, "network.log"))
-	for _, required := range []string{"--proto =https", "--proto-redir =https", "--tlsv1.2", "--connect-timeout 15", "--max-time", // THE TAG IS THE PATH AND THE VERSION NAMES THE ASSET. A legacy release
-		// was addressed by its version; this one is not, and building the path
-		// from the version is what the template was changed to stop doing.
-		"https://github.com/KazuhaHub/Passwall-Node/releases/download/release/" + f.options.Version + "/"} {
+	// THE TAG IS THE PATH AND THE VERSION NAMES THE ASSET, and the tag is the
+	// CURRENT namespace's — asked for rather than spelled here, because a rule
+	// restated in a test is a second copy of it. This is the renderer for a release
+	// being published, which is the one case where deriving an address is the right
+	// answer; a release that already exists is addressed by the tag its publisher
+	// states.
+	tag, tagErr := releaseid.TagForVersion(f.options.Version)
+	if tagErr != nil {
+		t.Fatal(tagErr)
+	}
+	for _, required := range []string{"--proto =https", "--proto-redir =https", "--tlsv1.2", "--connect-timeout 15", "--max-time",
+		"https://github.com/KazuhaHub/Passwall-Node/releases/download/" + tag.Raw + "/"} {
 		if !bytes.Contains(network, []byte(required)) {
 			t.Errorf("download missing security/pinning option %q", required)
 		}

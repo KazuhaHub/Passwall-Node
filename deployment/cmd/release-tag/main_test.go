@@ -85,8 +85,13 @@ func TestAcceptedReleaseTags(t *testing.T) {
 // or an ldflags value.
 func TestTheReportedVersionIsWhatTheWorkflowStamps(t *testing.T) {
 	for _, tc := range []struct{ tag, want string }{
+		{"v4.0.0", "4.0.0"},
+		{"v102.1.0", "102.1.0"},
+		{"v4.0.0.1", "4.0.0.1"},
+		// THE FOUR PUBLISHED BEFORE THE ADDRESS CHANGED ARE STILL ADDRESSES: the
+		// matrix and the pinned-source job resolve them by tag, so a reader that
+		// stopped answering for them would lose the releases it is checking.
 		{"release/4.0.0", "4.0.0"},
-		{"release/102.1.0", "102.1.0"},
 		{"release/4.0.0.1", "4.0.0.1"},
 	} {
 		t.Run(tc.tag, func(t *testing.T) {
@@ -125,10 +130,15 @@ func TestRefusedReleaseTags(t *testing.T) {
 		"release/v4.0.0",
 		// A zero release line is not a released identity.
 		"release/0.1.0",
-		// A string that merely begins with v is not a tag of ours — and neither is
-		// a whole legacy tag, which this project no longer publishes or reads.
+		// A string that merely begins with v is not a tag of ours — a tag is a
+		// version behind a namespace, and the namespace is not the whole of it.
+		// `v1.0.0` used to sit here, while a v-prefixed tag was the legacy shape;
+		// it is the CURRENT namespace now, and the shapes refused here are the ones
+		// that fail inside a namespace rather than outside both.
 		"v4",
-		"v1.0.0",
+		"v4.0",
+		"v4.0.0.0",
+		"v0.1.0",
 		"v0.0.1-beta11",
 		"v1.0.0-rc1",
 		"version-4",

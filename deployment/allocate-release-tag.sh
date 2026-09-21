@@ -65,32 +65,18 @@ if [ -z "$bound" ]; then
   exit 1
 fi
 
-# THE GO MODULE TAG, AT THE SAME REVISION.
+# THERE IS NO SECOND TAG, AND THERE USED TO BE.
 #
-# A release tag is a git ref; a Go MODULE version is what `go get` resolves, and Go
-# reads it from a tag starting with `v`. A module whose path ends in /vMAJOR accepts
-# only vMAJOR.*, so this project's module version and its product version are ONE
-# NUMBER — v4.0.1 for release/4.0.1 — and deriving the second from the first is what
-# keeps them from having to be remembered separately.
+# The tag is `vMAJOR.MINOR.PATCH`, which is both the release's ADDRESS and — for a
+# three-segment release — this module's VERSION: the module path ends in `/v4`, so
+# `go get .../v4@v4.0.1` resolves it. The two identities coincide by construction,
+# which is what the block here used to arrange by pushing one tag beside the other
+# — `v4.0.1` for `release/4.0.1`. Under this namespace that would push the SAME
+# ref twice, and leave two tags naming one release on one revision, which the
+# resume path reads as an ambiguity rather than a rerun.
 #
-# IT IS CREATED AFTER THE NUMBER IS BOUND, because the number comes from that
-# decision. IT IS NOT PART OF THE RACE: the release tag is what decides a number,
-# and a re-run resumes it and retries this tag, so a release that failed here is
-# completed rather than renumbered.
-#
-# A MODULE TAG ALREADY ON ANOTHER REVISION IS REFUSED. That is the module line
-# disagreeing with the product line, and neither moving the tag (which would change
-# what a dependency version means for anybody who resolved it) nor skipping it
-# (which would leave the two lines apart silently) is a decision this script can
-# make. The release tag stays bound: it is the number decision, and it is not what
-# is wrong.
-module_tag="v${bound#release/}"
-if ! git push --quiet "$remote" "$sha:refs/tags/$module_tag" 2>/dev/null; then
-  if [ "$(git ls-remote "$remote" "refs/tags/$module_tag" | awk '{print $1}')" != "$sha" ]; then
-    echo "$tag is bound to $sha, but the Go module tag $module_tag is bound to another revision." >&2
-    echo "the module version and the product version have diverged; decide which line is right, then re-run to complete the pair." >&2
-    exit 1
-  fi
-fi
-
+# A FOUR-SEGMENT RELEASE IS NOT A MODULE VERSION and cannot be made into one: the
+# build component is part of the address, and Go's rule for a module whose path
+# ends in /vMAJOR is vMAJOR.MINOR.PATCH. Nothing ever resolved `v4.0.1.1` either,
+# so this is a property that was always there rather than one the change introduced.
 printf '%s\n' "$bound"

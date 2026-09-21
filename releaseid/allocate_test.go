@@ -167,15 +167,24 @@ func TestResumingTheNumberAlreadyBoundToThisSourceRevision(t *testing.T) {
 			onCommit: []string{"release/4.0.3", "unrelated"}, want: "release/4.0.3", found: true,
 		},
 		{
+			// AND UNDER THE CURRENT NAMESPACE, WHICH IS WHAT EVERY RELEASE FROM NOW
+			// ON CARRIES. A rerun resumes the tag it was published under, whatever
+			// namespace that is, because the tag is what recorded the number.
+			name:     "its own tag under the current namespace",
+			onCommit: []string{"v4.0.7"}, want: "v4.0.7", found: true,
+		},
+		{
 			name:     "a tag on another line is not this release",
 			onCommit: []string{"release/4.1.0"},
 		},
 		{
 			// A STRING THAT IS NOT ONE OF OUR TAGS NAMES NO RELEASE, so it is not
-			// this one. This used to read "the other scheme's tag", which was the
-			// same case while there was another scheme.
+			// this one. `v4.0.7` used to be in this list, while a v-prefixed tag was
+			// the legacy scheme's shape; it is the current namespace now, and the
+			// shapes that name nothing are the ones that fail inside a namespace
+			// rather than outside both.
 			name:     "a string that names no release is not this release",
-			onCommit: []string{"nightly", "v4.0.7"},
+			onCommit: []string{"nightly", "release/v4.0.7", "v0.0.1-beta11", "v4.0", "v4.0.0.0"},
 		},
 		{
 			name: "nothing on the commit", onCommit: nil,
