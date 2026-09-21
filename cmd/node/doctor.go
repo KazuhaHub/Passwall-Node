@@ -8,9 +8,9 @@ import (
 	"io"
 	"path/filepath"
 
-	"github.com/KazuhaHub/passwall-node/internal/host"
-	"github.com/KazuhaHub/passwall-node/internal/manage"
-	"github.com/KazuhaHub/passwall-node/internal/upgrade"
+	"github.com/KazuhaHub/passwall-node/v4/internal/host"
+	"github.com/KazuhaHub/passwall-node/v4/internal/manage"
+	"github.com/KazuhaHub/passwall-node/v4/internal/upgrade"
 )
 
 // Exit codes. The doctor's contract distinguishes the three, and a caller

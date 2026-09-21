@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
+	"github.com/KazuhaHub/passwall-node/v4/internal/releaseauth"
 )
 
 // A release is published under a TAG and stamped with a VERSION, and they are

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 // ValidReleaseVersion is what the INSTALLER accepts, and what it accepts is the
@@ -82,7 +82,7 @@ func TestTheInstallerRuleIsTheSharedRule(t *testing.T) {
 // sites.
 func TestOnlyInstallationCodeUsesTheInstallerRule(t *testing.T) {
 	root := repoRoot(t)
-	const installerPackage = "github.com/KazuhaHub/passwall-node/deployment"
+	const installerPackage = "github.com/KazuhaHub/passwall-node/v4/deployment"
 	offenders := []string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {

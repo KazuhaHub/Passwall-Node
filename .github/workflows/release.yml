@@ -223,9 +223,9 @@ jobs:
           mkdir -p out
           short_sha="${COMMIT:0:7}"
           ldflags="-s -w"
-          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.Version=${VERSION}"
-          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.Commit=${short_sha}"
-          ldflags+=" -X github.com/KazuhaHub/passwall-node/internal/version.BuildDate=${BUILD_DATE}"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/v4/internal/version.Version=${VERSION}"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/v4/internal/version.Commit=${short_sha}"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/v4/internal/version.BuildDate=${BUILD_DATE}"
           go build -trimpath -ldflags="${ldflags}" \
             -o "out/passwall-node${{ matrix.ext }}" ./cmd/node
           sh deployment/check-build.sh "out/passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$COMMIT"

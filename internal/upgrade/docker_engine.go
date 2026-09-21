@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 const dockerAPIVersion = "v1.41"

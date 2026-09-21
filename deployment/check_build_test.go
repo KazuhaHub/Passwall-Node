@@ -23,7 +23,7 @@ func TestBuildProvenanceGateRejectsWrongArtifacts(t *testing.T) {
 			compiler = value
 		}
 	}
-	clean := "binary: " + compiler + "\n\tpath\tgithub.com/KazuhaHub/passwall-node/cmd/node\n\tbuild\tGOOS=linux\n\tbuild\tGOARCH=arm64\n\tbuild\tCGO_ENABLED=0\n\tbuild\tvcs.revision=abc123\n\tbuild\tvcs.modified=false\n"
+	clean := "binary: " + compiler + "\n\tpath\tgithub.com/KazuhaHub/passwall-node/v4/cmd/node\n\tbuild\tGOOS=linux\n\tbuild\tGOARCH=arm64\n\tbuild\tCGO_ENABLED=0\n\tbuild\tvcs.revision=abc123\n\tbuild\tvcs.modified=false\n"
 	for _, test := range []struct {
 		name, info string
 		valid      bool

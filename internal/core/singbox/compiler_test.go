@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

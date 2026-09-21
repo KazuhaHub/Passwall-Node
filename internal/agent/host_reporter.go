@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/nodeevent"
+	"github.com/KazuhaHub/passwall-node/v4/internal/nodeevent"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

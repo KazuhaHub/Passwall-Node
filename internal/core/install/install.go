@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/corecatalog"
+	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
 )
 
 const (

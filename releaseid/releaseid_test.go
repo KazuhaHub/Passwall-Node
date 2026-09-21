@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 // The vectors are the contract. Go, TypeScript and the release CLI read THIS

@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/corecatalog"
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
+	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

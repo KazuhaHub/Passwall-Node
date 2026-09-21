@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 // The tag, not the version. `deployment.ValidReleaseVersion` is the

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/state"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 )
 
 // ErrTaskClockUnavailable means that starting a task cannot be authorized.

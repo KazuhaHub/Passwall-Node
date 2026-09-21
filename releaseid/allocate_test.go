@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 // ALLOCATING A PATCH NUMBER ON A RELEASE LINE.

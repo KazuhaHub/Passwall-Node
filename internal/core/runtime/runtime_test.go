@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/agent"
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/internal/core/install"
-	"github.com/KazuhaHub/passwall-node/internal/core/xray"
-	"github.com/KazuhaHub/passwall-node/internal/state"
-	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
+	"github.com/KazuhaHub/passwall-node/v4/internal/core/install"
+	"github.com/KazuhaHub/passwall-node/v4/internal/core/xray"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
+	statesqlite "github.com/KazuhaHub/passwall-node/v4/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

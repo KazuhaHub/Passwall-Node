@@ -168,7 +168,7 @@ jobs:
           # artifact self-reports the version it was stamped with, so the two
           # lists are one decision written in two files.
           for node_version in 4.0.0 4.0.1 4.0.2; do
-            go build -trimpath -ldflags="-s -w -X github.com/KazuhaHub/passwall-node/internal/version.Version=$node_version -X github.com/KazuhaHub/passwall-node/internal/version.Commit=abcdef1234567" \
+            go build -trimpath -ldflags="-s -w -X github.com/KazuhaHub/passwall-node/v4/internal/version.Version=$node_version -X github.com/KazuhaHub/passwall-node/v4/internal/version.Commit=abcdef1234567" \
               -o "$RUNNER_TEMP/passwall-node-e2e-$node_version" ./cmd/node
             test "$("$RUNNER_TEMP/passwall-node-e2e-$node_version" --version)" = "$node_version (abcdef1234567)"
             sh deployment/check-build.sh "$RUNNER_TEMP/passwall-node-e2e-$node_version" linux "${{ matrix.arch }}" "$GITHUB_SHA"

@@ -16,12 +16,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/corecatalog"
-	"github.com/KazuhaHub/passwall-node/internal/agent"
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/internal/core/install"
-	"github.com/KazuhaHub/passwall-node/internal/core/xray"
-	"github.com/KazuhaHub/passwall-node/internal/state"
+	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
+	"github.com/KazuhaHub/passwall-node/v4/internal/core/install"
+	"github.com/KazuhaHub/passwall-node/v4/internal/core/xray"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

@@ -23,8 +23,8 @@ import (
 	"golang.org/x/term"
 	_ "modernc.org/sqlite"
 
-	"github.com/KazuhaHub/passwall-node/internal/nodeconfig"
-	buildversion "github.com/KazuhaHub/passwall-node/internal/version"
+	"github.com/KazuhaHub/passwall-node/v4/internal/nodeconfig"
+	buildversion "github.com/KazuhaHub/passwall-node/v4/internal/version"
 )
 
 const (

@@ -17,9 +17,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/KazuhaHub/passwall-node/corecatalog"
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/internal/host"
+	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
+	"github.com/KazuhaHub/passwall-node/v4/internal/host"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

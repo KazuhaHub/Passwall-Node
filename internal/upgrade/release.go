@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/internal/releaseauth"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 const (

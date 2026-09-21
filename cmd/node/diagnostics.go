@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/core/process"
-	"github.com/KazuhaHub/passwall-node/internal/diagnostics"
-	"github.com/KazuhaHub/passwall-node/internal/host"
-	"github.com/KazuhaHub/passwall-node/internal/manage"
-	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
+	"github.com/KazuhaHub/passwall-node/v4/internal/core/process"
+	"github.com/KazuhaHub/passwall-node/v4/internal/diagnostics"
+	"github.com/KazuhaHub/passwall-node/v4/internal/host"
+	"github.com/KazuhaHub/passwall-node/v4/internal/manage"
+	statesqlite "github.com/KazuhaHub/passwall-node/v4/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

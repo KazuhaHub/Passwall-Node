@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/internal/state"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

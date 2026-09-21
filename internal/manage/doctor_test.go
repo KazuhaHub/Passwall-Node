@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 )
 
 // everyStableCode is the set the first version must always report, in the order

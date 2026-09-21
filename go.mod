@@ -1,4 +1,4 @@
-module github.com/KazuhaHub/passwall-node
+module github.com/KazuhaHub/passwall-node/v4
 
 go 1.26.0
 
