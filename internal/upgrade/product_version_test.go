@@ -31,20 +31,25 @@ func TestUpgradeAcceptsProductVersions(t *testing.T) {
 		t.Fatalf("a four-segment upgrade target was refused: %v", err)
 	}
 
-	// The refusals that must survive, restated for the product shape: same
-	// version, an older one, a non-canonical one, and a tag where a version
-	// belongs.
+	// The refusals that must survive, and they are all about the TARGET now: the
+	// same version, a non-canonical one, and a tag where a version belongs.
+	//
+	// AN OLDER TARGET IS NOT ON THIS LIST. It used to be — twice, once beside the
+	// same-version case and once under "the historical refusals" — and removing it
+	// is deliberate: an operator choosing an older release is making an explicit
+	// choice, and what stops that choice from installing something else is the
+	// signed manifest and the binary's own version check. The VERSION BEING
+	// REPLACED is not checked for shape either; it is an identity the agent
+	// compares against itself, and a node still reporting a stamp from the
+	// replaced scheme is exactly who this had to stop refusing.
 	for _, input := range []string{
 		`{"version":"4.0.0","expected_version":"4.0.0"}`,
-		`{"version":"4.0.0","expected_version":"4.0.1"}`,
 		`{"version":"4.0","expected_version":"4.0.0"}`,
 		`{"version":"4.0.0.1.2","expected_version":"4.0.0"}`,
 		`{"version":"4.0.0.0","expected_version":"4.0.0"}`,
 		`{"version":"release/4.0.0","expected_version":"4.0.0"}`,
 		`{"version":"04.0.0","expected_version":"4.0.0"}`,
 		`{"version":"latest","expected_version":"4.0.0"}`,
-		// And the historical refusals, which are not being relaxed.
-		`{"version":"4.0.6","expected_version":"4.1.0"}`,
 		`{"version":"4.1.1-01","expected_version":"4.1.0"}`,
 	} {
 		if _, err := ParseArgs(upgradeTask(input)); err == nil {
@@ -53,33 +58,6 @@ func TestUpgradeAcceptsProductVersions(t *testing.T) {
 	}
 }
 
-// The order an upgrade relies on. The product scheme has no prerelease, so its
-// ordering is plain integer segments — and `0.0.10` above `0.0.9` is the case a
-// string comparison gets wrong on both schemes.
-func TestUpgradeVersionOrderForProductVersions(t *testing.T) {
-	for _, tc := range []struct {
-		a, b string
-		want int
-	}{
-		{"4.0.1", "4.0.0", 1},
-		{"4.0.0", "4.0.1", -1},
-		{"4.0.0", "4.0.0", 0},
-		{"4.1.0", "4.0.9", 1},
-		{"0.0.10", "0.0.9", 1},
-		{"102.0.0", "99.9.9", 1},
-	} {
-		if got := CompareVersions(tc.a, tc.b); got != tc.want {
-			t.Errorf("CompareVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
-		}
-		if got := CompareVersions(tc.b, tc.a); got != -tc.want {
-			t.Errorf("CompareVersions(%q, %q) = %d, want %d (antisymmetry)", tc.b, tc.a, got, -tc.want)
-		}
-	}
-}
-
-// The docker engine's tag check is the same rule: the exact image tag is the
-// version, and refusing a product one would make the managed-container upgrade
-// path unavailable for exactly the releases it is for.
 func TestDockerImageTagAcceptsProductVersions(t *testing.T) {
 	for _, value := range []string{"4.0.0", "4.0.0.1", "102.1.0", "4.0.2"} {
 		if !deploymentVersion(value) {

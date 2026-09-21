@@ -20,7 +20,6 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 const nodeService = "passwall-node.service"
@@ -460,11 +459,18 @@ func readManagedVersion(root string) (string, error) {
 		return "", err
 	}
 	value := strings.TrimSuffix(string(data), "\n")
-	// The version the install wrote down. It is a VERSION, so both schemes are
-	// canonical here; the installer's own rule knows only the historical shape,
-	// and using it here would declare a product-version installation corrupt.
-	if len(value) > 128 || !releaseid.ValidVersion(value) {
-		return "", errors.New("installed version file is not canonical")
+	// THE INSTALL'S OWN RECORD OF ITSELF, AND NOTHING IS PARSED HERE. It is read to
+	// be compared against the request's expected version — an equality — so its
+	// shape is whatever the install that wrote it used, and a node installed before
+	// the naming change wrote a stamp this build cannot parse. Requiring a product
+	// version here refused to read that node's own version file, called the
+	// installation corrupt, and stopped the upgrade before anything was checked.
+	//
+	// THE BOUND STAYS. It is about what this will hold, not about whether the
+	// string is well formed, and an empty value is refused because it is the one
+	// thing that would match an empty expectation.
+	if len(value) > 128 || value == "" {
+		return "", errors.New("installed version file is not readable")
 	}
 	return value, nil
 }

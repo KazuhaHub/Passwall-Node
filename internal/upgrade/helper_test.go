@@ -411,3 +411,63 @@ func TestHelperCompletedBackupRetentionKeepsForeignAndLiveEvidence(t *testing.T)
 	}
 	f.assertProtected(t)
 }
+
+// THE VERSION FILE IS THE INSTALL'S OWN RECORD OF ITSELF, and its shape is
+// whatever the install that wrote it used.
+//
+// It is read to compare against the request's expected version — an equality — so
+// nothing here needs to parse it. It used to require a product version, which
+// meant a node installed before the naming change could not be upgraded at all:
+// the helper refused to read its own version file, reported the installation as
+// corrupt, and the request never reached the point of being checked.
+func TestTheManagedVersionFileIsReadWhateverShapeItHolds(t *testing.T) {
+	for _, written := range []string{"4.1.3", "4.0.0.1", "v0.0.1-beta9", "v0.0.1-beta12"} {
+		t.Run(written, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "config", "version"), []byte(written+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := readManagedVersion(root)
+			if err != nil || got != written {
+				t.Fatalf("read %q, err=%v, want %q", got, err, written)
+			}
+		})
+	}
+
+	// AND AN EMPTY FILE IS STILL REFUSED. There is nothing to compare the request
+	// against, and an empty expectation is the one value that would match it.
+	t.Run("empty", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "config", "version"), []byte("\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readManagedVersion(root); err == nil {
+			t.Fatal("an empty version file was accepted")
+		}
+	})
+
+	// AND AN UNBOUNDED VALUE IS REFUSED: the bound is about what this will hold,
+	// not about whether the string is well formed.
+	t.Run("oversized", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		long := make([]byte, 200)
+		for i := range long {
+			long[i] = 'a'
+		}
+		if err := os.WriteFile(filepath.Join(root, "config", "version"), long, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readManagedVersion(root); err == nil {
+			t.Fatal("an oversized version file was accepted")
+		}
+	})
+}
