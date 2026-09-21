@@ -83,7 +83,7 @@ func ParseReleaseLine(s string) (Line, error) {
 // named a new patch instead of the next beta. With one scheme there is no such
 // line to refuse, and no scheme to be told apart from another.
 func AllocatePatch(line Line, existing []string) (Version, error) {
-	highest := int64(-1)
+	var highest *Version
 	for _, raw := range existing {
 		tag, err := ParseReleaseTag(raw)
 		if err != nil {
@@ -99,18 +99,26 @@ func AllocatePatch(line Line, existing []string) (Version, error) {
 		if version == nil {
 			continue // another line, with its own numbering
 		}
-		if version.Patch > highest {
-			highest = version.Patch
+		if highest == nil || CompareProductVersion(*version, *highest) > 0 {
+			highest = version
 		}
 	}
-	if highest < 0 {
+	if highest == nil {
 		return Version{}, fmt.Errorf("%w: line %s has no release to count from, and the first version of a line is named rather than allocated", ErrUnknownFormat, line)
 	}
-	next := highest + 1
+	// THE NEXT NUMBER IS A BUILD ON THE HIGHEST RELEASE, NOT A NEW PATCH.
+	//
+	// An incremental fix on this line is published as MAJOR.MINOR.PATCH.BUILD —
+	// 4.1.0.1, 4.1.0.2 — so the third segment stays the line's own number and
+	// advances only when somebody NAMES a new one. Counting fixes into the patch
+	// would make every fix look like a new patch release, which is exactly the
+	// attribution the fourth segment was added to keep. A failed build still
+	// leaves a gap, and the number is still one above the highest.
+	next := highest.Build + 1
 	if next > MaxSegment {
-		return Version{}, fmt.Errorf("%w: line %s is at patch %d, and the format cannot go past %d", ErrSegmentRange, line, highest, MaxSegment)
+		return Version{}, fmt.Errorf("%w: line %s is at %s, and the build segment cannot go past %d", ErrSegmentRange, line, highest, MaxSegment)
 	}
-	return Version{Major: line.Major, Minor: line.Minor, Patch: next}, nil
+	return Version{Major: highest.Major, Minor: highest.Minor, Patch: highest.Patch, Build: next}, nil
 }
 
 // versionOnLine returns the version a tag names when that version is on the line,
