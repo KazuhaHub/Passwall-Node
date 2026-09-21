@@ -12,6 +12,13 @@ locally built agent. The acceptance tool itself is built from the checkout.
 Before beta4 publication, dispatch the candidate checkout with an explicit
 `version=v0.0.1-beta3` to test the new installer against the existing public binary.
 
+With `upgrade_from` set, the tool installs THAT release first and then replaces it
+with `version` through the same private installer an operator runs, asserting what
+an upgrade may and may not change: the state files keep their bytes and their
+inodes, the credential and endpoint are untouched, and the binary, the version
+stamp and the process serving the node are all different afterwards. Two published
+releases are needed — `4.0.1.1` and `4.0.1.2` are the first pair that can do it.
+
 The fixture generates an independent temporary AgentID and credential, listens
 only on `127.0.0.1` with HTTPS beneath a PSP-shaped panel prefix, and requires the
 real Bearer credential. Only the disposable runner temporarily trusts its

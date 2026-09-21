@@ -44,14 +44,15 @@ type acceptance struct {
 
 func main() {
 	version := flag.String("version", "v0.0.1-beta4", "exact already-public release to install")
+	upgradeFrom := flag.String("upgrade-from", "", "already-public release to install first and then upgrade to -version; empty skips the upgrade scenario")
 	flag.Parse()
-	if err := runAcceptance(*version); err != nil {
+	if err := runAcceptance(*version, *upgradeFrom); err != nil {
 		fmt.Fprintln(os.Stderr, "installation acceptance failed:", err)
 		os.Exit(1)
 	}
 }
 
-func runAcceptance(version string) (resultErr error) {
+func runAcceptance(version, upgradeFrom string) (resultErr error) {
 	if os.Geteuid() != 0 || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		return errors.New("refusing host mutation outside a root disposable GitHub-hosted runner")
 	}
@@ -134,20 +135,23 @@ func runAcceptance(version string) (resultErr error) {
 	if _, err := a.command("update-ca-certificates"); err != nil {
 		return err
 	}
-	installerOutput, err := a.command("sh", a.scriptPath)
-	if err != nil {
-		a.claimOwnedInstallation() // Recover only an identity proven to have been published by this run.
+	// THE FIRST INSTALLATION IS THE OLDER RELEASE, when the caller asked for the
+	// upgrade scenario: the release under acceptance is then reached the way an
+	// operator reaches it, by running its installer over the installation that is
+	// already there.
+	expectedFeedbackChecks := 3
+	firstRelease := version
+	if upgradeFrom != "" {
+		firstRelease = upgradeFrom
+		expectedFeedbackChecks++
+	}
+	if err := a.installRelease(endpoint, firstRelease, deployment.ModeInstall, "private-install-first.sh"); err != nil {
 		return err
 	}
-	if err := a.claimOwnedInstallation(); err != nil {
-		return err
-	}
-	if err := checkInstallerFeedback(installerOutput, false); err != nil {
-		return err
-	}
-	a.feedbackChecks++
-	if err := a.waitForFixture(); err != nil {
-		return err
+	if upgradeFrom != "" {
+		if err := a.upgradeScenario(endpoint, upgradeFrom); err != nil {
+			return err
+		}
 	}
 	pid, uid, err := a.inspectRunningAgent()
 	if err != nil {
@@ -176,7 +180,7 @@ func runAcceptance(version string) (resultErr error) {
 	// only this invocation lacks all network interfaces in a fresh namespace.
 	// systemd is reached through its real Unix socket; the already-active paused
 	// unit must be a no-op, so this tests rerun without concurrent SQLite writes.
-	installerOutput, err = a.command("unshare", "--net", "--", "sh", a.scriptPath)
+	installerOutput, err := a.command("unshare", "--net", "--", "sh", a.scriptPath)
 	if err != nil {
 		return err
 	}
@@ -253,8 +257,8 @@ func runAcceptance(version string) (resultErr error) {
 	if err != nil || bytes.Equal(firstEpoch, secondEpoch) {
 		return errors.New("fresh SQLite installation reused its previous core-counter namespace")
 	}
-	if a.feedbackChecks != 3 {
-		return errors.New("installer feedback was not checked on all three real installations")
+	if a.feedbackChecks != expectedFeedbackChecks {
+		return errors.New("installer feedback was not checked on every real invocation")
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"scope":   "empty-stream authenticated TLS/systemd/offline-rerun/fresh-reinstall; not PSP business or proxy-traffic acceptance",
@@ -265,6 +269,141 @@ func runAcceptance(version string) (resultErr error) {
 		"installer_feedback_checks": a.feedbackChecks, "installer_six_phases_ordered": true,
 		"installer_offline_skip_checked": true, "installer_startup_only_notice_checked": true,
 	})
+}
+
+// installRelease renders a release's own installation script, runs it in the mode
+// asked for, and checks what an operator would see: that this run published the
+// installation it claims to have published, that the six phases were reported in
+// order, and that the agent reached the fixture.
+//
+// ONE INVOCATION, SO A SCENARIO DOES NOT WRITE THE SEQUENCE TWICE. The upgrade case
+// below installs an older release and then replaces it, and both of those are an
+// installer run with the same identity and the same endpoint.
+func (a *acceptance) installRelease(endpoint, version, mode, filename string) error {
+	script, err := deployment.RenderLinux(deployment.Options{
+		Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version, Mode: mode})
+	if err != nil {
+		return errors.New("invalid explicit installation release, mode or fixture options")
+	}
+	path := filepath.Join(a.temporaryDir, filename)
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		return errors.New("cannot persist private installation script")
+	}
+	output, err := a.command("sh", path)
+	if err != nil {
+		a.claimOwnedInstallation() // Recover only an identity proven to have been published by this run.
+		return err
+	}
+	if err := a.claimOwnedInstallation(); err != nil {
+		return err
+	}
+	if err := checkInstallerFeedback(output, false); err != nil {
+		return err
+	}
+	a.feedbackChecks++
+	return a.waitForFixture()
+}
+
+// upgradeScenario replaces the RELEASE of the installation that is there, and asserts
+// what an upgrade may and may not do.
+//
+// IT KEEPS THE STATE AND THE IDENTITY, and that is the whole claim. The state files
+// must keep their bytes AND their inodes — the daemon holds them open, so a rewrite
+// would pull a live database out from under it — while the binary and the version
+// stamp must change, and the process serving the node must be a different one.
+//
+// THE AGENT IS PAUSED WHILE ITS STATE IS READ, the technique the offline rerun below
+// uses for the same reason: SQLite writes between two reads make the comparison
+// meaningless rather than failing it. It is RESUMED BEFORE THE UPGRADE, because the
+// installer stops the service and a stopped process does not handle SIGTERM — the
+// stop would time out and the upgrade would refuse for a reason that has nothing to
+// do with what it is testing.
+func (a *acceptance) upgradeScenario(endpoint, from string) error {
+	beforePID, _, err := a.inspectRunningAgent()
+	if err != nil {
+		return err
+	}
+	if err := a.assertPrivacy(beforePID); err != nil {
+		return err
+	}
+	if err := syscall.Kill(beforePID, syscall.SIGSTOP); err != nil {
+		return errors.New("cannot pause the agent installed from the older release")
+	}
+	a.pausedPID = beforePID
+	if err := a.waitForStoppedPID(beforePID); err != nil {
+		return err
+	}
+	installedFrom, err := os.ReadFile(installationRoot + "/config/version")
+	if err != nil || strings.TrimSpace(string(installedFrom)) != from {
+		return errors.New("the installation being upgraded does not report the older release it was installed from")
+	}
+	beforeStatic, err := a.staticManifest()
+	if err != nil {
+		return err
+	}
+	beforeDB, err := a.databaseManifest()
+	if err != nil {
+		return err
+	}
+	if err := syscall.Kill(beforePID, syscall.SIGCONT); err != nil {
+		return errors.New("cannot resume the agent installed from the older release")
+	}
+	a.pausedPID = 0
+
+	if err := a.installRelease(endpoint, a.version, deployment.ModeUpgrade, "private-install-upgrade.sh"); err != nil {
+		return err
+	}
+	afterPID, _, err := a.inspectRunningAgent()
+	if err != nil {
+		return err
+	}
+	if afterPID == beforePID {
+		return errors.New("the upgrade replaced the release without replacing the process serving it")
+	}
+	if err := a.assertPrivacy(afterPID); err != nil {
+		return err
+	}
+	if err := syscall.Kill(afterPID, syscall.SIGSTOP); err != nil {
+		return errors.New("cannot pause the upgraded agent")
+	}
+	a.pausedPID = afterPID
+	if err := a.waitForStoppedPID(afterPID); err != nil {
+		return err
+	}
+	afterStatic, err := a.staticManifest()
+	if err != nil {
+		return err
+	}
+	afterDB, err := a.databaseManifest()
+	if err != nil {
+		return err
+	}
+	if err := syscall.Kill(afterPID, syscall.SIGCONT); err != nil {
+		return errors.New("cannot resume the upgraded agent")
+	}
+	a.pausedPID = 0
+
+	// THE STATE IS THE SAME STATE: bytes and inode, not just equal contents.
+	if !sameManifest(beforeDB, afterDB) {
+		return errors.New("the upgrade changed the bytes or the inode of the state it was supposed to keep")
+	}
+	if beforeStatic[installationRoot+"/config/credential"] != afterStatic[installationRoot+"/config/credential"] ||
+		beforeStatic[installationRoot+"/config/environment"] != afterStatic[installationRoot+"/config/environment"] {
+		return errors.New("the upgrade changed the identity it was supposed to keep")
+	}
+	// AND THE RELEASE IS NOT: a different binary and a different version stamp, and
+	// the stamp names the release that was asked for.
+	if beforeStatic[installationRoot+"/bin/passwall-node"].SHA256 == afterStatic[installationRoot+"/bin/passwall-node"].SHA256 {
+		return errors.New("the upgrade left the binary it was supposed to replace")
+	}
+	if beforeStatic[installationRoot+"/config/version"].SHA256 == afterStatic[installationRoot+"/config/version"].SHA256 {
+		return errors.New("the upgrade left the version stamp it was supposed to replace")
+	}
+	upgradedTo, err := os.ReadFile(installationRoot + "/config/version")
+	if err != nil || strings.TrimSpace(string(upgradedTo)) != a.version {
+		return errors.New("the upgraded installation does not report the release that was installed")
+	}
+	return nil
 }
 
 // Command diagnostics stay in memory and are never forwarded to Actions logs.

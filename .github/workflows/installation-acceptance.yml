@@ -10,6 +10,11 @@ on:
         required: true
         default: "4.0.0"
         type: string
+      upgrade_from:
+        description: "Older published release to install first, then upgrade to `version`; empty skips the upgrade scenario"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -46,13 +51,19 @@ jobs:
           test "$(go tool compile -V | awk '{ print $3 }')" = "$acceptance_toolchain"
       - name: Build disposable installation acceptance tool
         run: go build -trimpath -o "$RUNNER_TEMP/passwall-node-installation-acceptance" ./deployment/acceptance
-      - name: Install public release, inspect isolation, rerun offline and reinstall
+      - name: Install public release (upgrading first when asked), inspect isolation, rerun offline and reinstall
         env:
           ACCEPTANCE_VERSION: ${{ inputs.version }}
+          ACCEPTANCE_UPGRADE_FROM: ${{ inputs.upgrade_from }}
         run: |
           set +x
           set -eu
-          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            "$RUNNER_TEMP/passwall-node-installation-acceptance" -version "$ACCEPTANCE_VERSION"
+          if [ -n "${ACCEPTANCE_UPGRADE_FROM:-}" ]; then
+            sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              "$RUNNER_TEMP/passwall-node-installation-acceptance" -version "$ACCEPTANCE_VERSION" -upgrade-from "$ACCEPTANCE_UPGRADE_FROM"
+          else
+            sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              "$RUNNER_TEMP/passwall-node-installation-acceptance" -version "$ACCEPTANCE_VERSION"
+          fi
       # No artifacts, raw journal, script, proc environment or diagnostics are
       # uploaded: the private fixture credential is deliberately ephemeral.
