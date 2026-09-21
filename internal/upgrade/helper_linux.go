@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-
 )
 
 const nodeService = "passwall-node.service"

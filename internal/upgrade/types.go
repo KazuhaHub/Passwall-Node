@@ -175,4 +175,3 @@ func ParseArgs(task protocol.Task) (Args, error) {
 	}
 	return args, nil
 }
-
