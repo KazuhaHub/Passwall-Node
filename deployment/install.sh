@@ -27,28 +27,141 @@ case "$(uname -m)" in
     aarch64|arm64) arch=arm64 ;;
     *) fail 'only amd64 and arm64 are supported' ;;
 esac
-for tool in curl sha256sum tar awk mktemp install getent useradd chown cmp mv mkdir chmod rm rmdir systemctl timeout sleep ln readlink; do
+for tool in curl sha256sum tar awk date mktemp install getent useradd chown cmp mv mkdir chmod rm rmdir systemctl timeout sleep ln readlink; do
     command -v "$tool" >/dev/null 2>&1 || fail "required installation command is unavailable: $tool"
 done
 [ -d /run/systemd/system ] || fail 'a running systemd host is required'
 
 version=@@VERSION@@
 tag=@@TAG@@
+# mode is what the control plane asked for: install a fresh node, upgrade the
+# release of the one that is here, or replace it. It is a closed set and it is
+# rendered, not derived: the script cannot tell an operator's intent from the
+# filesystem.
+mode=@@MODE@@
 agent_id=@@AGENT_ID@@
 endpoint=@@ENDPOINT@@
 credential=@@CREDENTIAL@@
 environment=@@ENVIRONMENT@@
-case "$version$tag" in *@@*) fail 'render this template with the control plane before installation' ;; esac
+case "$version$tag$mode" in *@@*) fail 'render this template with the control plane before installation' ;; esac
+case "$mode" in
+    install|upgrade) ;;
+    replace) fail 'this release cannot replace an existing installation; upgrade it instead' ;;
+    *) fail 'unknown installation mode' ;;
+esac
 root=/opt/passwall-node
 unit=/etc/systemd/system/passwall-node.service
 pn_link=/usr/local/bin/pn
 lock=/opt/.passwall-node-install.lock
 stage=
 unit_tmp=
+upgrade_backup=
+retained=0
+upgrading=0
+
+# upgrade_info_field reads one numeric field of `--upgrade-info`, which is a single
+# line of JSON with a fixed shape. It is pure shell on purpose: this installer's
+# tool set is fixed (see phase 1), jq is not in it, and this is the only JSON the
+# script reads. Anything absent or non-numeric yields nothing, which every caller
+# treats as "cannot be established" and refuses on.
+upgrade_info_field() {
+    info=$("$1" --upgrade-info 2>/dev/null) || return 0
+    marker="\"$2\":"
+    case "$info" in
+        *"$marker"*) ;;
+        *) return 0 ;;
+    esac
+    rest=${info#*"$marker"}
+    value=${rest%%,*}
+    value=${value%%\}*}
+    case "$value" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+# replace_release_in_place swaps the release of an installation that is already here
+# and keeps its identity: the binary, the version stamp and the licenses are
+# replaced; data/, config/credential, config/environment, the service definition and
+# the systemd unit are not. It is the same file set the remote upgrade helper
+# manages (internal/upgrade/helper_linux.go) and the same order — gate, back up,
+# stop, swap — with phase 6 starting the service again.
+replace_release_in_place() {
+    # THE STATE FORMAT IS THE ONE THING AN IN-PLACE SWAP CANNOT ROLL BACK BY KEEPING
+    # A FILE. The daemon reads its data directory with the schema it was built
+    # against, so the release being replaced and the release replacing it have to
+    # agree on it. The remote upgrade helper refuses on the same comparison
+    # (internal/upgrade/helper_linux.go); this is the same gate, run by the one piece
+    # of new code that can reach a node too old for that helper.
+    installed_schema=$(upgrade_info_field "$root/bin/passwall-node" state_schema)
+    candidate_schema=$(upgrade_info_field "$stage/bundle/bin/passwall-node" state_schema)
+    [ -n "$installed_schema" ] || fail 'the installed binary cannot report its state format; manual upgrade is required'
+    [ -n "$candidate_schema" ] || fail 'the target release cannot report its state format; manual upgrade is required'
+    [ "$installed_schema" = "$candidate_schema" ] || fail "the target release changes the state format ($installed_schema to $candidate_schema); manual upgrade is required"
+    [ "$(upgrade_info_field "$root/bin/passwall-node" upgrade_contract)" = 1 ] || fail 'the installed binary does not support the upgrade contract; manual upgrade is required'
+    [ "$(upgrade_info_field "$stage/bundle/bin/passwall-node" upgrade_contract)" = 1 ] || fail 'the target release does not support the upgrade contract; manual upgrade is required'
+
+    phase 5 "Replace release $installed_version with $version; identity and state retained"
+    backup="$root/backups/upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p "$root/backups" || fail 'cannot create the backup directory'
+    chmod 0700 "$root/backups"
+    mkdir "$backup" || fail 'cannot create the upgrade backup'
+    install -m 0755 "$root/bin/passwall-node" "$backup/passwall-node" || fail 'cannot back up the installed binary'
+    install -m 0600 "$root/config/version" "$backup/version" || fail 'cannot back up the installed version'
+    install -m 0644 "$root/licenses/LICENSE" "$backup/LICENSE" || fail 'cannot back up the installed license'
+    install -m 0644 "$root/licenses/NOTICE" "$backup/NOTICE" || fail 'cannot back up the installed notice'
+    # FROM HERE THE INSTALLATION HAS CHANGED, so the EXIT trap owes it a rollback.
+    upgrade_backup="$backup"
+    # STOP FIRST: the running process holds the old binary's code, and swapping
+    # the file under it would leave the two disagreeing about the state on disk.
+    # Phase 6 starts it again — `enable --now` starts a unit that is not running.
+    timeout --kill-after=5s 30s systemctl stop passwall-node.service || fail 'service stop failed or timed out; the installation was not changed'
+    install -m 0755 "$stage/bundle/bin/passwall-node" "$root/bin/.passwall-node.new" || fail 'cannot stage the new binary'
+    mv -f "$root/bin/.passwall-node.new" "$root/bin/passwall-node" || fail 'cannot publish the new binary'
+    install -m 0600 "$stage/version" "$root/config/version" || fail 'cannot publish the new version'
+    chown passwall-node:passwall-node "$root/config/version" || fail 'cannot hand the new version stamp to the service account'
+    install -m 0644 "$stage/bundle/licenses/LICENSE" "$root/licenses/LICENSE" || fail 'cannot publish the license'
+    install -m 0644 "$stage/bundle/licenses/NOTICE" "$root/licenses/NOTICE" || fail 'cannot publish the notice'
+    # data/, config/credential, config/environment, the service definition and
+    # the systemd unit are NOT touched: this replaces a release, not a node.
+}
+
+# restore_upgrade puts the previous release back after a failed in-place upgrade.
+# It runs from the EXIT trap, so it must never fail the script it is already
+# unwinding, and it reports what it could not do rather than hiding it.
+restore_upgrade() {
+    printf 'Passwall Node: restoring the previous release from %s\n' "$upgrade_backup" >&2
+    # THE VERSION STAMP GOES BACK FIRST, and the order is the point: `config/version`
+    # is what the NEXT run compares against. If the stamp comes back and the binary
+    # does not, the node reports the old version while running the new one — the next
+    # attempt sees a release that differs and swaps again, which is the self-healing
+    # half of the two. The other order leaves a node that claims to be on a release
+    # it is not, and no later run would notice.
+    { install -m 0600 "$upgrade_backup/version" "$root/config/version" 2>/dev/null &&
+        chown passwall-node:passwall-node "$root/config/version" 2>/dev/null; } ||
+        printf 'Passwall Node: ERROR the previous version stamp could not be restored\n' >&2
+    if ! install -m 0755 "$upgrade_backup/passwall-node" "$root/bin/.passwall-node.restore" 2>/dev/null ||
+        ! mv -f "$root/bin/.passwall-node.restore" "$root/bin/passwall-node" 2>/dev/null; then
+        printf 'Passwall Node: ERROR the previous binary could not be restored; repair this installation by hand\n' >&2
+        return 0
+    fi
+    install -m 0644 "$upgrade_backup/LICENSE" "$root/licenses/LICENSE" 2>/dev/null ||
+        printf 'Passwall Node: ERROR the previous license could not be restored\n' >&2
+    install -m 0644 "$upgrade_backup/NOTICE" "$root/licenses/NOTICE" 2>/dev/null ||
+        printf 'Passwall Node: ERROR the previous notice could not be restored\n' >&2
+    timeout --kill-after=5s 30s systemctl start passwall-node.service 2>/dev/null ||
+        printf 'Passwall Node: ERROR the previous release was restored but the service did not start; start it by hand\n' >&2
+}
+
 cleanup() {
     result=$?
     if [ "$result" -ne 0 ] && [ "$failure_reported" = 0 ]; then
         printf 'Passwall Node [%s/6] ERROR (%s): installation stopped; inspect this phase before retrying\n' "$phase_number" "$phase_name" >&2
+    fi
+    # A failed upgrade is the one failure that left the installation changed, so it
+    # is the one that has to put it back.
+    if [ "$result" -ne 0 ] && [ -n "$upgrade_backup" ]; then
+        restore_upgrade
     fi
     [ -z "$stage" ] || rm -rf -- "$stage"
     [ -z "$unit_tmp" ] || rm -f -- "$unit_tmp"
@@ -77,17 +190,36 @@ if [ -e "$pn_link" ] || [ -L "$pn_link" ]; then
         fail 'the pn command path already exists and is not managed by Passwall Node'
 fi
 
-# No source/eval, no rebind or upgrade. Even an incomplete/foreign installation
-# is preserved for operator inspection instead of replacing its data.
+# NO REBIND, AND ONE NARROW EXCEPTION. An existing installation is never replaced
+# by a different identity: the identity in this request must be the identity on
+# disk, byte for byte, and an incomplete or foreign installation is preserved for
+# operator inspection rather than overwritten.
+#
+# What the control plane may ask for instead is a different RELEASE for that SAME
+# identity — an in-place upgrade — and only when it says so in `mode`. Without that
+# word this behaves exactly as it always has: a release that differs is refused,
+# because deciding to replace a running node's binary is not something a script
+# should infer from a version string.
 if [ -e "$root" ] || [ -L "$root" ]; then
     [ -d "$root" ] && [ ! -L "$root" ] || fail 'existing installation requires manual inspection'
-    for file in credential environment version; do
+    for file in credential environment; do
         [ -f "$root/config/$file" ] && [ ! -L "$root/config/$file" ] || fail 'existing installation is incomplete; inspect it manually'
-        cmp -s "$stage/$file" "$root/config/$file" || fail 'existing identity, endpoint, credential or version differs; manual migration is required'
+        cmp -s "$stage/$file" "$root/config/$file" || fail 'existing identity, endpoint or credential differs; manual migration is required'
     done
+    [ -f "$root/config/version" ] && [ ! -L "$root/config/version" ] || fail 'existing installation is incomplete; inspect it manually'
     [ -d "$root/config" ] && [ ! -L "$root/config" ] && [ -d "$root/data" ] && [ ! -L "$root/data" ] || fail 'existing installation directories require manual inspection'
     [ -d "$root/bin" ] && [ ! -L "$root/bin" ] && [ -f "$root/bin/passwall-node" ] && [ ! -L "$root/bin/passwall-node" ] && [ -x "$root/bin/passwall-node" ] || fail 'existing binary requires manual repair'
     [ -f "$root/passwall-node.service" ] && [ ! -L "$root/passwall-node.service" ] || fail 'existing service definition requires manual repair'
+    if cmp -s "$stage/version" "$root/config/version"; then
+        retained=1
+    else
+        [ "$mode" = upgrade ] || fail 'existing identity, endpoint, credential or version differs; manual migration is required'
+        read -r installed_version < "$root/config/version"
+        upgrading=1
+    fi
+fi
+
+if [ "$retained" = 1 ]; then
     phase 3 'Matching installation retained; download skipped (offline rerun)'
     phase 4 'Existing exact release retained; checksum download not repeated'
     phase 5 'Retain identity and state; configure service and optional upgrade helper'
@@ -137,6 +269,9 @@ else
     IFS=' ' read -r binary_version ignored < "$stage/binary-version"
     [ "$binary_version" = "$version" ] || fail 'release binary version does not match the selected release'
 
+    if [ "$upgrading" = 1 ]; then
+        replace_release_in_place
+    else
     phase 5 'Publish installation; configure service and optional upgrade helper'
     if ! getent passwd passwall-node > "$stage/account"; then
         useradd --system --user-group --home-dir "$root" --no-create-home --shell /usr/sbin/nologin passwall-node || fail 'cannot create the dedicated service account'
@@ -185,6 +320,7 @@ UNIT
     # rename. Failed downloads/verification never leave a half-written identity.
     [ ! -e "$root" ] && [ ! -L "$root" ] || fail 'installation appeared concurrently; inspect it manually'
     mv "$stage/bundle" "$root"
+    fi
 fi
 
 # Do not replace an unrelated/manual unit, including a linked unit. A matching

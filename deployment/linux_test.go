@@ -77,6 +77,9 @@ type shellFixture struct {
 	archive, sums  string
 	options        Options
 	architecture   string
+	// binaryBody replaces the archive's agent binary when a case needs one that
+	// answers more than --version (an in-place upgrade reads --upgrade-info).
+	binaryBody string
 }
 
 func newShellFixture(t *testing.T) *shellFixture {
@@ -171,6 +174,9 @@ func (f *shellFixture) makeArchive(extra *tar.Header) {
 		data := []byte("license fixture\n")
 		if name == "passwall-node" {
 			data = []byte("#!/bin/sh\nprintf '%s\\n' '" + f.options.Version + " (test)'\n")
+			if f.binaryBody != "" {
+				data = []byte(f.binaryBody)
+			}
 		}
 		header := &tar.Header{Name: packageName + "/" + name, Mode: 0o755, Size: int64(len(data)), Typeflag: tar.TypeReg}
 		if extra != nil && extra.Name == header.Name {
