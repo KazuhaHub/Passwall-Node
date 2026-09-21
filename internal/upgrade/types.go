@@ -151,36 +151,27 @@ func ParseArgs(task protocol.Task) (Args, error) {
 	if err != nil {
 		return Args{}, err
 	}
-	if !releaseid.ValidVersion(args.Version) || !releaseid.ValidVersion(args.ExpectedVersion) ||
-		CompareVersions(args.Version, args.ExpectedVersion) <= 0 {
-		return args, errors.New("upgrade requires an exact newer release and exact expected current release")
+	// THE TARGET IS EXACT, AND THAT IS AN ADDRESSING REQUIREMENT. Fetch derives the
+	// download address from this version and the checksum manifest names it, so a
+	// target that is not a release version cannot be fetched at all.
+	if !releaseid.ValidVersion(args.Version) {
+		return args, errors.New("upgrade requires an exact release to install")
+	}
+	// THE VERSION BEING REPLACED IS OPAQUE. The agent compares it against its own
+	// compiled version — see client.go — so it is an IDENTITY rather than a version
+	// this has any business parsing, and requiring a product version here is what
+	// made a node still reporting a stamp from the replaced scheme impossible to
+	// move: the request never got past this function.
+	if args.ExpectedVersion == "" {
+		return args, errors.New("upgrade requires the version the agent is expected to be on")
+	}
+	// A NO-OP IS REFUSED BY IDENTITY, NOT BY ORDER. There is no ordering rule any
+	// more: it cannot order a stamp from the replaced scheme against a product
+	// version at all, and an operator choosing an older release is making an
+	// explicit choice. What stops that choice from installing something else is the
+	// signed checksum manifest and the downloaded binary's own version check.
+	if args.ExpectedVersion == args.Version {
+		return args, errors.New("upgrade requires a target other than the version the agent is on")
 	}
 	return args, nil
-}
-
-// CompareVersions orders two release versions, -1 / 0 / +1.
-//
-// It delegates to releaseid rather than carrying its own copy of the rule. The
-// rule is the project's release order, and it is applied in three places — here,
-// the release CLI, and the panel's admission check — so a second implementation
-// is a second opinion about whether an upgrade is an upgrade.
-//
-// IT PARSES, AND IT USED NOT TO HAVE TO. The old rule compared the strings, which
-// works for a shape whose order the text happens to encode and stops working the
-// moment one does not; releaseid's product rule compares parsed versions, which
-// is the same answer for every input that is a version and no answer at all for
-// one that is not.
-//
-// AN UNPARSEABLE INPUT COMPARES EQUAL, which the caller turns into a refusal: it
-// validates both versions with releaseid.ValidVersion before asking which is
-// newer, so a string that cannot be parsed here is a programming error rather
-// than an operator's input — and the fail-closed reading of "cannot be shown to
-// be newer" is the same one the shape check makes.
-func CompareVersions(a, b string) int {
-	left, leftErr := releaseid.ParseProductVersion(a)
-	right, rightErr := releaseid.ParseProductVersion(b)
-	if leftErr != nil || rightErr != nil {
-		return 0
-	}
-	return releaseid.CompareProductVersion(left, right)
 }
