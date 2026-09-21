@@ -4,6 +4,7 @@
 package corecatalog
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -104,18 +105,30 @@ type Asset struct {
 }
 
 func Load() (Catalog, error) {
+	return Parse(embedded)
+}
+
+// Parse reads a core catalog document and applies every review check to it.
+//
+// IT IS THE ONE READING PATH, and Load is a call to it over the embedded bytes
+// rather than a second implementation. The document a release PUBLISHES has to be
+// acceptable to the same checks the compiled catalog passes — the panel consumes
+// the published one and inherits its trust from the release signature, so a
+// document that left here without passing them would be signed and shipped as if
+// it had.
+func Parse(raw []byte) (Catalog, error) {
 	var catalog Catalog
-	decoder := json.NewDecoder(strings.NewReader(string(embedded)))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&catalog); err != nil {
-		return Catalog{}, fmt.Errorf("decode embedded core catalog: %w", err)
+		return Catalog{}, fmt.Errorf("decode core catalog: %w", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return Catalog{}, errors.New("decode embedded core catalog: trailing JSON value")
+			return Catalog{}, errors.New("decode core catalog: trailing JSON value")
 		}
-		return Catalog{}, fmt.Errorf("decode embedded core catalog trailing value: %w", err)
+		return Catalog{}, fmt.Errorf("decode core catalog trailing value: %w", err)
 	}
 	if err := validate(catalog); err != nil {
 		return Catalog{}, err

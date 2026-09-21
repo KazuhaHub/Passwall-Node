@@ -302,6 +302,18 @@ jobs:
           # release signature covers that manifest and nothing else. A copy made
           # after it would publish an asset the signature does not cover.
           cp deployment/install.sh "dist/passwall-node-install-template.sh"
+          # AND THE REVIEWED CORE CATALOG, for the same reason and under the same
+          # ordering rule. Which cores may be installed — the tier, the evidence
+          # behind it, the REALITY compatibility table, the per-asset digests — is
+          # the output of acceptance testing and is in no API; the panel needs it
+          # as data, and it must be the data a release published rather than a copy
+          # of this module.
+          #
+          # IT IS GENERATED, NOT COPIED: `publish-core-catalog` reads the catalog
+          # through the same review checks the compiled one passes, so what is
+          # signed is a document that has been reviewed rather than a file that
+          # merely exists.
+          go run ./deployment/cmd/publish-core-catalog -output dist/core-catalog.json
           (cd dist && sha256sum -- * > SHA256SUMS.txt)
       - name: Sign checksum manifest
         shell: bash
