@@ -291,6 +291,17 @@ jobs:
               tar -C build -czf "dist/${package}.tar.gz" "$package"
             fi
           done
+          # THE TEMPLATE IS PUBLISHED BY ITSELF, SIGNED WITH EVERYTHING ELSE.
+          # The panel renders it for the install command it hands an operator, and
+          # it needs the bytes a release published rather than a copy compiled into
+          # this module — that copy is what keeps this module in the panel's
+          # dependency graph, which is the dependency X07 removes.
+          #
+          # IT IS COPIED BEFORE THE MANIFEST IS WRITTEN, and the order is the whole
+          # property: `sha256sum -- *` hashes what is in dist/ when it runs, and the
+          # release signature covers that manifest and nothing else. A copy made
+          # after it would publish an asset the signature does not cover.
+          cp deployment/install.sh "dist/passwall-node-install-template.sh"
           (cd dist && sha256sum -- * > SHA256SUMS.txt)
       - name: Sign checksum manifest
         shell: bash
