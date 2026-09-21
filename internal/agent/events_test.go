@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
+	statesqlite "github.com/KazuhaHub/passwall-node/v4/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

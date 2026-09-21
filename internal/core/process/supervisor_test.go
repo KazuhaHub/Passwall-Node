@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 )
 
 // Every helper launch starts a fresh copy of the race-instrumented test binary.

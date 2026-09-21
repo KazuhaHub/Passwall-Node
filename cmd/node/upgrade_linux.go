@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
-	"github.com/KazuhaHub/passwall-node/internal/state"
-	"github.com/KazuhaHub/passwall-node/internal/upgrade"
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/deployment"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
+	"github.com/KazuhaHub/passwall-node/v4/internal/upgrade"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 func remoteUpgradeClient(parsed options, version string, clock state.TaskStartClock, converge func(context.Context) error) *upgrade.Client {

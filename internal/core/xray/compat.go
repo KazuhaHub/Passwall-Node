@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/corecatalog"
+	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
 )
 
 type RealityCompatibility string

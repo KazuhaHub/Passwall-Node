@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/KazuhaHub/passwall-node/internal/state"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 )
 
 // OutboxPending counts the report rows that have not been delivered.

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/KazuhaHub/passwall-node/internal/state"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 )
 
 type interruptedClaimStore struct {

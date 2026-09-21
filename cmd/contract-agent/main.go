@@ -12,9 +12,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/agent"
-	"github.com/KazuhaHub/passwall-node/internal/state"
-	statesqlite "github.com/KazuhaHub/passwall-node/internal/state/sqlite"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
+	statesqlite "github.com/KazuhaHub/passwall-node/v4/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

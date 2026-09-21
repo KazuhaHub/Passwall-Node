@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/internal/releaseauth"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 type releaseRoundTrip func(*http.Request) (*http.Response, error)

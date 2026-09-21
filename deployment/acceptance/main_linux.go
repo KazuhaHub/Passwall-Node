@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
+	"github.com/KazuhaHub/passwall-node/v4/deployment"
 	_ "modernc.org/sqlite"
 )
 

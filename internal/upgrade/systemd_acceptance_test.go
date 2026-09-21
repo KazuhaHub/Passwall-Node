@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/KazuhaHub/passwall-node/deployment"
+	"github.com/KazuhaHub/passwall-node/v4/deployment"
 )
 
 // This is a narrow kernel/systemd permission acceptance, not an agent upgrade,

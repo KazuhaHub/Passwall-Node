@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/internal/nodeconfig"
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/internal/nodeconfig"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 // Options names an already registered identity and an already published release.

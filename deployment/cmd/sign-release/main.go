@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/KazuhaHub/passwall-node/internal/releaseauth"
+	"github.com/KazuhaHub/passwall-node/v4/internal/releaseauth"
 )
 
 const maxSigningInput = 256 << 10

@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	agentcore "github.com/KazuhaHub/passwall-node/internal/core"
-	"github.com/KazuhaHub/passwall-node/internal/nodeevent"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
+	"github.com/KazuhaHub/passwall-node/v4/internal/nodeevent"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

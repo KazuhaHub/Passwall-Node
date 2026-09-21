@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/internal/testutil/nodefixture"
+	"github.com/KazuhaHub/passwall-node/v4/internal/testutil/nodefixture"
 )
 
 const fixturePath = nodefixture.Path

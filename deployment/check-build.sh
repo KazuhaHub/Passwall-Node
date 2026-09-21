@@ -17,7 +17,7 @@ printf '%s\n' "$info" | awk -v toolchain="$toolchain" -v goos="$goos" -v goarch=
     $1 == "build" && $2 == "vcs.revision=" commit { revision = 1 }
     $1 == "build" && $2 == "vcs.modified=false" { clean = 1 }
     $1 == "build" && $2 == "CGO_ENABLED=0" { static = 1 }
-    $1 == "path" && $2 == "github.com/KazuhaHub/passwall-node/cmd/node" { main = 1 }
+    $1 == "path" && $2 == "github.com/KazuhaHub/passwall-node/v4/cmd/node" { main = 1 }
     END { exit !(compiler && os && arch && revision && clean && static && main) }
 ' || { printf '%s\n' 'release compiler, platform or clean commit provenance mismatch' >&2; exit 1; }
 printf '%s\n' "Verified $goos/$goarch compiler $toolchain and clean source commit."

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/agent"
-	"github.com/KazuhaHub/passwall-node/internal/state"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

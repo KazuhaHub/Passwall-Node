@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KazuhaHub/passwall-node/internal/nodeconfig"
+	"github.com/KazuhaHub/passwall-node/v4/internal/nodeconfig"
 )
 
 const testUnitContents = "[Service]\nUser=passwall-node\nGroup=passwall-node\nEnvironmentFile=/opt/passwall-node/config/environment\nExecStart=/opt/passwall-node/bin/passwall-node --endpoint ${PSP_NODE_ENDPOINT} --agent-id ${PSP_NODE_AGENT_ID} --credential-file /opt/passwall-node/config/credential --data-dir /opt/passwall-node/data\n"

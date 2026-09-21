@@ -11,7 +11,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/KazuhaHub/passwall-node/releaseid"
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

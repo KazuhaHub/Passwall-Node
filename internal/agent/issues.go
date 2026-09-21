@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/KazuhaHub/passwall-node/internal/state"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

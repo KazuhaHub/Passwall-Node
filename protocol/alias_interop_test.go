@@ -3,7 +3,7 @@ package protocol_test
 import (
 	"testing"
 
-	legacy "github.com/KazuhaHub/passwall-node/protocol"
+	legacy "github.com/KazuhaHub/passwall-node/v4/protocol"
 	current "github.com/KazuhaHub/passwall-protocol/protocol"
 )
 

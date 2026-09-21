@@ -10,7 +10,7 @@ import (
 
 type testIdentity struct{ Package, Test string }
 
-const module = "github.com/KazuhaHub/passwall-node/internal/core/"
+const module = "github.com/KazuhaHub/passwall-node/v4/internal/core/"
 
 // Require the eight executable leaves, plus both parent tests and all three
 // package pass events. A cached, missing, renamed or skipped gate cannot pass.
