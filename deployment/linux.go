@@ -23,6 +23,16 @@ const (
 	// identity. The credential and the endpoint must still match byte for byte; only
 	// the version may differ.
 	ModeUpgrade = "upgrade"
+	// ModeReplace puts a DIFFERENT identity on a host that already has one, which is
+	// what a server moving to another control plane needs. The installation that is
+	// there is stopped and moved into the backup area whole, so the new identity
+	// starts with empty state and the old one is still recoverable by hand.
+	//
+	// IT IS NOT A SHORTCUT FOR A FAILED UPGRADE. An upgrade keeps the identity and
+	// the state and can be rolled back to the previous release; this cannot be,
+	// because the state it would be rolled back to belongs to an identity the panel
+	// no longer has a row for.
+	ModeReplace = "replace"
 )
 
 // Options names an already registered identity and an already published release.
@@ -43,10 +53,12 @@ var linuxTemplate string
 // or arm64. Save it mode 0600 and execute the file with sh as root; never pipe a
 // credential through command arguments, shell tracing, history or shared logs.
 //
-// INSTALLATION NEVER CHANGES AN EXISTING IDENTITY. The identity and the credential
-// in the request have to be the ones already on the host, byte for byte, whatever
-// the mode; ModeUpgrade is the one thing that may differ, and it changes the
-// RELEASE while keeping the identity and the state in place.
+// INSTALLATION CHANGES AN EXISTING IDENTITY ONLY WHEN THE CONTROL PLANE SAYS SO IN
+// `mode`, AND THEN IN ONE DIRECTION: ModeReplace takes the host over for a
+// different identity after moving the one that is there into the backup area, and
+// ModeUpgrade changes the RELEASE while keeping the identity and the state in
+// place. Every other combination is refused, including a release that differs with
+// no mode — an install is always to an empty path or to the identity already there.
 func RenderLinux(options Options) (string, error) {
 	if !ValidReleaseVersion(options.Version) {
 		return "", errors.New("installation requires an explicit MAJOR.MINOR.PATCH release version")
@@ -56,7 +68,7 @@ func RenderLinux(options Options) (string, error) {
 		mode = ModeInstall
 	}
 	switch mode {
-	case ModeInstall, ModeUpgrade:
+	case ModeInstall, ModeUpgrade, ModeReplace:
 	default:
 		return "", fmt.Errorf("installation mode %q is not one this template understands", mode)
 	}

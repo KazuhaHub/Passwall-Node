@@ -45,8 +45,7 @@ credential=@@CREDENTIAL@@
 environment=@@ENVIRONMENT@@
 case "$version$tag$mode" in *@@*) fail 'render this template with the control plane before installation' ;; esac
 case "$mode" in
-    install|upgrade) ;;
-    replace) fail 'this release cannot replace an existing installation; upgrade it instead' ;;
+    install|upgrade|replace) ;;
     *) fail 'unknown installation mode' ;;
 esac
 root=/opt/passwall-node
@@ -58,6 +57,10 @@ unit_tmp=
 upgrade_backup=
 retained=0
 upgrading=0
+replacing=0
+# displaced is where the installation that `mode=replace` moves aside ends up. It is
+# set only once that move has happened, which is what the cleanup trap keys on.
+displaced=
 
 # upgrade_info_field reads one numeric field of `--upgrade-info`, which is a single
 # line of JSON with a fixed shape. It is pure shell on purpose: this installer's
@@ -126,6 +129,39 @@ replace_release_in_place() {
     # the systemd unit are NOT touched: this replaces a release, not a node.
 }
 
+# move_installation_aside stops the service and moves the installation that is here
+# to a path beside the root, so that a DIFFERENT identity can take the root over with
+# nothing of the old one left in it. It is what `mode=replace` does that no other
+# mode may: the fresh branch below requires the root to be free, and a replacement
+# has to make it free.
+#
+# IT MOVES RATHER THAN COPIES. A copy would leave the credential, the release and the
+# state directory exactly where the new identity is about to be installed — the new
+# node would start against the old node's state, which is the one thing a new
+# identity must not do. Preserving the old installation and emptying the path are
+# therefore ONE operation, and a rename is the atomic way to do both. Nothing is
+# discarded: the whole directory goes to a named path, and the caller moves it under
+# the new installation's backups/ once the new installation is published.
+#
+# THE SERVICE IS STOPPED FIRST, AND PROVEN STOPPED. Starting a unit that is already
+# active is a no-op, so an agent left running from the old root would keep running
+# against the new identity's data directory — the old node's state written into a
+# directory the panel no longer connects to it. The state is read back rather than
+# trusted to the stop command: an installation that is still running is left exactly
+# as it is, with nothing changed, and the operator is told which state it is in.
+move_installation_aside() {
+    if [ -e "$unit" ] || [ -L "$unit" ]; then
+        timeout --kill-after=5s 30s systemctl stop passwall-node.service >/dev/null 2>&1 || true
+        state=$(timeout --kill-after=1s 3s systemctl show passwall-node.service --property=ActiveState --value 2>/dev/null) || state=unknown
+        case "$state" in
+            inactive|failed) ;;
+            *) fail "the service is $state and could not be stopped; nothing was changed" ;;
+        esac
+    fi
+    displaced="$root.replaced-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$root" "$displaced" || fail 'cannot move the installation that is here into the backup area; nothing was changed'
+}
+
 # restore_upgrade puts the previous release back after a failed in-place upgrade.
 # It runs from the EXIT trap, so it must never fail the script it is already
 # unwinding, and it reports what it could not do rather than hiding it.
@@ -162,6 +198,21 @@ cleanup() {
     # is the one that has to put it back.
     if [ "$result" -ne 0 ] && [ -n "$upgrade_backup" ]; then
         restore_upgrade
+    fi
+    # A REPLACEMENT THAT FAILED BEFORE IT PUBLISHED LEFT NO INSTALLATION AT ALL: the
+    # old one was moved aside and the new one never arrived. Put the old one back —
+    # the failure had nothing to do with it — and say so, because the alternative is
+    # a host whose node is missing with its replacement in a backup path.
+    #
+    # ONCE THE NEW INSTALLATION IS PUBLISHED THE ROOT IS NOT FREE, and this does
+    # nothing: the new identity is what the operator asked for, and the displaced
+    # installation stays where it is for them to inspect.
+    if [ "$result" -ne 0 ] && [ -n "$displaced" ] && [ ! -e "$root" ] && [ ! -L "$root" ]; then
+        if mv "$displaced" "$root" 2>/dev/null; then
+            printf 'Passwall Node: the installation that was here has been put back at %s\n' "$root" >&2
+        else
+            printf 'Passwall Node: ERROR the installation that was here is at %s and could not be put back; move it by hand\n' "$displaced" >&2
+        fi
     fi
     [ -z "$stage" ] || rm -rf -- "$stage"
     [ -z "$unit_tmp" ] || rm -f -- "$unit_tmp"
@@ -202,12 +253,29 @@ fi
 # should infer from a version string.
 if [ -e "$root" ] || [ -L "$root" ]; then
     [ -d "$root" ] && [ ! -L "$root" ] || fail 'existing installation requires manual inspection'
+    [ -d "$root/config" ] && [ ! -L "$root/config" ] && [ -d "$root/data" ] && [ ! -L "$root/data" ] || fail 'existing installation directories require manual inspection'
+    if [ "$mode" = replace ]; then
+        # A REPLACEMENT IS THE ONE THING THAT MAY DISAGREE WITH WHAT IS ON DISK, so
+        # the byte comparisons below — which exist to prove the request describes the
+        # installation that is already here — are exactly what it does not run. What
+        # it needs instead is the version of the installation it will displace, for
+        # the phase text and for the record the operator reads afterwards, and it
+        # needs it read now: after phase 5 the file is gone.
+        #
+        # THE REST OF THIS PHASE IS SKIPPED FOR A REPLACEMENT, and that is a decision
+        # rather than an omission: the checks below are repairs — a missing binary, a
+        # missing unit — and a host whose node is in that state is one an operator
+        # may well want to replace. What the replacement must be sure of is that the
+        # directories are real, which is the line above, and that the service can be
+        # stopped, which is move_installation_aside's job.
+        read -r replaced_version < "$root/config/version" 2>/dev/null || replaced_version=''
+        replacing=1
+    else
     for file in credential environment; do
         [ -f "$root/config/$file" ] && [ ! -L "$root/config/$file" ] || fail 'existing installation is incomplete; inspect it manually'
         cmp -s "$stage/$file" "$root/config/$file" || fail 'existing identity, endpoint or credential differs; manual migration is required'
     done
     [ -f "$root/config/version" ] && [ ! -L "$root/config/version" ] || fail 'existing installation is incomplete; inspect it manually'
-    [ -d "$root/config" ] && [ ! -L "$root/config" ] && [ -d "$root/data" ] && [ ! -L "$root/data" ] || fail 'existing installation directories require manual inspection'
     [ -d "$root/bin" ] && [ ! -L "$root/bin" ] && [ -f "$root/bin/passwall-node" ] && [ ! -L "$root/bin/passwall-node" ] && [ -x "$root/bin/passwall-node" ] || fail 'existing binary requires manual repair'
     [ -f "$root/passwall-node.service" ] && [ ! -L "$root/passwall-node.service" ] || fail 'existing service definition requires manual repair'
     if cmp -s "$stage/version" "$root/config/version"; then
@@ -216,6 +284,7 @@ if [ -e "$root" ] || [ -L "$root" ]; then
         [ "$mode" = upgrade ] || fail 'existing identity, endpoint, credential or version differs; manual migration is required'
         read -r installed_version < "$root/config/version"
         upgrading=1
+    fi
     fi
 fi
 
@@ -277,7 +346,11 @@ else
     if [ "$upgrading" = 1 ]; then
         replace_release_in_place
     else
-    phase 5 'Publish installation; configure service and optional upgrade helper'
+    if [ "$replacing" = 1 ]; then
+        phase 5 "Replace the installation that is here; the displaced one is kept in the backup area"
+    else
+        phase 5 'Publish installation; configure service and optional upgrade helper'
+    fi
     if ! getent passwd passwall-node > "$stage/account"; then
         useradd --system --user-group --home-dir "$root" --no-create-home --shell /usr/sbin/nologin passwall-node || fail 'cannot create the dedicated service account'
         getent passwd passwall-node > "$stage/account" || fail 'cannot inspect the service account'
@@ -323,8 +396,24 @@ UNIT
     chmod 0644 "$stage/bundle/passwall-node.service"
     # Complete identity+credential+binary become visible in one same-filesystem
     # rename. Failed downloads/verification never leave a half-written identity.
-    [ ! -e "$root" ] && [ ! -L "$root" ] || fail 'installation appeared concurrently; inspect it manually'
-    mv "$stage/bundle" "$root"
+    if [ "$replacing" = 1 ]; then
+        move_installation_aside
+    else
+        [ ! -e "$root" ] && [ ! -L "$root" ] || fail 'installation appeared concurrently; inspect it manually'
+    fi
+    mv "$stage/bundle" "$root" || fail 'cannot publish the new installation'
+    if [ -n "$displaced" ]; then
+        # THE DISPLACED INSTALLATION MOVES UNDER THE NEW ONE, where an operator looks
+        # for backups, and this is the FIRST step that may not abort the run: the new
+        # node is published and the old one is safe at a path this prints, so failing
+        # here would leave a host with no node over a directory move.
+        if mkdir -p "$root/backups" && chmod 0700 "$root/backups" &&
+            mv "$displaced" "$root/backups/replaced-$(date -u +%Y%m%dT%H%M%SZ)"; then
+            printf '%s\n' '  The installation that was here is kept under backups/ on this host.'
+        else
+            printf 'Passwall Node: WARNING the installation that was here is still at %s; move it under %s/backups by hand\n' "$displaced" "$root" >&2
+        fi
+    fi
     fi
 fi
 
@@ -371,6 +460,9 @@ timeout --kill-after=1s 30s sh -c '
         sleep 1
     done
 ' || fail 'agent did not reach active/running with a nonzero PID within 30s; installed identity and data were retained'
+if [ "$replacing" = 1 ]; then
+    printf '%s\n' 'Passwall Node installed; this host now reports a NEW identity and starts with empty state.'
+fi
 printf '%s\n' 'Passwall Node installed; identity and state retained under /opt/passwall-node.'
 printf '%s\n' 'Local management is available through: pn'
 printf '%s\n' 'Agent startup confirmed only. PSP sync, core and proxy readiness are not confirmed by this installer.'
