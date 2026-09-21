@@ -9,16 +9,22 @@
 // with itself eventually.
 //
 // THREE IDENTITIES, KEPT APART. A product version ("102.1.0") is not a release
-// tag ("release/102.1.0"), and neither is a Go module version ("v0.1.0") or a
-// wire generation ("v1"). This package handles the first two. A Go module
-// version keeps its v because the Go toolchain requires it; a product version
-// never has one because a release is not a module.
+// tag ("v102.1.0"), and neither is a wire generation ("v1"). This package handles
+// the first two.
 //
-// ONE SCHEME, AND ONE ADDRESS FORM. A version is MAJOR.MINOR.PATCH with an
-// optional fourth BUILD segment; its tag is `release/` + that version. The
-// historical v-prefixed scheme ("v0.0.1-beta11") is no longer produced or read,
-// and no arithmetic ever converted one into the other — which is why removing the
-// reader was a deletion rather than a migration.
+// A PRODUCT TAG IS `v` + THE VERSION, AND THAT IS ALSO THIS MODULE'S VERSION for
+// the releases that have three segments: this package lives at
+// `github.com/KazuhaHub/passwall-node/v4`, so `v4.0.1` is a version `go get` can
+// resolve. The two identities coincide deliberately — the module path carries the
+// product major — which is why a release publishes ONE tag and not two.
+//
+// READING IS WIDER THAN WRITING, AND THE VERSION IS NOT THE ADDRESS. Four releases
+// were published under `release/` before the address changed, and a published tag
+// cannot be moved, so both namespaces are READ for as long as this project reads
+// its own releases. Only the current one is DERIVED: no version string says which
+// namespace its release went out under, so a caller that has to address a
+// published release carries the tag (or, where it holds only a version, asks
+// HistoricalTagFor for the other form — see TagForVersion's note).
 package releaseid
 
 import (
@@ -38,16 +44,28 @@ const MaxSegment int64 = 2147483647
 type Scheme string
 
 const (
-	// SchemeProduct is the scheme: a tag of release/MAJOR.MINOR.PATCH. There is
-	// no other, which is why the type has kept its name and its field on Tag —
-	// a record that says which identity system it belongs to is worth keeping
-	// even when there is one answer, because the field is what a reader looks at.
+	// SchemeProduct is the scheme: a tag of vMAJOR.MINOR.PATCH. There is no other,
+	// which is why the type has kept its name and its field on Tag — a record that
+	// says which identity system it belongs to is worth keeping even when there is
+	// one answer, because the field is what a reader looks at.
 	SchemeProduct Scheme = "product"
 )
 
-// TagPrefix is the namespace product tags live under. It exists so a product tag
-// can never be mistaken for a Go module version, which also begins with a v.
-const TagPrefix = "release/"
+// TagPrefix is the namespace product tags live under.
+//
+// IT USED TO BE AN ESCAPE FROM THE GO TOOLCHAIN, and it is not any more: what it
+// kept a product tag from being mistaken for is a MODULE version, and a module
+// version is now the point — a three-segment release's tag is the version this
+// module resolves at. What the namespace cost was a SLASH in every address, which
+// is two path entries in a download URL and a repository separator in an image
+// tag. The four releases published under it keep being read; nothing new is
+// written there.
+const TagPrefix = "v"
+
+// HistoricalTagPrefix is where the four releases published before the address
+// changed live. READ, NEVER WRITTEN: those tags cannot move, the panel still
+// offers them, and a node still installs from them.
+const HistoricalTagPrefix = "release/"
 
 var (
 	// ErrUnknownFormat means the input is not a version or tag in any scheme this
@@ -201,14 +219,20 @@ func ValidVersion(value string) bool {
 }
 
 // TagForVersion is the inverse of VersionString: the tag a release stamped with
-// this version was published under.
+// this version is published under.
+//
+// IT ANSWERS WITH THE CURRENT ADDRESS, WHICH IS NOT ALWAYS THE PUBLISHED ONE. Four
+// releases went out under `release/`, and no version string says which namespace
+// its release was published under — 4.0.1.2 was, 4.0.1.3 will not be. A caller
+// that has to reach a release which already exists either carries its tag or asks
+// HistoricalTagFor for the other form.
 //
 // IT EXISTS BECAUSE THE DOWNLOAD PATH HOLDS A VERSION, NOT A TAG. The upgrade
-// helper compares the version a binary reports against the version it asked
-// for, so the version is the identity it has; the URL needs the other one. A
-// consumer that concatenated the version into the path would address
-// `.../download/4.0.0/...` for a release that lives at `release/4.0.0`, and the
-// failure would look like a missing release rather than a wrong URL.
+// helper compares the version a binary reports against the version it asked for,
+// so the version is the identity it has; the URL needs the other one. A consumer
+// that concatenated the version into the path would address
+// `.../download/4.0.0/...` for a release that lives at `v4.0.0`, and the failure
+// would look like a missing release rather than a wrong URL.
 //
 // The round trip through VersionString is lossless, so a caller cannot end up
 // fetching a release whose own binary reports a different version than the one
@@ -226,6 +250,22 @@ func TagForVersion(version string) (Tag, error) {
 	return Tag{Raw: TagPrefix + v.String(), Scheme: SchemeProduct, Product: v}, nil
 }
 
+// HistoricalTagFor is the OTHER address a version may have been published at: the
+// namespace the releases from before the address changed live in.
+//
+// IT IS NOT A SECOND DERIVATION RULE. Nothing about a version says which namespace
+// its release went out under, and this does not claim to know — it names the other
+// address, for a caller that has to find a release which may predate the change and
+// has nowhere else to ask. A caller that knows which release it means carries its
+// tag instead.
+func HistoricalTagFor(version string) (Tag, error) {
+	tag, err := TagForVersion(version)
+	if err != nil {
+		return Tag{}, err
+	}
+	return Tag{Raw: HistoricalTagPrefix + tag.Product.String(), Scheme: SchemeProduct, Product: tag.Product}, nil
+}
+
 // VersionString is the string this release is STAMPED with: the build version,
 // the archive name, the Docker tag.
 //
@@ -241,22 +281,25 @@ func (t Tag) VersionString() string {
 
 // ParseReleaseTag parses a release tag.
 //
-// "release/MAJOR.MINOR.PATCH" is the form, and the version part must be exactly
-// three segments: a tag is a published identity, so the short forms that are
-// legal as parse input do not get releases of their own. The fourth BUILD
-// segment is allowed, because a rebuild is published under its own tag.
+// "vMAJOR.MINOR.PATCH[.BUILD]" is the form, and the version part must be three or
+// four segments either way: a tag is a published identity, so the short forms that
+// are legal as parse input do not get releases of their own.
 //
-// A v INSIDE THE NAMESPACE (release/v4.0.0) is refused: it is not a version
-// someone forgot to strip a letter from, it is a string that would be read as a
-// tag by one rule and a version by another, and the two readings differ about
-// which release it names.
+// BOTH NAMESPACES ARE READ. The four releases published under `release/` are on
+// GitHub permanently and the panel still offers them, so a reader that accepted
+// only the current one would drop them — silently, since an unreadable tag is
+// skipped wherever this is used to build a registry. The two cannot be confused
+// for one another: neither is a prefix of the other.
+//
+// A v INSIDE THE HISTORICAL NAMESPACE (release/v4.0.0) is refused: the version
+// after that namespace is bare, and the v IS the other namespace — a string read
+// as a tag by one rule and a version by another differs about which release it
+// names.
 func ParseReleaseTag(raw string) (Tag, error) {
-	body, found := strings.CutPrefix(raw, TagPrefix)
+	body, found := tagBody(raw)
 	if !found {
-		return Tag{}, fmt.Errorf("%w: %q is not a %sMAJOR.MINOR.PATCH tag", ErrUnknownFormat, raw, TagPrefix)
-	}
-	if strings.HasPrefix(body, "v") {
-		return Tag{}, fmt.Errorf("%w: %q puts a v inside the product tag namespace", ErrUnknownFormat, raw)
+		return Tag{}, fmt.Errorf("%w: %q is neither a %sMAJOR.MINOR.PATCH nor a %sMAJOR.MINOR.PATCH tag",
+			ErrUnknownFormat, raw, TagPrefix, HistoricalTagPrefix)
 	}
 	if dots := strings.Count(body, "."); dots != 2 && dots != 3 {
 		return Tag{}, fmt.Errorf("%w: %q is a product tag, which is three or four segments", ErrUnknownFormat, raw)
@@ -269,6 +312,17 @@ func ParseReleaseTag(raw string) (Tag, error) {
 		return Tag{}, fmt.Errorf("%w: %q has a zero release line, which is not a released identity", ErrUnknownFormat, raw)
 	}
 	return Tag{Raw: raw, Scheme: SchemeProduct, Product: v}, nil
+}
+
+// tagBody is the version part of a tag under either namespace, and whether the
+// string is one of this project's tags at all.
+func tagBody(raw string) (string, bool) {
+	for _, prefix := range []string{TagPrefix, HistoricalTagPrefix} {
+		if body, found := strings.CutPrefix(raw, prefix); found {
+			return body, true
+		}
+	}
+	return "", false
 }
 
 // Channel is where a release sits in the publication flow.

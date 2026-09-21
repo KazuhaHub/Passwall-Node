@@ -5,30 +5,31 @@ name: Release
 on:
   push:
     tags:
-      # BOTH SCHEMES. `v*` is the legacy shape and stays until the last v-named
-      # release is out of support; `release/*` is the product shape
-      # (release/MAJOR.MINOR.PATCH).
+      # ONE NAMESPACE, AND IT IS THE ONE THE MODULE WEARS TOO: a release tag is
+      # `vMAJOR.MINOR.PATCH[.BUILD]`. `release/*` is where the four releases from
+      # before the address changed live; a published tag cannot be moved, so
+      # nothing new is written there and this workflow no longer triggers on one.
       #
-      # IT WAS WITHHELD UNTIL THE INSTALLERS COULD READ ONE. The publish side
-      # separates the tag from the version and could always have built a product
-      # tag correctly — but the PUBLIC installer resolved its version from the
-      # release's `tag_name`, so it could not identify a product release and would
-      # have failed on one that installed fine before.
+      # THE v-PREFIXED TRIGGER WAS REFUSED FOR A REASON THAT IS GONE. Every release
+      # used to push a `v`-prefixed GO MODULE tag BESIDE its product tag — `v4.0.1`
+      # for `release/4.0.1`, because a module whose path ends in /vMAJOR accepts only
+      # vMAJOR.* — so a `v*` trigger would have fired a whole release off a tag that
+      # is not one. The two identities are the same string now (the module path
+      # carries the product major, which is what #51 arranged), so one tag names
+      # both and there is no second tag to mistake for a release.
       #
-      # It reads both identities now: the version comes out of the asset name and
-      # the address comes out of the release document, so neither is derived from
-      # the tag. That is the condition this trigger was waiting on, and
-      # deployment/release_identity_test.go was rewritten to REQUIRE the pattern
-      # in the same change rather than deleted.
-      #
-      # THE HISTORICAL TRIGGER IS GONE WITH THE SCHEME. It accepted a v-prefixed
-      # tag until the products stopped publishing one; a workflow that can still
-      # publish under it is a way to make a release the panel cannot read.
-      - "release/*"
+      # AND EVERY READER TAKES THIS SHAPE OR BOTH. The public installer reads the
+      # version out of the asset name and the address out of the release document;
+      # the panel parses a tag under either namespace, because the four published
+      # before the change are still offered; and the upgrade path in this repository
+      # asks for the current address first and the historical one second, because a
+      # node holds only a version. deployment/release_identity_test.go REQUIRES this
+      # pattern in the same change rather than being deleted.
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example release/4.0.0"
+        description: "Release tag, for example v4.0.1.3"
         required: true
         type: string
       channel:
@@ -110,12 +111,13 @@ jobs:
             tag="${GITHUB_REF_NAME}"
           fi
           # THE TAG AND THE VERSION ARE DIFFERENT IDENTITIES, and this is where
-          # they are told apart. A product tag is `release/4.0.0` and its version
-          # is `4.0.0`; a legacy tag is both. The tag is what appears in a git
-          # ref and a download URL, the version is what goes into the build
-          # stamp, the archive name and the image tag. Using one for the other
-          # addresses a different release — for the product scheme, an image tag
-          # containing a slash is not an error, it is a DIFFERENT REPOSITORY.
+          # they are told apart. A product tag is `v4.0.0` and its version is
+          # `4.0.0`; under the legacy scheme the tag WAS the version. The tag is
+          # what appears in a git ref and a download URL, the version is what goes
+          # into the build stamp, the archive name and the image tag. Using one for
+          # the other addresses a different release, and the failure is quiet: an
+          # image tag containing a slash is not an error to Docker, it is a
+          # DIFFERENT REPOSITORY.
           #
           # The command refuses an unpublishable tag and prints nothing on
           # stdout when it does, so a failure here cannot leave `version` empty
@@ -173,8 +175,11 @@ jobs:
             auto)    prerelease=true ;;
             *) echo "unknown publication channel: ${REQUESTED}" >&2; exit 1 ;;
           esac
-          # Which tags do images get published for at all? The legacy form and the
-          # product namespace; anything else is a scratch dispatch.
+          # WHETHER THE TAG ADDRESSES A RELEASE AT ALL. Both namespaces do: the
+          # current one is what every release from here on carries, and the
+          # historical one is what the four published before the change carry —
+          # they are real releases, and rebuilding one should publish its image
+          # too. Anything else is a scratch dispatch.
           case "$PINNED_TAG" in
             v*|release/*) images=true ;;
             *)            images=false ;;
@@ -374,11 +379,15 @@ jobs:
         with:
           images: ghcr.io/${{ needs.setup.outputs.owner_lc }}/passwall-node
           tags: |
-            # THE EXACT IMAGE TAG IS THE VERSION, NOT THE GIT TAG. A product tag
-            # contains a slash, and a slash in a Docker tag is not rejected — it
+            # THE EXACT IMAGE TAG IS THE VERSION, NOT THE GIT TAG. They are
+            # different identities, and a tag can contain characters an image tag
+            # cannot mean the same thing by: a slash is not rejected by Docker — it
             # is read as a REPOSITORY separator, so `passwall-node:release/4.0.0`
-            # addresses a repository named `passwall-node/release`. The build
-            # would succeed and push to somewhere nobody is watching.
+            # addresses a repository named `passwall-node/release`, and the build
+            # succeeds and pushes somewhere nobody is watching. That is the
+            # historical namespace's shape; the current one has no slash, and the
+            # rule stays because the four releases published there are still built
+            # by this same job.
             type=raw,value=${{ needs.setup.outputs.version }}
             # AND THE CHANNEL IS RESOLVED, NOT READ OFF THE TAG TEXT. Both of
             # these used to test `startsWith(tag, 'v')`, which a product tag has

@@ -228,9 +228,14 @@ else
     asset="${package}.tar.gz"
     # THE VERSION NAMES THE ASSET AND THE TAG IS WHERE THE RELEASE LIVES. They are
     # one string in the historical scheme and are never the same string now: a
-    # product release is addressed as release/4.0.0 and its archive is named
+    # product release is addressed as v4.0.0 and its archive is named
     # passwall-node_4.0.0_linux_amd64.tar.gz. Building the path from the version
     # asks for a release that does not exist under that name.
+    #
+    # AND THE TAG IS HANDED OVER RATHER THAN DERIVED, because a version no longer
+    # determines one: the releases published before the address changed live at
+    # release/4.0.1.2 and cannot move. Whoever rendered this script knew which
+    # release was meant; this side does not have to guess.
     base="https://github.com/KazuhaHub/Passwall-Node/releases/download/${tag}"
     phase 3 "Download exact release $version (linux/$arch)"
     # Checksums detect corruption against the same trusted HTTPS release; they

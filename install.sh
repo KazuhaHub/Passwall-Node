@@ -122,10 +122,11 @@ stage=$(mktemp -d /opt/.passwall-node-public.XXXXXX) || fail 'cannot create a pr
 #
 # ONE NAME CANNOT BOTH ADDRESS AND NAME THE FILE, which is what the old shape got
 # wrong. It built `releases/download/<tag>/<asset>` from a single value taken out
-# of `tag_name` and called the version, so for a product release — tag
-# `release/4.0.0`, version `4.0.0` — that value was wrong for one of the two jobs
-# whichever it was, and the slash in the tag is two path segments rather than an
-# error anyone would see.
+# of `tag_name` and called the version, so for a product release — tag `v4.0.0`,
+# version `4.0.0` — that value was wrong for one of the two jobs whichever it was.
+# The four releases published before the address changed make the same point from
+# the other side: their tag carries a slash, which is two path segments rather than
+# an error anyone would see.
 
 release_repository_prefix='https://github.com/KazuhaHub/Passwall-Node/releases/download/'
 

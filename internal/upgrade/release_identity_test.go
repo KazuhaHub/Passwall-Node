@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/KazuhaHub/passwall-node/v4/internal/releaseauth"
@@ -30,14 +31,21 @@ func TestFetchAddressesTheReleaseByTagAndNamesAssetsByVersion(t *testing.T) {
 		name    string
 		version string
 		tag     string
+		// publishedBeforeTheChange marks a release that lives under the historical
+		// namespace: the current address answers 404 for it, and the fetch has to
+		// fall back rather than report a missing release.
+		publishedBeforeTheChange bool
 	}{
-		{"product", "4.0.0", "release/4.0.0"},
-		{"product high line", "102.1.0", "release/102.1.0"},
+		{"current namespace", "4.0.0", "v4.0.0", false},
+		{"current namespace, high line", "102.1.0", "v102.1.0", false},
 		// The BUILD component travels with the version it names, in the path as
-		// well as in the asset. A case for the legacy form used to sit here, where
-		// the tag and the version were one string; that is the arrangement this
-		// whole test exists to stop assuming.
-		{"product with a build component", "4.0.0.1", "release/4.0.0.1"},
+		// well as in the asset.
+		{"current namespace with a build component", "4.0.0.1", "v4.0.0.1", false},
+		// AND THE FOUR PUBLISHED BEFORE THE ADDRESS CHANGED ARE STILL INSTALLABLE.
+		// A node holds only their version; their address cannot move; and the two
+		// namespaces are the whole reason the address is looked for rather than
+		// built.
+		{"historical namespace", "4.0.1.2", "release/4.0.1.2", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asset := "passwall-node_" + tc.version + "_linux_" + runtime.GOARCH + ".tar.gz"
@@ -50,9 +58,16 @@ func TestFetchAddressesTheReleaseByTagAndNamesAssetsByVersion(t *testing.T) {
 			// that is the ref GitHub published and serves. Escaping the whole
 			// string would ask for a release literally named `release%2F4.0.0`.
 			base := releaseDownloadBase + tc.tag + "/"
+			current := releaseDownloadBase + "v" + tc.version + "/"
 			requested := map[string]bool{}
 			client := &http.Client{Transport: releaseRoundTrip(func(request *http.Request) (*http.Response, error) {
 				requested[request.URL.String()] = true
+				// THE CURRENT ADDRESS HAS NO SUCH RELEASE, when this one was
+				// published before the address changed. That 404 is the fact the
+				// fallback answers for, and the only failure it answers for.
+				if tc.publishedBeforeTheChange && strings.HasPrefix(request.URL.String(), current) {
+					return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+				}
 				var content []byte
 				switch request.URL.String() {
 				case base + "SHA256SUMS.txt":
@@ -99,7 +114,7 @@ func TestFetchRefusesSomethingThatIsNotAVersion(t *testing.T) {
 		"main",
 		// Leading zeroes are refused, as they always were.
 		"01.0.0",
-		"v4.0.0", // the historical form is not a version this project publishes
+		"v4.0.0", // a TAG is not a version, and this one is the current namespace's
 	} {
 		t.Run(version, func(t *testing.T) {
 			client := &http.Client{Transport: releaseRoundTrip(func(request *http.Request) (*http.Response, error) {
