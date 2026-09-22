@@ -558,12 +558,57 @@ func TestHelperDoesNotStartAnUnidentifiedBinaryAfterAFailedRestore(t *testing.T)
 	backup := helperBackup{OldSHA256: strings.Repeat("a", 64), NewSHA256: strings.Repeat("b", 64)}
 	before := len(f.commands)
 
-	message := f.c.restartAfterFailedRestore(context.Background(), backup, "restore failed")
+	message := f.c.restartAfterFailedRestore(Receipt{}, backup, 2000, "restore failed")
 
 	if len(f.commands) != before {
 		t.Fatalf("a start was issued for an unidentified binary: %v", f.commands)
 	}
 	if !strings.Contains(message, "was not started") {
 		t.Fatalf("the receipt does not say the binary was left alone: %q", message)
+	}
+}
+
+// A PARTIAL RESTORE IS REPORTED, NOT PAPERED OVER.
+//
+// restoreBackup rewrites four managed files in order with the executable first,
+// so a failure between them leaves the binary and config/version disagreeing.
+// That mismatch is not cosmetic: run() compares exactly those two on the next
+// upgrade and refuses with a message about the schema contract, which does not
+// describe what happened. Restarting the daemon makes the node look fine, so the
+// inconsistency has to be named in the receipt or nobody will find it until an
+// upgrade mysteriously stops working.
+func TestHelperNamesAMixedInstallationAfterAFailedRestore(t *testing.T) {
+	f := newHelperFixture(t)
+	installed := filepath.Join(f.root, "bin", "passwall-node")
+	digest, err := BinaryDigest(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The binary is the retained previous release; the recorded version is not.
+	if err := os.WriteFile(filepath.Join(f.root, "config", "version"), []byte("9.9.9\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	backup := helperBackup{OldSHA256: digest, NewSHA256: strings.Repeat("b", 64), PreviousVersion: "4.1.0"}
+
+	message := f.c.restartAfterFailedRestore(Receipt{}, backup, 2000, "restore failed")
+
+	if !strings.Contains(message, "was restarted") {
+		t.Fatalf("the daemon was not brought back: %q", message)
+	}
+	if !strings.Contains(message, "9.9.9") || !strings.Contains(message, "4.1.0") {
+		t.Fatalf("the receipt does not name both halves of the mismatch: %q", message)
+	}
+	if !strings.Contains(message, "next upgrade will be refused") {
+		t.Fatalf("the receipt does not say what the mismatch costs: %q", message)
+	}
+
+	// A CONSISTENT INSTALLATION SAYS NOTHING EXTRA. The warning has to be absent
+	// when it does not apply, or it stops meaning anything.
+	if err := os.WriteFile(filepath.Join(f.root, "config", "version"), []byte("4.1.0\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	clean := f.c.restartAfterFailedRestore(Receipt{}, backup, 2000, "restore failed")
+	if strings.Contains(clean, "inconsistent") {
+		t.Fatalf("a consistent installation was reported as mixed: %q", clean)
 	}
 }
