@@ -44,15 +44,17 @@ type acceptance struct {
 
 func main() {
 	version := flag.String("version", "v0.0.1-beta4", "exact already-public release to install")
+	tag := flag.String("tag", "", "published tag of -version; empty derives the current namespace, which is wrong for a release published before the address changed")
 	upgradeFrom := flag.String("upgrade-from", "", "already-public release to install first and then upgrade to -version; empty skips the upgrade scenario")
+	upgradeFromTag := flag.String("upgrade-from-tag", "", "published tag of -upgrade-from; empty derives the current namespace")
 	flag.Parse()
-	if err := runAcceptance(*version, *upgradeFrom); err != nil {
+	if err := runAcceptance(*version, *tag, *upgradeFrom, *upgradeFromTag); err != nil {
 		fmt.Fprintln(os.Stderr, "installation acceptance failed:", err)
 		os.Exit(1)
 	}
 }
 
-func runAcceptance(version, upgradeFrom string) (resultErr error) {
+func runAcceptance(version, tag, upgradeFrom, upgradeFromTag string) (resultErr error) {
 	if os.Geteuid() != 0 || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		return errors.New("refusing host mutation outside a root disposable GitHub-hosted runner")
 	}
@@ -113,9 +115,9 @@ func runAcceptance(version, upgradeFrom string) (resultErr error) {
 		return errors.New("cannot start local TLS fixture")
 	}
 	defer server.Close()
-	script, err := deployment.RenderLinux(deployment.Options{Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version})
+	script, err := deployment.RenderLinux(deployment.Options{Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version, Tag: tag})
 	if err != nil {
-		return errors.New("invalid explicit installation release or fixture options")
+		return errors.New("invalid explicit installation release, tag or fixture options")
 	}
 	a.scriptPath = filepath.Join(a.temporaryDir, "private-install.sh")
 	if err := os.WriteFile(a.scriptPath, []byte(script), 0o600); err != nil {
@@ -145,11 +147,15 @@ func runAcceptance(version, upgradeFrom string) (resultErr error) {
 		firstRelease = upgradeFrom
 		expectedFeedbackChecks++
 	}
-	if err := a.installRelease(endpoint, firstRelease, deployment.ModeInstall, "private-install-first.sh"); err != nil {
+	firstTag := tag
+	if upgradeFrom != "" {
+		firstTag = upgradeFromTag
+	}
+	if err := a.installRelease(endpoint, firstRelease, firstTag, deployment.ModeInstall, "private-install-first.sh"); err != nil {
 		return err
 	}
 	if upgradeFrom != "" {
-		if err := a.upgradeScenario(endpoint, upgradeFrom); err != nil {
+		if err := a.upgradeScenario(endpoint, upgradeFrom, tag); err != nil {
 			return err
 		}
 	}
@@ -279,11 +285,11 @@ func runAcceptance(version, upgradeFrom string) (resultErr error) {
 // ONE INVOCATION, SO A SCENARIO DOES NOT WRITE THE SEQUENCE TWICE. The upgrade case
 // below installs an older release and then replaces it, and both of those are an
 // installer run with the same identity and the same endpoint.
-func (a *acceptance) installRelease(endpoint, version, mode, filename string) error {
+func (a *acceptance) installRelease(endpoint, version, tag, mode, filename string) error {
 	script, err := deployment.RenderLinux(deployment.Options{
-		Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version, Mode: mode})
+		Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version, Tag: tag, Mode: mode})
 	if err != nil {
-		return errors.New("invalid explicit installation release, mode or fixture options")
+		return errors.New("invalid explicit installation release, tag, mode or fixture options")
 	}
 	path := filepath.Join(a.temporaryDir, filename)
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
@@ -318,7 +324,7 @@ func (a *acceptance) installRelease(endpoint, version, mode, filename string) er
 // installer stops the service and a stopped process does not handle SIGTERM — the
 // stop would time out and the upgrade would refuse for a reason that has nothing to
 // do with what it is testing.
-func (a *acceptance) upgradeScenario(endpoint, from string) error {
+func (a *acceptance) upgradeScenario(endpoint, from, tag string) error {
 	beforePID, _, err := a.inspectRunningAgent()
 	if err != nil {
 		return err
@@ -350,7 +356,7 @@ func (a *acceptance) upgradeScenario(endpoint, from string) error {
 	}
 	a.pausedPID = 0
 
-	if err := a.installRelease(endpoint, a.version, deployment.ModeUpgrade, "private-install-upgrade.sh"); err != nil {
+	if err := a.installRelease(endpoint, a.version, tag, deployment.ModeUpgrade, "private-install-upgrade.sh"); err != nil {
 		return err
 	}
 	afterPID, _, err := a.inspectRunningAgent()

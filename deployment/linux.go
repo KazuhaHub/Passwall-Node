@@ -42,6 +42,13 @@ type Options struct {
 	AgentID    string
 	Credential string
 	Version    string
+	// Tag is the ADDRESS of the release to install from, when the caller knows it.
+	// Empty means "derive it from the version", and the reason it can be stated at
+	// all is that a version no longer determines one address: the four releases
+	// published before the address changed live at `release/…`, and no version string
+	// says which namespace its release went out under. The panel states the tag it
+	// published; a caller that has one passes it.
+	Tag string
 	// Mode is empty for ModeInstall.
 	Mode string
 }
@@ -80,13 +87,30 @@ func RenderLinux(options Options) (string, error) {
 	if err := nodeconfig.Validate(connection); err != nil {
 		return "", fmt.Errorf("installation connection: %w", err)
 	}
-	// THE TAG IS DERIVED HERE, NOT SENT ALONGSIDE. A caller that had to pass both
-	// could pass them out of step, and the template would then download one release
-	// and install another — the release it fetched is checked against the version
-	// it was told, so the mismatch would surface as a checksum failure at best.
-	tag, err := releaseid.TagForVersion(options.Version)
-	if err != nil {
-		return "", fmt.Errorf("installation release version: %w", err)
+	// THE ADDRESS IS STATED OR DERIVED, AND CHECKED AGAINST THE VERSION EITHER WAY.
+	// The template downloads from this and writes it into the script, and the release
+	// it fetched is checked against the version the caller asked for — so a pair that
+	// disagrees would surface as a checksum failure at best, and as an installation
+	// of the wrong release at worst.
+	//
+	// IT IS NOT ALWAYS DERIVABLE. A version no longer determines one address: the four
+	// releases published before the namespace changed are addressed as `release/…`,
+	// and deriving one for those names a tag nobody published. A caller that knows the
+	// address hands it over; a caller that does not gets the current namespace's,
+	// which is right for a release about to be published.
+	var tag releaseid.Tag
+	if options.Tag != "" {
+		stated, err := releaseid.ParseReleaseTag(options.Tag)
+		if err != nil || stated.VersionString() != options.Version {
+			return "", fmt.Errorf("installation release tag %q does not name the release version %q", options.Tag, options.Version)
+		}
+		tag = stated
+	} else {
+		derived, err := releaseid.TagForVersion(options.Version)
+		if err != nil {
+			return "", fmt.Errorf("installation release version: %w", err)
+		}
+		tag = derived
 	}
 	return strings.NewReplacer(
 		"@@VERSION@@", shellQuote(options.Version),
