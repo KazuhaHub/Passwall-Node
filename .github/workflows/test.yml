@@ -219,6 +219,11 @@ jobs:
           fixture="$RUNNER_TEMP/passwall-node-container"
           mkdir -p "$fixture/config" "$fixture/data"
           printf 'pspn_%064d\n' 0 > "$fixture/config/node-credential.txt"
+          # 0600, OWNED BY THE RUNNER'S UID — which is what the installation
+          # instructions produce on any host whose installer is not root, and what a
+          # NAS produces. Without this mode the check ran with a world-readable file
+          # and could not see that reading the mounted credential needs DAC_OVERRIDE.
+          chmod 0600 "$fixture/config/node-credential.txt"
           cat > "$fixture/fake-node" <<'SCRIPT'
           #!/bin/sh
           test "$(id -u):$(id -g)" = 10001:10001
@@ -240,7 +245,7 @@ jobs:
           # real installation. That is exactly how a copy that only works with
           # DAC_OVERRIDE reached a published image.
           container="$(docker run -d --network none \
-            --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add SETGID --cap-add SETUID \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETGID --cap-add SETUID \
             -e PSP_NODE_ENDPOINT=https://panel.invalid/v1/node/sync \
             -e PSP_NODE_AGENT_ID=agt_container_entrypoint \
             -e PSP_NODE_CREDENTIAL_FILE=/run/secrets/passwall-node/node-credential.txt \

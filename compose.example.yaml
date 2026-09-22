@@ -43,6 +43,17 @@ services:
     # then switch to the configured unprivileged UID/GID before exec.
     cap_add:
       - CHOWN
+      # DAC_OVERRIDE IS FOR READING THE CREDENTIAL. The installation instructions
+      # chmod 0600 the credential file, and on a NAS it belongs to the account that ran
+      # the install rather than to uid 0 — so the container's root is neither the owner
+      # nor permitted by "other", and without this capability the copy fails with
+      #
+      #     cp: can't open '/run/secrets/passwall-node/node-credential.txt': Permission denied
+      #
+      # on every start. The alternative, a world-readable credential on the host, is
+      # worse on a shared machine; this capability is used for about a second by the
+      # entrypoint, which then drops to the service account permanently.
+      - DAC_OVERRIDE
       # FOWNER IS NOT DECORATION. /run/passwall-node is a tmpfs, so it is
       # root-owned; the entrypoint chowns it to the service account and then
       # chmods it, and a root process that is NOT the owner needs CAP_FOWNER for

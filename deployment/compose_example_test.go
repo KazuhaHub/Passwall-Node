@@ -43,6 +43,19 @@ func TestTheExampleComposeGrantsWhatItsEntrypointNeeds(t *testing.T) {
 			t.Errorf("the entrypoint runs %q, which needs CAP_%s, and the example compose does not grant it", strings.TrimSpace(command), capability)
 		}
 	}
+	// DAC_OVERRIDE IS OWED BY A FILE THE SCRIPT READS, NOT BY A COMMAND IT RUNS, so
+	// the loop above cannot see it and it is asserted here instead. The deployment
+	// instructions chmod 0600 the credential, which on a NAS leaves it owned by the
+	// account that ran the install rather than by uid 0: container root is then neither
+	// the owner nor "other", and the copy fails with
+	//
+	//	cp: can't open '/run/secrets/passwall-node/node-credential.txt': Permission denied
+	//
+	// on every start. Found the same way the FOWNER one was — in a user's container log
+	// after a generated compose was applied.
+	if !grantsCapability(compose, "DAC_OVERRIDE") {
+		t.Error("the entrypoint reads a credential that belongs to the installing account, which needs CAP_DAC_OVERRIDE; without it the container copies nothing and restarts forever")
+	}
 	// AND THE DROP ITSELF STILL HAPPENS: an example that granted everything and ran
 	// as root would satisfy the loop above and be the opposite of the point.
 	if !strings.Contains(compose, "cap_drop:") || !strings.Contains(compose, "- ALL") {

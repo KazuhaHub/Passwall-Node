@@ -1,7 +1,10 @@
 #!/bin/sh
-# Docker mounts secrets read-only and commonly exposes them as mode 0444. The
-# daemon deliberately rejects that mode, so root copies the enrollment secret
-# into a private tmpfs file before permanently dropping privileges.
+# Docker mounts the enrollment secret read-only, and it is 0600: the deployment
+# instructions protect it that way, so on a host whose installer is not root it
+# belongs to the installing account rather than to uid 0. Reading it therefore needs
+# CAP_DAC_OVERRIDE, which the compose grants. The daemon rejects a credential any
+# group or other bit reaches, so root copies it into a private file — 0600, owned by
+# the service account — before permanently dropping privileges.
 set -eu
 
 # The Agent's own lines read "YYYY/MM/DD HH:MM:SS.ffffff [Severity] ...". BusyBox
