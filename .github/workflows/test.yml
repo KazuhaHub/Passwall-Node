@@ -249,12 +249,24 @@ jobs:
             -v "$fixture/fake-node:/usr/local/bin/passwall-node:ro" \
             passwall-node:test)"
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          # EVERY FAILURE HERE PRINTS WHAT THE CONTAINER SAID. The first version of
+          # this check asserted and exited, so a red run showed the assertion and not
+          # the reason — and the reason is inside the container, where the entrypoint's
+          # own fatal line and the node binary's output live.
           for _ in {1..10}; do
             test -f "$fixture/data/entrypoint-ready" && break
             sleep 1
           done
-          test -f "$fixture/data/entrypoint-ready"
-          test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+          if ! test -f "$fixture/data/entrypoint-ready"; then
+            echo "the entrypoint never reached the node binary; its own output follows" >&2
+            docker logs "$container" >&2
+            exit 1
+          fi
+          if ! test "$(docker inspect --format '{{.State.Running}}' "$container")" = true; then
+            echo "the container is not running; its own output follows" >&2
+            docker logs "$container" >&2
+            exit 1
+          fi
           docker logs "$container" > "$RUNNER_TEMP/passwall-node-container.log" 2>&1
           if grep -Fq 'find: unrecognized: -uid' "$RUNNER_TEMP/passwall-node-container.log"; then
             cat "$RUNNER_TEMP/passwall-node-container.log" >&2
