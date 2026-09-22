@@ -70,6 +70,14 @@ if [ "$(id -u)" = "0" ]; then
     # The stale credential is REMOVED rather than overwritten, for the same reason: a
     # PUID-owned 0600 file is one root cannot open for writing either. Removing needs
     # write permission on the directory, which root has.
+    # The directory is taken back before anything is written into it. The image
+    # builds it owned by the service account, and the compose hides that with a
+    # tmpfs — but a container started from the image directly, or from a compose
+    # without the tmpfs, finds the service account's directory here, where root
+    # without CAP_DAC_OVERRIDE is "other" and cannot create anything:
+    #
+    #     cp: can't create '/run/passwall-node/credential': Permission denied
+    chown 0:0 /run/passwall-node || fatal "cannot take the runtime directory back"
     chmod 0711 /run/passwall-node || fatal "cannot protect the runtime directory"
     CREDENTIAL_FILE=/run/passwall-node/credential
     rm -f "$CREDENTIAL_FILE" || fatal "cannot clear the runtime credential"

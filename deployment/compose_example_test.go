@@ -101,6 +101,16 @@ func TestTheEntrypointDoesNotGiveAwayAPathItStillHasToWrite(t *testing.T) {
 	if !strings.Contains(script, "chmod 0711 /run/passwall-node") {
 		t.Error("the runtime directory must stay root's and stay traversable: the agent reads the credential through it")
 	}
+	// THE DIRECTORY IS ALSO TAKEN BACK FIRST. The image builds it owned by the service
+	// account and the compose hides that with a tmpfs; a container started from the
+	// image without that mount finds the service account's directory instead, where
+	// root without CAP_DAC_OVERRIDE is "other" and cannot create a file at all.
+	takeBack := strings.Index(script, "chown 0:0 /run/passwall-node")
+	chmodDir := strings.Index(script, "chmod 0711 /run/passwall-node")
+	copyCred := strings.Index(script, `cp "$SECRET_SOURCE" "$CREDENTIAL_FILE"`)
+	if takeBack < 0 || chmodDir < 0 || copyCred < 0 || takeBack > chmodDir || chmodDir > copyCred {
+		t.Error("the entrypoint must take the runtime directory back to root before handing it a mode and copying into it, whatever the image layer or the mount left behind")
+	}
 	remove := strings.Index(script, `rm -f "$CREDENTIAL_FILE"`)
 	copy := strings.Index(script, `cp "$SECRET_SOURCE" "$CREDENTIAL_FILE"`)
 	if remove < 0 || copy < 0 {
