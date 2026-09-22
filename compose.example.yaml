@@ -43,6 +43,13 @@ services:
     # then switch to the configured unprivileged UID/GID before exec.
     cap_add:
       - CHOWN
+      # FOWNER IS NOT DECORATION. /run/passwall-node is a tmpfs, so it is
+      # root-owned; the entrypoint chowns it to the service account and then
+      # chmods it, and a root process that is NOT the owner needs CAP_FOWNER for
+      # that chmod. Without it the container starts, prints "chmod:
+      # /run/passwall-node: Operation not permitted", reports that it cannot
+      # protect its runtime directory, and restarts forever.
+      - FOWNER
       - SETGID
       - SETUID
     security_opt:
