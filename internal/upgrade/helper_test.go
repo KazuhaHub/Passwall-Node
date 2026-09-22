@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ type helperFixture struct {
 	wrongPID       bool
 	denyNewProcess bool
 	failNewStart   bool
+	breakBackup    bool
 	dropIns        string
 	denyOldProcess bool
 }
@@ -95,6 +97,20 @@ func newHelperFixture(t *testing.T) *helperFixture {
 				return "", err
 			}
 			if version == "4.1.3" {
+				if f.breakBackup {
+					// Destroy the retained binary AFTER activation, so restoreBackup's
+					// identity guard fails during the rollback that follows. This is the
+					// shape a full disk or an I/O error produces: the upgrade got far
+					// enough to stop the daemon, and the way back is gone.
+					//
+					// ONCE. The recovery start this test exists to observe arrives here
+					// too, and a second removal would fail and be reported as the start
+					// failing — which is the very outcome under test.
+					f.breakBackup = false
+					if err := os.Remove(filepath.Join(f.root, "upgrades", f.request.Task.ID+".backup", "passwall-node")); err != nil {
+						return "", err
+					}
+				}
 				if f.failNewStart {
 					return "", errors.New("fixture start failure")
 				}
@@ -470,4 +486,84 @@ func TestTheManagedVersionFileIsReadWhateverShapeItHolds(t *testing.T) {
 			t.Fatal("an oversized version file was accepted")
 		}
 	})
+}
+
+// A ROLLBACK THAT CANNOT RESTORE MUST STILL LEAVE THE NODE RUNNING.
+//
+// This is the only path in the upgrade transaction that used to cost the data
+// plane. rollback() stops the service, and if restoreBackup then fails it wrote a
+// terminal receipt and returned — with the daemon down. systemd does not restart
+// a unit that was explicitly stopped, and run() short-circuits on a terminal
+// phase, so nothing was ever going to start it again: the node stopped forwarding
+// until a person noticed and intervened, and the only signal was the panel
+// eventually reporting the agent as gone.
+//
+// The bytes on disk at that moment are one of two verified binaries — the
+// retained previous release, or a target that already passed the signed checksum
+// manifest, its exact archive digest and its own --version self-report — so
+// starting one of them is recovering, not guessing. The outcome stays
+// indeterminate either way: what changes is whether the node is serving traffic
+// while it waits for a person.
+func TestHelperRestartsWhenARollbackCannotRestore(t *testing.T) {
+	f := newHelperFixture(t)
+	f.noReady = true     // the new release never proves readiness, so a rollback is attempted
+	f.breakBackup = true // and the retained files are gone by the time it tries
+
+	if err := f.c.run(context.Background()); err == nil {
+		t.Fatal("an upgrade that could neither confirm nor roll back was accepted")
+	}
+
+	receipt := f.receipt(t)
+	if receipt.Phase != "indeterminate" {
+		t.Fatalf("phase = %q, want indeterminate: a rollback that could not restore has no proven outcome", receipt.Phase)
+	}
+	if receipt.Result != nil {
+		t.Fatalf("an indeterminate outcome carried a result: %+v", receipt.Result)
+	}
+
+	// THE ASSERTION THAT MATTERS. stop, start (new), stop (rollback), start
+	// (recovery). Without the recovery the sequence ends on a stop and the node is
+	// down; counting them is how that regression is caught rather than described.
+	if len(f.commands) != 4 {
+		t.Fatalf("commands = %v, want stop/start/stop/start — the last start is the node coming back", f.commands)
+	}
+	if f.commands[3] != "start" {
+		t.Fatalf("the transaction ended on %q, so the daemon was left stopped", f.commands[3])
+	}
+
+	// The receipt has to say which binary is running, because an operator arriving
+	// at an indeterminate node needs to know that before deciding anything.
+	if !strings.Contains(receipt.Error, "was restarted") {
+		t.Fatalf("the receipt does not record the restart: %q", receipt.Error)
+	}
+
+	// AND IT IS STILL A VERIFIED BINARY. The restore failed, so what is installed
+	// is whatever activation left — here the target, which passed the signature,
+	// the digest and its own identity check before it was ever written.
+	info, err := readBuildInfo(context.Background(), filepath.Join(f.root, "bin", "passwall-node"))
+	if err != nil {
+		t.Fatalf("the installed binary is not executable: %v", err)
+	}
+	if info.Version != "4.1.3" && info.Version != "4.1.0" {
+		t.Fatalf("installed version %q is neither the target nor the retained previous release", info.Version)
+	}
+	f.assertProtected(t)
+}
+
+// An unidentifiable binary is NOT started. Recovering means running one of two
+// binaries this helper verified; anything else is a guess, and a node running an
+// unknown executable is worse than a node that is down and says so.
+func TestHelperDoesNotStartAnUnidentifiedBinaryAfterAFailedRestore(t *testing.T) {
+	f := newHelperFixture(t)
+	backup := helperBackup{OldSHA256: strings.Repeat("a", 64), NewSHA256: strings.Repeat("b", 64)}
+	before := len(f.commands)
+
+	message := f.c.restartAfterFailedRestore(context.Background(), backup, "restore failed")
+
+	if len(f.commands) != before {
+		t.Fatalf("a start was issued for an unidentified binary: %v", f.commands)
+	}
+	if !strings.Contains(message, "was not started") {
+		t.Fatalf("the receipt does not say the binary was left alone: %q", message)
+	}
 }

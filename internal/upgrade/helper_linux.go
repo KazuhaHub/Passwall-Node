@@ -342,7 +342,27 @@ func (c *helperController) rollback(receipt Receipt, backup helperBackup, uid, g
 		return c.markIndeterminate(receipt, gid, "cannot stop target service for rollback")
 	}
 	if err := c.restoreBackup(receipt.Request.Task.ID, backup, gid); err != nil {
-		return c.markIndeterminate(receipt, gid, "retained previous files could not be restored")
+		// THIS IS THE ONE PATH IN THE TRANSACTION THAT COSTS THE DATA PLANE, and
+		// returning here is what made it cost that. The stop above SUCCEEDED, so
+		// the daemon is down; systemd does not restart a unit that was explicitly
+		// stopped; and the terminal receipt this writes makes run() short-circuit
+		// on every later invocation for this task. Nothing else was ever going to
+		// start it. An operator had to notice and intervene, and the only signal
+		// was the panel eventually reporting the agent as gone.
+		//
+		// So the daemon is brought back before giving up. The bytes on disk are one
+		// of two VERIFIED binaries: the retained previous release, or the target
+		// that already passed the signed checksum manifest, its exact archive
+		// digest, and its own --version self-report. recover() asserts exactly that
+		// invariant before it acts; this asserts it too, because a digest matching
+		// neither is genuinely unknown and must not be started.
+		//
+		// The other three branches are deliberately left alone. The stop failure
+		// above means the service is most likely still running, and issuing a start
+		// into a unit that failed to stop addresses nothing while adding an
+		// interaction; the two below have already attempted their start.
+		return c.markIndeterminate(receipt, gid,
+			c.restartAfterFailedRestore(ctx, backup, "retained previous files could not be restored"))
 	}
 	if _, err := c.command(ctx, "start", nodeService); err != nil {
 		return c.markIndeterminate(receipt, gid, "previous release files restored but service could not start")
@@ -434,6 +454,36 @@ func (c *helperController) recover(ctx context.Context, receipt Receipt, uid, gi
 	}
 	// A restarted helper never re-downloads or re-activates an interrupted task.
 	return c.rollback(receipt, backup, uid, gid, "remote upgrade helper was interrupted")
+}
+
+// restartAfterFailedRestore brings the daemon back after a rollback could not
+// restore the retained files, and reports in the receipt what it was able to do.
+//
+// It is BEST EFFORT AND NEVER RETURNS AN ERROR: the outcome is already
+// indeterminate, and a failure to start must not replace that with a different
+// wrong answer. What it changes is whether a node whose upgrade went wrong is
+// serving traffic or sitting stopped until a person arrives.
+func (c *helperController) restartAfterFailedRestore(ctx context.Context, backup helperBackup, message string) string {
+	digest, err := BinaryDigest(filepath.Join(c.root, "bin", "passwall-node"))
+	if err != nil {
+		return message + "; the installed binary could not be identified, so it was not started"
+	}
+	installed := ""
+	switch digest {
+	case backup.OldSHA256:
+		installed = "the retained previous release"
+	case backup.NewSHA256:
+		installed = "the verified target release"
+	default:
+		// Neither known digest. This is the one case where starting would be
+		// guessing, so it does not: an unidentified binary running as the node is
+		// worse than a node that is down and says so.
+		return message + "; the installed binary is neither the retained previous release nor the verified target, so it was not started"
+	}
+	if _, err := c.command(ctx, "start", nodeService); err != nil {
+		return message + "; " + installed + " is installed but the service could not be started"
+	}
+	return message + "; " + installed + " is installed and was restarted"
 }
 
 func (c *helperController) markIndeterminate(receipt Receipt, gid uint32, message string) error {

@@ -391,7 +391,13 @@ It is checked again after backup preparation, immediately before stopping the
 daemon. Customized systemd drop-ins or an unverified current service process
 require manual maintenance and are rejected before downloading or stopping it.
 Download failures leave the running agent untouched. Startup/readiness failures
-restore the retained previous managed files and restart them; interrupted tasks
+restore the retained previous managed files and restart them. If that restore
+itself cannot run — a full disk, an I/O error — the outcome is indeterminate and
+needs a person, but the daemon is still brought back first: what is installed at
+that point is either the retained previous release or a target that already
+passed the signed manifest, its exact digest and its own version self-report, and
+one of those running beats the node sitting stopped. A binary matching neither is
+not started. Interrupted tasks
 read durable receipts rather than blindly download/execute again. **Only equal
 state schemas and upgrade-contract versions support automatic upgrade/rollback.**
 Changes to either require manual maintenance. No database/VM snapshot framework
