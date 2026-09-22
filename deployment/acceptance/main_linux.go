@@ -659,14 +659,25 @@ func (a *acceptance) claimOwnedInstallation() error {
 	if err != nil || string(credential) != a.credential+"\n" {
 		return errors.New("refusing to claim an installation not carrying this run's fixture identity")
 	}
+	// THE CLAIM IS IDEMPOTENT FOR THIS RUN AND REFUSES EVERY OTHER. A second
+	// invocation of the same identity's installer — an upgrade, which is what this
+	// scenario is — finds the marker this run already wrote, and that marker carrying
+	// this run's nonce proves the same thing the second time it proved the first: the
+	// installation belongs to this run and is safe to remove afterwards. A marker
+	// carrying anything else is somebody else's installation, and so is no marker at
+	// all: both are refused.
 	file, err := os.OpenFile(ownerMarker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return errors.New("cannot mark newly created disposable installation ownership")
-	}
-	_, writeErr := file.WriteString(a.nonce)
-	closeErr := file.Close()
-	if writeErr != nil || closeErr != nil {
-		return errors.New("cannot persist disposable installation ownership")
+		claimed, readErr := os.ReadFile(ownerMarker)
+		if readErr != nil || string(claimed) != a.nonce {
+			return errors.New("cannot mark newly created disposable installation ownership")
+		}
+	} else {
+		_, writeErr := file.WriteString(a.nonce)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			return errors.New("cannot persist disposable installation ownership")
+		}
 	}
 	a.rootOwned = true
 	unit, err := os.Lstat(installationUnit)
