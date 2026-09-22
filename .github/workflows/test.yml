@@ -223,11 +223,24 @@ jobs:
           #!/bin/sh
           test "$(id -u):$(id -g)" = 10001:10001
           test -w /var/lib/passwall-node
+          # THE HAND-OFF ITSELF, asserted from the side that depends on it. 0600 by the
+          # service account is the one shape both ends agree on: the agent refuses a
+          # credential with any group or other bit, and root here cannot write a file
+          # the service account owns.
+          test "$(stat -c '%u:%a' /run/passwall-node/credential)" = "10001:600"
+          cmp /run/passwall-node/credential /run/secrets/passwall-node/node-credential.txt
           touch /var/lib/passwall-node/entrypoint-ready
           exec sleep 30
           SCRIPT
           chmod 0755 "$fixture/fake-node"
+          # THE CAPABILITY SET IS THE COMPOSE'S, AND IT IS THE POINT OF THIS CHECK.
+          # Without --cap-drop ALL the container runs with Docker's default set, which
+          # includes CAP_DAC_OVERRIDE — and with it root can write into a directory it
+          # has handed to PUID, so the credential copy succeeds here and fails on every
+          # real installation. That is exactly how a copy that only works with
+          # DAC_OVERRIDE reached a published image.
           container="$(docker run -d --network none \
+            --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add SETGID --cap-add SETUID \
             -e PSP_NODE_ENDPOINT=https://panel.invalid/v1/node/sync \
             -e PSP_NODE_AGENT_ID=agt_container_entrypoint \
             -e PSP_NODE_CREDENTIAL_FILE=/run/secrets/passwall-node/node-credential.txt \
@@ -236,12 +249,24 @@ jobs:
             -v "$fixture/fake-node:/usr/local/bin/passwall-node:ro" \
             passwall-node:test)"
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          # EVERY FAILURE HERE PRINTS WHAT THE CONTAINER SAID. The first version of
+          # this check asserted and exited, so a red run showed the assertion and not
+          # the reason — and the reason is inside the container, where the entrypoint's
+          # own fatal line and the node binary's output live.
           for _ in {1..10}; do
             test -f "$fixture/data/entrypoint-ready" && break
             sleep 1
           done
-          test -f "$fixture/data/entrypoint-ready"
-          test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+          if ! test -f "$fixture/data/entrypoint-ready"; then
+            echo "the entrypoint never reached the node binary; its own output follows" >&2
+            docker logs "$container" >&2
+            exit 1
+          fi
+          if ! test "$(docker inspect --format '{{.State.Running}}' "$container")" = true; then
+            echo "the container is not running; its own output follows" >&2
+            docker logs "$container" >&2
+            exit 1
+          fi
           docker logs "$container" > "$RUNNER_TEMP/passwall-node-container.log" 2>&1
           if grep -Fq 'find: unrecognized: -uid' "$RUNNER_TEMP/passwall-node-container.log"; then
             cat "$RUNNER_TEMP/passwall-node-container.log" >&2

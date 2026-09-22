@@ -55,9 +55,32 @@ if [ "$(id -u)" = "0" ]; then
     fi
 
     mkdir -p "$DATA_DIR" /run/passwall-node || fatal "cannot create the data or runtime directory"
-    chown "$PUID:$PGID" /run/passwall-node || fatal "cannot set runtime directory ownership"
-    chmod 0700 /run/passwall-node || fatal "cannot protect the runtime directory"
+    # THE RUNTIME DIRECTORY STAYS ROOT'S; ONLY THE CREDENTIAL IS HANDED OVER.
+    #
+    # This container drops ALL capabilities and adds back CHOWN, FOWNER, SETGID and
+    # SETUID, so root here has no CAP_DAC_OVERRIDE — and a mode-0700 directory it has
+    # chowned to PUID is one it can no longer stat or write into. Handing the directory
+    # over and THEN copying into it, which is what this did, fails on EVERY start with
+    #
+    #     cp: can't stat '/run/passwall-node/credential': Permission denied
+    #
+    # and the container restarts forever. So root keeps the directory, at 0711: the
+    # agent can traverse it and cannot list it, and nothing but root can write there.
+    #
+    # The stale credential is REMOVED rather than overwritten, for the same reason: a
+    # PUID-owned 0600 file is one root cannot open for writing either. Removing needs
+    # write permission on the directory, which root has.
+    # The directory is taken back before anything is written into it. The image
+    # builds it owned by the service account, and the compose hides that with a
+    # tmpfs — but a container started from the image directly, or from a compose
+    # without the tmpfs, finds the service account's directory here, where root
+    # without CAP_DAC_OVERRIDE is "other" and cannot create anything:
+    #
+    #     cp: can't create '/run/passwall-node/credential': Permission denied
+    chown 0:0 /run/passwall-node || fatal "cannot take the runtime directory back"
+    chmod 0711 /run/passwall-node || fatal "cannot protect the runtime directory"
     CREDENTIAL_FILE=/run/passwall-node/credential
+    rm -f "$CREDENTIAL_FILE" || fatal "cannot clear the runtime credential"
     umask 077
     cp "$SECRET_SOURCE" "$CREDENTIAL_FILE" || fatal "cannot copy the credential into private runtime storage"
     chmod 0600 "$CREDENTIAL_FILE" || fatal "cannot protect the runtime credential"
