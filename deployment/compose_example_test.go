@@ -71,3 +71,42 @@ func grantsCapability(compose, capability string) bool {
 	}
 	return false
 }
+
+// AND THE ORDER MATTERS AS MUCH AS THE LIST.
+//
+// The capability check above is derived from the COMMANDS the entrypoint runs, and it
+// cannot see the difference between two orderings of the same commands — but there is
+// one ordering that needs a capability the compose deliberately withholds. Dropping all
+// capabilities and granting back four leaves root without CAP_DAC_OVERRIDE, so a
+// directory it has chowned to the service account with mode 0700 is one it can no
+// longer stat or write into. This entrypoint did exactly that: it handed the runtime
+// directory to PUID and then copied the credential into it, which fails on every start
+// with
+//
+//	cp: can't stat '/run/passwall-node/credential': Permission denied
+//
+// and restarts the container forever. The same reasoning applies to the credential
+// file: once it belongs to the service account, root cannot overwrite it either, so it
+// has to be removed rather than written over.
+func TestTheEntrypointDoesNotGiveAwayAPathItStillHasToWrite(t *testing.T) {
+	entrypoint, err := os.ReadFile("../docker-entrypoint.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(entrypoint)
+
+	if strings.Contains(script, `chown "$PUID:$PGID" /run/passwall-node`) {
+		t.Error("the entrypoint gives the runtime directory to the service account and then has to write in it, which needs CAP_DAC_OVERRIDE — a capability the compose deliberately does not grant")
+	}
+	if !strings.Contains(script, "chmod 0711 /run/passwall-node") {
+		t.Error("the runtime directory must stay root's and stay traversable: the agent reads the credential through it")
+	}
+	remove := strings.Index(script, `rm -f "$CREDENTIAL_FILE"`)
+	copy := strings.Index(script, `cp "$SECRET_SOURCE" "$CREDENTIAL_FILE"`)
+	if remove < 0 || copy < 0 {
+		t.Fatalf("the entrypoint no longer clears (%v) or copies (%v) the credential; this guard is describing a script that changed shape", remove >= 0, copy >= 0)
+	}
+	if remove > copy {
+		t.Error("the credential must be removed before it is copied: a file the service account owns cannot be overwritten by root either")
+	}
+}
