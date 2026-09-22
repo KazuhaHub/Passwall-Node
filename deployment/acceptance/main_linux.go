@@ -277,6 +277,26 @@ func runAcceptance(version, tag, upgradeFrom, upgradeFromTag string) (resultErr 
 	})
 }
 
+// installerPhase reports the phase the installer stopped in, as " at phase N of 6",
+// or nothing when its output carries no marker at all.
+//
+// IT READS THE ONE LINE OF THE INSTALLER'S OUTPUT THAT IS AN INTERFACE rather than a
+// diagnostic. Everything else it wrote describes a host this tool has just mutated
+// and may quote private material the tool promises never to forward.
+func installerPhase(output []byte) string {
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.HasPrefix(line, "Passwall Node [") {
+			continue
+		}
+		marker := strings.TrimSpace(strings.TrimPrefix(line, "Passwall Node ["))
+		phase, _, found := strings.Cut(marker, "]")
+		if found && phase != "" {
+			return " at installer phase " + strings.ReplaceAll(phase, "/", " of ")
+		}
+	}
+	return ""
+}
+
 // installRelease renders a release's own installation script, runs it in the mode
 // asked for, and checks what an operator would see: that this run published the
 // installation it claims to have published, that the six phases were reported in
@@ -298,7 +318,10 @@ func (a *acceptance) installRelease(endpoint, version, tag, mode, filename strin
 	output, err := a.command("sh", path)
 	if err != nil {
 		a.claimOwnedInstallation() // Recover only an identity proven to have been published by this run.
-		return err
+		// THE PHASE MARKER IS THE ONE THING SAFE TO FORWARD: it is the installer's own
+		// six-phase interface, it is fixed text, and it says where the run stopped —
+		// while everything else the command wrote stays in memory.
+		return fmt.Errorf("the %s installation did not complete%s (diagnostics withheld)", version, installerPhase(output))
 	}
 	if err := a.claimOwnedInstallation(); err != nil {
 		return err
@@ -357,7 +380,7 @@ func (a *acceptance) upgradeScenario(endpoint, from, tag string) error {
 	a.pausedPID = 0
 
 	if err := a.installRelease(endpoint, a.version, tag, deployment.ModeUpgrade, "private-install-upgrade.sh"); err != nil {
-		return err
+		return fmt.Errorf("upgrading to %s: %w", a.version, err)
 	}
 	afterPID, _, err := a.inspectRunningAgent()
 	if err != nil {
