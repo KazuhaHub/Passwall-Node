@@ -44,14 +44,17 @@ type acceptance struct {
 
 func main() {
 	version := flag.String("version", "v0.0.1-beta4", "exact already-public release to install")
+	tag := flag.String("tag", "", "published tag of -version; empty derives the current namespace, which is wrong for a release published before the address changed")
+	upgradeFrom := flag.String("upgrade-from", "", "already-public release to install first and then upgrade to -version; empty skips the upgrade scenario")
+	upgradeFromTag := flag.String("upgrade-from-tag", "", "published tag of -upgrade-from; empty derives the current namespace")
 	flag.Parse()
-	if err := runAcceptance(*version); err != nil {
+	if err := runAcceptance(*version, *tag, *upgradeFrom, *upgradeFromTag); err != nil {
 		fmt.Fprintln(os.Stderr, "installation acceptance failed:", err)
 		os.Exit(1)
 	}
 }
 
-func runAcceptance(version string) (resultErr error) {
+func runAcceptance(version, tag, upgradeFrom, upgradeFromTag string) (resultErr error) {
 	if os.Geteuid() != 0 || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		return errors.New("refusing host mutation outside a root disposable GitHub-hosted runner")
 	}
@@ -112,9 +115,9 @@ func runAcceptance(version string) (resultErr error) {
 		return errors.New("cannot start local TLS fixture")
 	}
 	defer server.Close()
-	script, err := deployment.RenderLinux(deployment.Options{Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version})
+	script, err := deployment.RenderLinux(deployment.Options{Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version, Tag: tag})
 	if err != nil {
-		return errors.New("invalid explicit installation release or fixture options")
+		return errors.New("invalid explicit installation release, tag or fixture options")
 	}
 	a.scriptPath = filepath.Join(a.temporaryDir, "private-install.sh")
 	if err := os.WriteFile(a.scriptPath, []byte(script), 0o600); err != nil {
@@ -134,20 +137,27 @@ func runAcceptance(version string) (resultErr error) {
 	if _, err := a.command("update-ca-certificates"); err != nil {
 		return err
 	}
-	installerOutput, err := a.command("sh", a.scriptPath)
-	if err != nil {
-		a.claimOwnedInstallation() // Recover only an identity proven to have been published by this run.
+	// THE FIRST INSTALLATION IS THE OLDER RELEASE, when the caller asked for the
+	// upgrade scenario: the release under acceptance is then reached the way an
+	// operator reaches it, by running its installer over the installation that is
+	// already there.
+	expectedFeedbackChecks := 3
+	firstRelease := version
+	if upgradeFrom != "" {
+		firstRelease = upgradeFrom
+		expectedFeedbackChecks++
+	}
+	firstTag := tag
+	if upgradeFrom != "" {
+		firstTag = upgradeFromTag
+	}
+	if err := a.installRelease(endpoint, firstRelease, firstTag, deployment.ModeInstall, "private-install-first.sh"); err != nil {
 		return err
 	}
-	if err := a.claimOwnedInstallation(); err != nil {
-		return err
-	}
-	if err := checkInstallerFeedback(installerOutput, false); err != nil {
-		return err
-	}
-	a.feedbackChecks++
-	if err := a.waitForFixture(); err != nil {
-		return err
+	if upgradeFrom != "" {
+		if err := a.upgradeScenario(endpoint, upgradeFrom, tag); err != nil {
+			return err
+		}
 	}
 	pid, uid, err := a.inspectRunningAgent()
 	if err != nil {
@@ -176,7 +186,7 @@ func runAcceptance(version string) (resultErr error) {
 	// only this invocation lacks all network interfaces in a fresh namespace.
 	// systemd is reached through its real Unix socket; the already-active paused
 	// unit must be a no-op, so this tests rerun without concurrent SQLite writes.
-	installerOutput, err = a.command("unshare", "--net", "--", "sh", a.scriptPath)
+	installerOutput, err := a.command("unshare", "--net", "--", "sh", a.scriptPath)
 	if err != nil {
 		return err
 	}
@@ -253,8 +263,8 @@ func runAcceptance(version string) (resultErr error) {
 	if err != nil || bytes.Equal(firstEpoch, secondEpoch) {
 		return errors.New("fresh SQLite installation reused its previous core-counter namespace")
 	}
-	if a.feedbackChecks != 3 {
-		return errors.New("installer feedback was not checked on all three real installations")
+	if a.feedbackChecks != expectedFeedbackChecks {
+		return errors.New("installer feedback was not checked on every real invocation")
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"scope":   "empty-stream authenticated TLS/systemd/offline-rerun/fresh-reinstall; not PSP business or proxy-traffic acceptance",
@@ -265,6 +275,186 @@ func runAcceptance(version string) (resultErr error) {
 		"installer_feedback_checks": a.feedbackChecks, "installer_six_phases_ordered": true,
 		"installer_offline_skip_checked": true, "installer_startup_only_notice_checked": true,
 	})
+}
+
+// installerPhase reports the phase the installer stopped in, as " at phase N of 6",
+// or nothing when its output carries no marker at all.
+//
+// IT READS THE ONE LINE OF THE INSTALLER'S OUTPUT THAT IS AN INTERFACE rather than a
+// diagnostic. Everything else it wrote describes a host this tool has just mutated
+// and may quote private material the tool promises never to forward.
+func installerPhase(output []byte) string {
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.HasPrefix(line, "Passwall Node [") {
+			continue
+		}
+		marker := strings.TrimSpace(strings.TrimPrefix(line, "Passwall Node ["))
+		phase, _, found := strings.Cut(marker, "]")
+		if found && phase != "" {
+			return " at installer phase " + strings.ReplaceAll(phase, "/", " of ")
+		}
+	}
+	return ""
+}
+
+// installRelease renders a release's own installation script, runs it in the mode
+// asked for, and checks what an operator would see: that this run published the
+// installation it claims to have published, that the six phases were reported in
+// order, and that the agent reached the fixture.
+//
+// ONE INVOCATION, SO A SCENARIO DOES NOT WRITE THE SEQUENCE TWICE. The upgrade case
+// below installs an older release and then replaces it, and both of those are an
+// installer run with the same identity and the same endpoint.
+func (a *acceptance) installRelease(endpoint, version, tag, mode, filename string) error {
+	script, err := deployment.RenderLinux(deployment.Options{
+		Endpoint: endpoint, AgentID: a.agentID, Credential: a.credential, Version: version, Tag: tag, Mode: mode})
+	if err != nil {
+		return errors.New("invalid explicit installation release, tag, mode or fixture options")
+	}
+	path := filepath.Join(a.temporaryDir, filename)
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		return errors.New("cannot persist private installation script")
+	}
+	output, err := a.command("sh", path)
+	if err != nil {
+		a.claimOwnedInstallation() // Recover only an identity proven to have been published by this run.
+		// THE PHASE MARKER IS THE ONE THING SAFE TO FORWARD: it is the installer's own
+		// six-phase interface, it is fixed text, and it says where the run stopped —
+		// while everything else the command wrote stays in memory.
+		return fmt.Errorf("the %s installation did not complete%s (diagnostics withheld)", version, installerPhase(output))
+	}
+	if err := a.claimOwnedInstallation(); err != nil {
+		return err
+	}
+	if err := checkInstallerFeedback(output, false); err != nil {
+		return err
+	}
+	a.feedbackChecks++
+	return a.waitForFixture()
+}
+
+// upgradeScenario replaces the RELEASE of the installation that is there, and asserts
+// what an upgrade may and may not do.
+//
+// IT KEEPS THE STATE AND THE IDENTITY, and that is the whole claim. The state file is
+// not replaced — the inode is the one it had, so the upgrade moved a release rather
+// than writing a new database over the node's own — and the state in it survives,
+// which the core-counter epoch shows. The credential and the endpoint are byte
+// identical afterwards, while the binary and the version stamp must change, and the
+// process serving the node must be a different one.
+//
+// THE AGENT IS PAUSED WHILE ITS STATE IS READ, the technique the offline rerun below
+// uses for the same reason: SQLite writes between two reads make the comparison
+// meaningless rather than failing it. It is RESUMED BEFORE THE UPGRADE, because the
+// installer stops the service and a stopped process does not handle SIGTERM — the
+// stop would time out and the upgrade would refuse for a reason that has nothing to
+// do with what it is testing.
+func (a *acceptance) upgradeScenario(endpoint, from, tag string) error {
+	beforePID, _, err := a.inspectRunningAgent()
+	if err != nil {
+		return err
+	}
+	if err := a.assertPrivacy(beforePID); err != nil {
+		return err
+	}
+	if err := syscall.Kill(beforePID, syscall.SIGSTOP); err != nil {
+		return errors.New("cannot pause the agent installed from the older release")
+	}
+	a.pausedPID = beforePID
+	if err := a.waitForStoppedPID(beforePID); err != nil {
+		return err
+	}
+	installedFrom, err := os.ReadFile(installationRoot + "/config/version")
+	if err != nil || strings.TrimSpace(string(installedFrom)) != from {
+		return errors.New("the installation being upgraded does not report the older release it was installed from")
+	}
+	beforeStatic, err := a.staticManifest()
+	if err != nil {
+		return err
+	}
+	beforeDB, err := a.databaseManifest()
+	if err != nil {
+		return err
+	}
+	beforeEpoch, err := readCoreEpoch()
+	if err != nil {
+		return err
+	}
+	if err := syscall.Kill(beforePID, syscall.SIGCONT); err != nil {
+		return errors.New("cannot resume the agent installed from the older release")
+	}
+	a.pausedPID = 0
+
+	if err := a.installRelease(endpoint, a.version, tag, deployment.ModeUpgrade, "private-install-upgrade.sh"); err != nil {
+		return fmt.Errorf("upgrading to %s: %w", a.version, err)
+	}
+	afterPID, _, err := a.inspectRunningAgent()
+	if err != nil {
+		return err
+	}
+	if afterPID == beforePID {
+		return errors.New("the upgrade replaced the release without replacing the process serving it")
+	}
+	if err := a.assertPrivacy(afterPID); err != nil {
+		return err
+	}
+	if err := syscall.Kill(afterPID, syscall.SIGSTOP); err != nil {
+		return errors.New("cannot pause the upgraded agent")
+	}
+	a.pausedPID = afterPID
+	if err := a.waitForStoppedPID(afterPID); err != nil {
+		return err
+	}
+	afterStatic, err := a.staticManifest()
+	if err != nil {
+		return err
+	}
+	afterDB, err := a.databaseManifest()
+	if err != nil {
+		return err
+	}
+	afterEpoch, err := readCoreEpoch()
+	if err != nil {
+		return err
+	}
+	if err := syscall.Kill(afterPID, syscall.SIGCONT); err != nil {
+		return errors.New("cannot resume the upgraded agent")
+	}
+	a.pausedPID = 0
+
+	// THE STATE IS THE SAME STATE, and it is two things at once. The file is NOT
+	// REPLACED — its inode is the one it had, so the upgrade moved a release rather
+	// than writing a new database over the node's own — and the state IN it survived,
+	// which the core-counter epoch shows: a fresh installation gets a new one, and the
+	// reinstall later in this run asserts exactly that.
+	//
+	// THE BYTES ARE NOT COMPARED, and cannot be: the upgraded agent starts and writes
+	// to its own database, so the contents legitimately change across an upgrade. The
+	// offline rerun below is where byte equality belongs, because nothing restarts
+	// there at all.
+	if beforeDB[installationRoot+"/data/state.db"].Inode != afterDB[installationRoot+"/data/state.db"].Inode {
+		return errors.New("the upgrade replaced the node's state file instead of keeping it")
+	}
+	if !bytes.Equal(beforeEpoch, afterEpoch) {
+		return errors.New("the upgrade did not keep the state the node it replaced had accumulated")
+	}
+	if beforeStatic[installationRoot+"/config/credential"] != afterStatic[installationRoot+"/config/credential"] ||
+		beforeStatic[installationRoot+"/config/environment"] != afterStatic[installationRoot+"/config/environment"] {
+		return errors.New("the upgrade changed the identity it was supposed to keep")
+	}
+	// AND THE RELEASE IS NOT: a different binary and a different version stamp, and
+	// the stamp names the release that was asked for.
+	if beforeStatic[installationRoot+"/bin/passwall-node"].SHA256 == afterStatic[installationRoot+"/bin/passwall-node"].SHA256 {
+		return errors.New("the upgrade left the binary it was supposed to replace")
+	}
+	if beforeStatic[installationRoot+"/config/version"].SHA256 == afterStatic[installationRoot+"/config/version"].SHA256 {
+		return errors.New("the upgrade left the version stamp it was supposed to replace")
+	}
+	upgradedTo, err := os.ReadFile(installationRoot + "/config/version")
+	if err != nil || strings.TrimSpace(string(upgradedTo)) != a.version {
+		return errors.New("the upgraded installation does not report the release that was installed")
+	}
+	return nil
 }
 
 // Command diagnostics stay in memory and are never forwarded to Actions logs.
@@ -491,14 +681,25 @@ func (a *acceptance) claimOwnedInstallation() error {
 	if err != nil || string(credential) != a.credential+"\n" {
 		return errors.New("refusing to claim an installation not carrying this run's fixture identity")
 	}
+	// THE CLAIM IS IDEMPOTENT FOR THIS RUN AND REFUSES EVERY OTHER. A second
+	// invocation of the same identity's installer — an upgrade, which is what this
+	// scenario is — finds the marker this run already wrote, and that marker carrying
+	// this run's nonce proves the same thing the second time it proved the first: the
+	// installation belongs to this run and is safe to remove afterwards. A marker
+	// carrying anything else is somebody else's installation, and so is no marker at
+	// all: both are refused.
 	file, err := os.OpenFile(ownerMarker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return errors.New("cannot mark newly created disposable installation ownership")
-	}
-	_, writeErr := file.WriteString(a.nonce)
-	closeErr := file.Close()
-	if writeErr != nil || closeErr != nil {
-		return errors.New("cannot persist disposable installation ownership")
+		claimed, readErr := os.ReadFile(ownerMarker)
+		if readErr != nil || string(claimed) != a.nonce {
+			return errors.New("cannot mark newly created disposable installation ownership")
+		}
+	} else {
+		_, writeErr := file.WriteString(a.nonce)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			return errors.New("cannot persist disposable installation ownership")
+		}
 	}
 	a.rootOwned = true
 	unit, err := os.Lstat(installationUnit)

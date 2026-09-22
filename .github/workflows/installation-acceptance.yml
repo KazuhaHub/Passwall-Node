@@ -10,6 +10,21 @@ on:
         required: true
         default: "4.0.0"
         type: string
+      tag:
+        description: "Published tag of `version`; empty derives the current namespace, which is wrong for a release published before the address changed"
+        required: false
+        default: ""
+        type: string
+      upgrade_from:
+        description: "Older published release to install first, then upgrade to `version`; empty skips the upgrade scenario"
+        required: false
+        default: ""
+        type: string
+      upgrade_from_tag:
+        description: "Published tag of `upgrade_from`"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -46,13 +61,23 @@ jobs:
           test "$(go tool compile -V | awk '{ print $3 }')" = "$acceptance_toolchain"
       - name: Build disposable installation acceptance tool
         run: go build -trimpath -o "$RUNNER_TEMP/passwall-node-installation-acceptance" ./deployment/acceptance
-      - name: Install public release, inspect isolation, rerun offline and reinstall
+      - name: Install public release (upgrading first when asked), inspect isolation, rerun offline and reinstall
         env:
           ACCEPTANCE_VERSION: ${{ inputs.version }}
+          ACCEPTANCE_TAG: ${{ inputs.tag }}
+          ACCEPTANCE_UPGRADE_FROM: ${{ inputs.upgrade_from }}
+          ACCEPTANCE_UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
         run: |
           set +x
           set -eu
+          # THE TAG IS PASSED WHEN IT IS GIVEN, and derived otherwise: a version no
+          # longer determines one address, so a release published before the change
+          # can only be reached by naming the tag it is really at.
+          args=(-version "$ACCEPTANCE_VERSION")
+          [ -z "${ACCEPTANCE_TAG:-}" ] || args+=(-tag "$ACCEPTANCE_TAG")
+          [ -z "${ACCEPTANCE_UPGRADE_FROM:-}" ] || args+=(-upgrade-from "$ACCEPTANCE_UPGRADE_FROM")
+          [ -z "${ACCEPTANCE_UPGRADE_FROM_TAG:-}" ] || args+=(-upgrade-from-tag "$ACCEPTANCE_UPGRADE_FROM_TAG")
           sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            "$RUNNER_TEMP/passwall-node-installation-acceptance" -version "$ACCEPTANCE_VERSION"
+            "$RUNNER_TEMP/passwall-node-installation-acceptance" "${args[@]}"
       # No artifacts, raw journal, script, proc environment or diagnostics are
       # uploaded: the private fixture credential is deliberately ephemeral.

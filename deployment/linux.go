@@ -23,6 +23,16 @@ const (
 	// identity. The credential and the endpoint must still match byte for byte; only
 	// the version may differ.
 	ModeUpgrade = "upgrade"
+	// ModeReplace puts a DIFFERENT identity on a host that already has one, which is
+	// what a server moving to another control plane needs. The installation that is
+	// there is stopped and moved into the backup area whole, so the new identity
+	// starts with empty state and the old one is still recoverable by hand.
+	//
+	// IT IS NOT A SHORTCUT FOR A FAILED UPGRADE. An upgrade keeps the identity and
+	// the state and can be rolled back to the previous release; this cannot be,
+	// because the state it would be rolled back to belongs to an identity the panel
+	// no longer has a row for.
+	ModeReplace = "replace"
 )
 
 // Options names an already registered identity and an already published release.
@@ -32,6 +42,13 @@ type Options struct {
 	AgentID    string
 	Credential string
 	Version    string
+	// Tag is the ADDRESS of the release to install from, when the caller knows it.
+	// Empty means "derive it from the version", and the reason it can be stated at
+	// all is that a version no longer determines one address: the four releases
+	// published before the address changed live at `release/…`, and no version string
+	// says which namespace its release went out under. The panel states the tag it
+	// published; a caller that has one passes it.
+	Tag string
 	// Mode is empty for ModeInstall.
 	Mode string
 }
@@ -43,10 +60,12 @@ var linuxTemplate string
 // or arm64. Save it mode 0600 and execute the file with sh as root; never pipe a
 // credential through command arguments, shell tracing, history or shared logs.
 //
-// INSTALLATION NEVER CHANGES AN EXISTING IDENTITY. The identity and the credential
-// in the request have to be the ones already on the host, byte for byte, whatever
-// the mode; ModeUpgrade is the one thing that may differ, and it changes the
-// RELEASE while keeping the identity and the state in place.
+// INSTALLATION CHANGES AN EXISTING IDENTITY ONLY WHEN THE CONTROL PLANE SAYS SO IN
+// `mode`, AND THEN IN ONE DIRECTION: ModeReplace takes the host over for a
+// different identity after moving the one that is there into the backup area, and
+// ModeUpgrade changes the RELEASE while keeping the identity and the state in
+// place. Every other combination is refused, including a release that differs with
+// no mode — an install is always to an empty path or to the identity already there.
 func RenderLinux(options Options) (string, error) {
 	if !ValidReleaseVersion(options.Version) {
 		return "", errors.New("installation requires an explicit MAJOR.MINOR.PATCH release version")
@@ -56,7 +75,7 @@ func RenderLinux(options Options) (string, error) {
 		mode = ModeInstall
 	}
 	switch mode {
-	case ModeInstall, ModeUpgrade:
+	case ModeInstall, ModeUpgrade, ModeReplace:
 	default:
 		return "", fmt.Errorf("installation mode %q is not one this template understands", mode)
 	}
@@ -68,13 +87,30 @@ func RenderLinux(options Options) (string, error) {
 	if err := nodeconfig.Validate(connection); err != nil {
 		return "", fmt.Errorf("installation connection: %w", err)
 	}
-	// THE TAG IS DERIVED HERE, NOT SENT ALONGSIDE. A caller that had to pass both
-	// could pass them out of step, and the template would then download one release
-	// and install another — the release it fetched is checked against the version
-	// it was told, so the mismatch would surface as a checksum failure at best.
-	tag, err := releaseid.TagForVersion(options.Version)
-	if err != nil {
-		return "", fmt.Errorf("installation release version: %w", err)
+	// THE ADDRESS IS STATED OR DERIVED, AND CHECKED AGAINST THE VERSION EITHER WAY.
+	// The template downloads from this and writes it into the script, and the release
+	// it fetched is checked against the version the caller asked for — so a pair that
+	// disagrees would surface as a checksum failure at best, and as an installation
+	// of the wrong release at worst.
+	//
+	// IT IS NOT ALWAYS DERIVABLE. A version no longer determines one address: the four
+	// releases published before the namespace changed are addressed as `release/…`,
+	// and deriving one for those names a tag nobody published. A caller that knows the
+	// address hands it over; a caller that does not gets the current namespace's,
+	// which is right for a release about to be published.
+	var tag releaseid.Tag
+	if options.Tag != "" {
+		stated, err := releaseid.ParseReleaseTag(options.Tag)
+		if err != nil || stated.VersionString() != options.Version {
+			return "", fmt.Errorf("installation release tag %q does not name the release version %q", options.Tag, options.Version)
+		}
+		tag = stated
+	} else {
+		derived, err := releaseid.TagForVersion(options.Version)
+		if err != nil {
+			return "", fmt.Errorf("installation release version: %w", err)
+		}
+		tag = derived
 	}
 	return strings.NewReplacer(
 		"@@VERSION@@", shellQuote(options.Version),

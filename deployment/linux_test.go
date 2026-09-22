@@ -110,6 +110,17 @@ func newShellFixture(t *testing.T) *shellFixture {
 	f.writeCommand("systemctl", `
 printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"
 [ "${FAKE_SERVICE_FAIL:-0}" != 1 ] || exit 1
+# THE FAKE REMEMBERS WHAT IT WAS TOLD TO DO. A stop and a start change the state a
+# later read reports, because that is what systemd does — and a case that replaces
+# an installation asks the state between the two. FAKE_SERVICE_STOP_FAILS keeps the
+# stop from taking, which is the state an unresponsive unit leaves behind.
+case "$1" in
+    stop)   [ "${FAKE_SERVICE_STOP_FAILS:-0}" != 1 ] || exit 1
+            printf '%s\n' inactive > "$FAKE_SERVICE_STATE"; exit 0 ;;
+    start)  printf '%s\n' active > "$FAKE_SERVICE_STATE"; exit 0 ;;
+    enable) printf '%s\n' active > "$FAKE_SERVICE_STATE"; exit 0 ;;
+    daemon-reload) exit 0 ;;
+esac
 if [ "$1" = show ]; then
     case "$3" in
         --property=ActiveState)
@@ -119,8 +130,16 @@ if [ "$1" = show ]; then
             printf '%s\n' "$count" > "$FAKE_READY_COUNT"
             if [ "${FAKE_SERVICE_DELAY:-0}" = 1 ] && [ "$count" -lt 2 ]; then
                 printf '%s\n' activating
+            elif [ -n "${FAKE_ACTIVE_STATE:-}" ]; then
+                # AN EXPLICIT STATE WINS over what the fake was told to do: a case
+                # that says the unit never comes up is describing a host where the
+                # start command returned success and the unit did not, which the
+                # stop/start bookkeeping below cannot express.
+                printf '%s\n' "$FAKE_ACTIVE_STATE"
+            elif [ -f "$FAKE_SERVICE_STATE" ]; then
+                cat "$FAKE_SERVICE_STATE"
             else
-                printf '%s\n' "${FAKE_ACTIVE_STATE:-active}"
+                printf '%s\n' active
             fi ;;
         --property=SubState) printf '%s\n' "${FAKE_SUB_STATE:-running}" ;;
         --property=MainPID) printf '%s\n' "${FAKE_MAIN_PID:-12345}" ;;
@@ -252,7 +271,8 @@ func (f *shellFixture) runTerminal(tty bool, extraEnvironment ...string) (string
 		"PATH="+f.bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_INSTALL_ROOT="+f.root, "FAKE_ARCHIVE="+f.archive, "FAKE_SUMS="+f.sums,
 		"FAKE_NETWORK_LOG="+filepath.Join(f.dir, "network.log"), "FAKE_COMMAND_LOG="+filepath.Join(f.dir, "commands.log"),
-		"FAKE_READY_COUNT="+filepath.Join(f.dir, "ready.count"), "FAKE_TIMEOUT_LOG="+filepath.Join(f.dir, "timeout.log"))
+		"FAKE_READY_COUNT="+filepath.Join(f.dir, "ready.count"), "FAKE_TIMEOUT_LOG="+filepath.Join(f.dir, "timeout.log"),
+		"FAKE_SERVICE_STATE="+filepath.Join(f.dir, "service.state"))
 	command.Env = append(command.Env, extraEnvironment...)
 	output, err := command.CombinedOutput()
 	if bytes.Contains(output, []byte(f.options.Credential)) {

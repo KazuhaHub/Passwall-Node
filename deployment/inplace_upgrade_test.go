@@ -286,7 +286,7 @@ func TestLinuxInstallTreatsAnUpgradeWithoutAnInstallationAsAFreshInstall(t *test
 }
 
 func TestRenderLinuxRefusesAnUnknownMode(t *testing.T) {
-	for _, mode := range []string{"replace", "force", "INSTALL", "install "} {
+	for _, mode := range []string{"force", "INSTALL", "install ", "REPLACE"} {
 		options := installationOptions()
 		options.Mode = mode
 		if _, err := RenderLinux(options); err == nil {
@@ -298,7 +298,7 @@ func TestRenderLinuxRefusesAnUnknownMode(t *testing.T) {
 	// AND THE MODE REACHES THE SCRIPT rather than being dropped: a render that
 	// silently installed where an upgrade was asked for would be refused at the node
 	// with a message about identity.
-	for mode, want := range map[string]string{ModeInstall: "mode='install'", ModeUpgrade: "mode='upgrade'"} {
+	for mode, want := range map[string]string{ModeInstall: "mode='install'", ModeUpgrade: "mode='upgrade'", ModeReplace: "mode='replace'"} {
 		options := installationOptions()
 		options.Mode = mode
 		script, err := RenderLinux(options)
