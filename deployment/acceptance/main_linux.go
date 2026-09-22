@@ -336,10 +336,12 @@ func (a *acceptance) installRelease(endpoint, version, tag, mode, filename strin
 // upgradeScenario replaces the RELEASE of the installation that is there, and asserts
 // what an upgrade may and may not do.
 //
-// IT KEEPS THE STATE AND THE IDENTITY, and that is the whole claim. The state files
-// must keep their bytes AND their inodes — the daemon holds them open, so a rewrite
-// would pull a live database out from under it — while the binary and the version
-// stamp must change, and the process serving the node must be a different one.
+// IT KEEPS THE STATE AND THE IDENTITY, and that is the whole claim. The state file is
+// not replaced — the inode is the one it had, so the upgrade moved a release rather
+// than writing a new database over the node's own — and the state in it survives,
+// which the core-counter epoch shows. The credential and the endpoint are byte
+// identical afterwards, while the binary and the version stamp must change, and the
+// process serving the node must be a different one.
 //
 // THE AGENT IS PAUSED WHILE ITS STATE IS READ, the technique the offline rerun below
 // uses for the same reason: SQLite writes between two reads make the comparison
@@ -371,6 +373,10 @@ func (a *acceptance) upgradeScenario(endpoint, from, tag string) error {
 		return err
 	}
 	beforeDB, err := a.databaseManifest()
+	if err != nil {
+		return err
+	}
+	beforeEpoch, err := readCoreEpoch()
 	if err != nil {
 		return err
 	}
@@ -407,14 +413,30 @@ func (a *acceptance) upgradeScenario(endpoint, from, tag string) error {
 	if err != nil {
 		return err
 	}
+	afterEpoch, err := readCoreEpoch()
+	if err != nil {
+		return err
+	}
 	if err := syscall.Kill(afterPID, syscall.SIGCONT); err != nil {
 		return errors.New("cannot resume the upgraded agent")
 	}
 	a.pausedPID = 0
 
-	// THE STATE IS THE SAME STATE: bytes and inode, not just equal contents.
-	if !sameManifest(beforeDB, afterDB) {
-		return errors.New("the upgrade changed the bytes or the inode of the state it was supposed to keep")
+	// THE STATE IS THE SAME STATE, and it is two things at once. The file is NOT
+	// REPLACED — its inode is the one it had, so the upgrade moved a release rather
+	// than writing a new database over the node's own — and the state IN it survived,
+	// which the core-counter epoch shows: a fresh installation gets a new one, and the
+	// reinstall later in this run asserts exactly that.
+	//
+	// THE BYTES ARE NOT COMPARED, and cannot be: the upgraded agent starts and writes
+	// to its own database, so the contents legitimately change across an upgrade. The
+	// offline rerun below is where byte equality belongs, because nothing restarts
+	// there at all.
+	if beforeDB[installationRoot+"/data/state.db"].Inode != afterDB[installationRoot+"/data/state.db"].Inode {
+		return errors.New("the upgrade replaced the node's state file instead of keeping it")
+	}
+	if !bytes.Equal(beforeEpoch, afterEpoch) {
+		return errors.New("the upgrade did not keep the state the node it replaced had accumulated")
 	}
 	if beforeStatic[installationRoot+"/config/credential"] != afterStatic[installationRoot+"/config/credential"] ||
 		beforeStatic[installationRoot+"/config/environment"] != afterStatic[installationRoot+"/config/environment"] {
