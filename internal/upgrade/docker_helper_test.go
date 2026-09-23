@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,10 @@ type fakeDockerEngine struct {
 	images     map[string]dockerImage
 	pulled     string
 	onStart    func(string)
+	// onPull runs inside PullImage. A real pull takes as long as the network does,
+	// and it happens while processCurrent holds the helper's main loop — which is
+	// the window the heartbeat has to survive.
+	onPull func()
 	// fail injects an engine failure for one operation, keyed "op" or "op:name".
 	// The rollback path's failure branches are otherwise unreachable from a test,
 	// which is why they had no coverage at all.
@@ -50,6 +55,9 @@ func (f *fakeDockerEngine) InspectContainer(_ context.Context, name string) (doc
 	return container, nil
 }
 func (f *fakeDockerEngine) PullImage(_ context.Context, reference string) error {
+	if f.onPull != nil {
+		f.onPull()
+	}
 	if _, ok := f.images[reference]; !ok {
 		return errDockerNotFound
 	}
@@ -480,4 +488,70 @@ func TestDockerRecoveryTerminalBranchesToday(t *testing.T) {
 			}
 		})
 	}
+}
+
+// THE HEARTBEAT MUST KEEP BEATING WHILE AN UPGRADE HOLDS THE LOOP.
+//
+// processCurrent is synchronous and runs for as long as the image pull, the swap
+// and the readiness wait take. The new agent checks this heartbeat when it
+// starts and, if it is older than 30 seconds, never constructs its upgrade client
+// — so it never writes the Ready document the helper is waiting on, and the
+// upgrade rolls back. When the heartbeat shared a select with processCurrent, a
+// pull longer than about half a minute was enough to make that happen every time.
+//
+// Freshness is measured by the file being REPLACED, not by its mtime:
+// atomicHelperFile renames a new file into place, so each write is a new inode,
+// and that does not depend on the filesystem's timestamp resolution.
+func TestDockerHelperHeartbeatSurvivesALongUpgrade(t *testing.T) {
+	controller, engine, _ := dockerControllerFixture(t)
+	controller.options.HeartbeatInterval = 10 * time.Millisecond
+	controller.options.Poll = time.Millisecond
+	if err := controller.writeHeartbeat(); err != nil {
+		t.Fatal(err)
+	}
+
+	pulling, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	engine.onPull = func() {
+		once.Do(func() { close(pulling) })
+		<-release // the pull that takes as long as the network does
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- controller.run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the helper did not stop")
+		}
+	}()
+
+	select {
+	case <-pulling:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upgrade never reached the image pull")
+	}
+
+	heartbeat := filepath.Join(controller.options.ControlDir, "heartbeat")
+	first, err := os.Stat(heartbeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Many intervals pass while processCurrent is stuck inside the pull. The
+	// heartbeat has to be rewritten during them, not after.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		current, err := os.Stat(heartbeat)
+		if err == nil && !os.SameFile(first, current) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the heartbeat was not rewritten while an upgrade held the helper's loop")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
 }

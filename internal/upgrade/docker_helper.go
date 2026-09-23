@@ -32,8 +32,16 @@ type dockerHelperOptions struct {
 	Clock      func() (string, int64, error)
 	Poll       time.Duration
 	ReadyWait  time.Duration
-	Logger     *log.Logger
+	// HeartbeatInterval is how often the helper proves it is alive. Zero means
+	// the production interval; tests shorten it to observe the heartbeat moving
+	// while an upgrade is in progress.
+	HeartbeatInterval time.Duration
+	Logger            *log.Logger
 }
+
+// dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
+// (validateDockerUpgradeControl), so one missed tick is not a stale heartbeat.
+const dockerHeartbeatInterval = 5 * time.Second
 
 type dockerHelperController struct{ options dockerHelperOptions }
 
@@ -137,18 +145,57 @@ func ensureDockerDirectory(path string, uid, gid uint32, mode os.FileMode) error
 }
 
 func (c *dockerHelperController) run(ctx context.Context) error {
+	// THE HEARTBEAT HAS ITS OWN GOROUTINE, because an upgrade holds the main loop
+	// for minutes and the heartbeat is what the upgrade depends on.
+	//
+	// It used to share one select with processCurrent, which is synchronous. A
+	// Docker upgrade inside processCurrent pulls the target image, swaps the
+	// containers and then waits up to ReadyWait for the new agent to prove itself
+	// — and the new agent, when it starts, checks this very file and refuses to
+	// construct its upgrade client if it is older than 30 seconds
+	// (cmd/node/upgrade_linux.go validateDockerUpgradeControl, called from
+	// dockerRemoteUpgradeEnabled at startup). Without the client it never wires
+	// OnSynced, so it never writes the Ready document the helper is waiting for.
+	//
+	// So an image pull that took longer than about half a minute turned every
+	// upgrade into a rollback, and a rollback into a manual_attention result,
+	// because the restored agent started with the heartbeat just as stale. The
+	// helper was starving the one signal its own transaction needed.
+	//
+	// A failed write still stops the helper, as it always did: an updater that
+	// cannot prove it is alive must not keep accepting upgrades. The error only
+	// reaches the loop once processCurrent returns, which is the same moment it
+	// could have been acted on before.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	interval := c.options.HeartbeatInterval
+	if interval <= 0 {
+		interval = dockerHeartbeatInterval
+	}
+	heartbeatFailed := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := c.writeHeartbeat(); err != nil {
+					heartbeatFailed <- err
+					return
+				}
+			}
+		}
+	}()
 	poll := time.NewTicker(c.options.Poll)
-	heartbeat := time.NewTicker(5 * time.Second)
 	defer poll.Stop()
-	defer heartbeat.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-heartbeat.C:
-			if err := c.writeHeartbeat(); err != nil {
-				return err
-			}
+		case err := <-heartbeatFailed:
+			return err
 		case <-poll.C:
 			if err := c.processCurrent(ctx); err != nil && !errors.Is(err, os.ErrNotExist) {
 				c.options.Logger.Printf("upgrade request held: %v", err)
