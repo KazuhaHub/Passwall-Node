@@ -163,6 +163,13 @@ only on a trusted node host. It accepts official exact release tags, retains the
 stopped previous container, and commits only after the replacement Agent has
 authenticated to PSP and converged its core configuration. A failed or timed-out
 replacement is removed and the retained container is restored automatically.
+If the Docker Engine fails part-way through that rollback, the task ends
+`indeterminate` for an operator to inspect, but the updater first starts one
+container so the node keeps serving and can report; the task's error names it.
+When that is the previous container still running under its
+`passwall-node-agent-upgrade-…` backup name, rename it back to
+`passwall-node-agent` before the next `docker compose up`. Otherwise Compose
+starts a second Agent with the same identity beside it.
 
 On Linux hosts where unprivileged processes cannot bind ports below 1024, use
 listener ports at or above 1024 or deliberately configure the host's
