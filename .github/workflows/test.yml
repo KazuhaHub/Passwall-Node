@@ -13,9 +13,17 @@ env:
   GOWORK: "off"
   GOTOOLCHAIN: "local"
 
+# A PR push supersedes the one before it, so cancelling the older run is right
+# there. A MAIN PUSH IS NOT SUPERSEDED BY THE NEXT MERGE: the group used to be
+# keyed on the ref for both events, so each merge cancelled the run of the merge
+# before it, and 7 of 59 main runs ended cancelled. Branch protection lets a
+# tested PR merge without updating to the latest base, so that run is the only
+# verdict on the merged commit, and a release tag cut from it has no other. A
+# main push and a manual run get a group of their own — `github.run_id` — and
+# cancel nothing.
 concurrency:
-  group: test-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: test-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
