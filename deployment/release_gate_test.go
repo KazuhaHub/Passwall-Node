@@ -173,6 +173,24 @@ printf '%s\n' "$response"
 	})
 }
 
+// THE IMAGE MOVES POINTERS CONSUMERS FOLLOW, so it publishes after the approved,
+// signed release and never beside it. Needing only the builds, it pushed `beta`
+// 11h46m before v4.0.1.3's approval, and a rejected approval would have left it
+// there.
+func TestTheImagePublishesAfterTheApprovedRelease(t *testing.T) {
+	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(workflowJob(t, text, "release"), "    environment: release-signing\n") {
+		t.Fatal("the release job is no longer the one behind the approval")
+	}
+	if !jobNeeds(t, text, "docker")["release"] {
+		t.Fatal("the image publishes without waiting for the approved release")
+	}
+}
+
 // workflowJob returns one job's block: from its key to the next job's.
 func workflowJob(t *testing.T, workflow, id string) string {
 	t.Helper()

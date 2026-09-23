@@ -240,7 +240,11 @@ jobs:
           name: passwall-node-${{ matrix.goos }}-${{ matrix.goarch }}
           path: out/passwall-node${{ matrix.ext }}
           if-no-files-found: error
-          retention-days: 1
+          # A WEEK, because both jobs that read these wait for the approval, and
+          # one approval has already taken 11.8h (v4.0.1.3). Re-running failed
+          # jobs does not rebuild, so a binary that expired before the approval
+          # fails the approved job with no way back inside the run.
+          retention-days: 7
 
   # NOTHING ABOVE ASKS WHETHER THE COMMIT IS ANY GOOD. Setup binds the tag to
   # the checkout and refuses a re-release; it never asked whether the commit is
@@ -333,7 +337,8 @@ jobs:
     # The private signing key is scoped to this protected environment. Approve
     # only after reviewing the exact tag plus signing code/workflow diff;
     # release assets remain unusable by native auto-upgrade until this job
-    # signs their manifest.
+    # signs their manifest. The image job waits for this one, so the same
+    # approval releases the image and moves its pointers.
     environment: release-signing
     permissions:
       contents: write
@@ -427,11 +432,26 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # AFTER THE SIGNED RELEASE, NOT BESIDE IT. This job has no environment, and it
+  # used to need only the builds, so the image, `beta` and — on a stable
+  # dispatch — `latest` moved as soon as the builds finished, before anyone
+  # approved anything: v4.0.1.3's `beta` pointed for 11h46m at an image with no
+  # release and no signed manifest while the approval waited. Moving a pointer
+  # consumers follow is the same decision as publishing, which is why
+  # promote.yml sits behind the same environment; here the image waits for the
+  # approved release instead. A rejected or expired approval leaves no image
+  # behind, so the re-run finds the exact tag still absent and the check below
+  # lets it through.
+  #
+  # THE ORDER HAS A WINDOW OF ITS OWN, the harmless way round. If this job
+  # fails, the release stays published with no image, and `beta` and `latest`
+  # stay where they were, until the failed job is re-run. A pull of the new
+  # version fails meanwhile; no pointer names an image nobody approved.
   docker:
     name: Publish container image
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [setup, build, gate]
+    needs: [setup, build, gate, release]
     permissions:
       contents: read
       packages: write
