@@ -85,7 +85,7 @@ func TestBuildBaselinesStayAligned(t *testing.T) {
 	if len(base) != 1 || len(releaseBase) != 1 || base[0][1] != releaseBase[0][1] {
 		t.Fatal("source and release images must share one exact patched runtime base")
 	}
-	for _, path := range []string{".github/workflows/test.yml", ".github/workflows/release.yml", ".github/workflows/core-acceptance.yml", ".github/workflows/installation-acceptance.yml", ".github/workflows/container-acceptance.yml"} {
+	for _, path := range []string{".github/workflows/test.yml", ".github/workflows/release.yml", ".github/workflows/core-acceptance.yml", ".github/workflows/installation-acceptance.yml", ".github/workflows/container-acceptance.yml", ".github/workflows/installer.yml"} {
 		workflow := read(path)
 		if !strings.Contains(workflow, "go-version-file: go.mod") || !strings.Contains(workflow, `GOTOOLCHAIN: "local"`) {
 			t.Fatalf("%s must select and inspect the pinned compiler without auto-upgrading", path)
