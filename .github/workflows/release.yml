@@ -431,8 +431,23 @@ jobs:
           go run ./deployment/cmd/sign-release \
             -manifest dist/SHA256SUMS.txt \
             -output dist/SHA256SUMS.txt.sig
+      # PINNED TO A COMMIT, because this job holds the signing key. Every secret
+      # a job references is handed to the runner when the job starts, and a
+      # later step can read it back out of the runner's memory, which is how the
+      # 2025 tj-actions compromise dumped its victims' secrets into their logs.
+      # A major tag is a pointer its owner can move; a commit is not.
+      #
+      # NOT `gh release create`, although that would take third-party code out
+      # of this job altogether, because the two differ after a failure. This
+      # action finds an existing release for the tag, appends regenerated notes,
+      # resets the prerelease flag, and uploads only the assets it lacks; gh
+      # refuses a published release and deletes its own draft when an upload
+      # fails. This action also publishes a pre-release before its assets
+      # upload, where gh publishes after them. Swapping one for the other
+      # changes how a failed release is recovered, which is a decision to make
+      # on purpose rather than as part of a pin.
       - name: Publish release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ needs.setup.outputs.tag }}
           target_commitish: ${{ needs.setup.outputs.sha }}
@@ -483,16 +498,19 @@ jobs:
         with:
           name: passwall-node-linux-arm64
           path: bin/linux-arm64
-      - uses: docker/setup-buildx-action@v4
+      # The docker/* actions are pinned to commits for the release action's
+      # reason, with a smaller prize: this job's token can write packages.
+      # Dependabot moves each commit and its version comment together.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ needs.setup.outputs.owner_lc }}/passwall-node
           tags: |
@@ -527,7 +545,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.setup.outputs.version }}
         run: node deployment/check-image.mjs "$IMAGE_REPOSITORY" "$RELEASE_VERSION"
       - name: Build and push multi-arch image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.release
