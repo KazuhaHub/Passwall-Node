@@ -32,6 +32,29 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+      # THE BUILD CACHE IS PER JOB, AND setup-go's IS NOT. setup-go keys its cache
+      # on go.sum alone, and a key that exists is never saved again, so every x64
+      # Go job here and in the other workflows restores one entry that whichever
+      # job finished first wrote once: darwin/arm64's objects, 176 MB, frozen.
+      # Everything else compiles from source: the darwin/arm64 leg builds in 5s
+      # and the other five targets take 18-32s, vet takes 35s, and the race job
+      # spends ~47s compiling before its first result. setup-go keeps
+      # `cache: true` for the module cache, which that one entry does serve.
+      # Its restore lands in the same directory after this one, so every entry
+      # saved here carries those darwin/arm64 objects too: quota, not correctness.
+      #
+      # A KEY PER JOB, because a shared key freezes whichever job saved it first.
+      # RESTORED ON EVERY EVENT, SAVED ONLY FROM MAIN: a PR's cache is scoped to
+      # refs/pull/N/merge, so a PR save serves only later pushes to that one PR,
+      # and it costs the upload and the quota main's entries need. The save key
+      # ends in the run id, because a key that exists cannot be written again,
+      # and the restore picks the newest entry by prefix. A prefix restore is
+      # safe because the cache is content-addressed: a stale entry can only miss.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-checks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-checks-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -69,6 +92,11 @@ jobs:
         run: sh -n docker-entrypoint.sh
       - name: Validate immutable image publishing check
         run: node --test deployment/check_image_test.mjs
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-checks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   race:
     name: race detector
@@ -76,6 +104,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+      # The build cache pair the checks job explains.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-race-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         env:
           GOTOOLCHAIN: auto
@@ -84,6 +118,11 @@ jobs:
           cache: true
       - name: Run race detector
         run: go test -race -count=1 -timeout=15m ./...
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   verify:
     name: test, vet, format
@@ -116,6 +155,13 @@ jobs:
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v6
+      # The build cache pair the checks job explains, one per target: a target's
+      # objects are its own, and the leg that has them builds in about 5s.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -132,6 +178,11 @@ jobs:
         run: |
           go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
           sh deployment/check-build.sh "passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$GITHUB_SHA"
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   upgrade-systemd:
     name: upgrade helper sandbox (${{ matrix.arch }})
@@ -145,6 +196,12 @@ jobs:
           - { runner: ubuntu-24.04-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@v6
+      # The build cache pair the checks job explains.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         env:
           GOTOOLCHAIN: auto
@@ -193,6 +250,11 @@ jobs:
           export PN_E2E_SOURCE_DIR="$GITHUB_WORKSPACE"
           go test -v ./internal/upgrade -run '^TestUpgradeSystemdRealNodeE2E$' -count=1 -timeout=12m | tee "$RUNNER_TEMP/upgrade-node-e2e-tests.log"
           ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/upgrade-node-e2e-tests.log"
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   container:
     name: container
