@@ -32,6 +32,17 @@ type fakeDockerEngine struct {
 	// The rollback path's failure branches are otherwise unreachable from a test,
 	// which is why they had no coverage at all.
 	fail map[string]error
+	// failOnce is fail for a single call: the first matching operation consumes
+	// it. It models an engine that misses one request and answers the next.
+	failOnce map[string]error
+	// onRemove runs at the start of RemoveContainer, before the fake looks the
+	// container up — so a test can make one vanish between the stop and the
+	// removal, which is what a concurrent `docker rm` or `compose down` does.
+	onRemove func(string)
+	// slowStop names containers whose stop takes effect but whose answer arrives
+	// only after the caller has given up: the call blocks until its context is
+	// done. That is how one hung engine call spends a whole rollback budget.
+	slowStop map[string]bool
 	// removals records every removal and whether it was forced. A forced removal
 	// is a destructive capability, so tests need to see exactly when it is used.
 	removals []fakeRemoval
@@ -42,9 +53,17 @@ type fakeRemoval struct {
 	force bool
 }
 
-func (f *fakeDockerEngine) maybeFail(op, name string) error {
-	if f.fail == nil {
-		return nil
+func (f *fakeDockerEngine) maybeFail(ctx context.Context, op, name string) error {
+	// A REAL CLIENT FAILS ON A DONE CONTEXT without reaching the engine, so the
+	// fake does too — otherwise an exhausted budget would be invisible here.
+	if err := ctx.Err(); err != nil {
+		return errDockerUnavailable
+	}
+	for _, key := range []string{op + ":" + name, op} {
+		if err, ok := f.failOnce[key]; ok {
+			delete(f.failOnce, key)
+			return err
+		}
 	}
 	if err, ok := f.fail[op+":"+name]; ok {
 		return err
@@ -53,8 +72,8 @@ func (f *fakeDockerEngine) maybeFail(op, name string) error {
 }
 
 func (f *fakeDockerEngine) Ping(context.Context) error { return nil }
-func (f *fakeDockerEngine) InspectContainer(_ context.Context, name string) (dockerContainer, error) {
-	if err := f.maybeFail("inspect", name); err != nil {
+func (f *fakeDockerEngine) InspectContainer(ctx context.Context, name string) (dockerContainer, error) {
+	if err := f.maybeFail(ctx, "inspect", name); err != nil {
 		return dockerContainer{}, err
 	}
 	container, ok := f.containers[name]
@@ -80,8 +99,8 @@ func (f *fakeDockerEngine) InspectImage(_ context.Context, reference string) (do
 	}
 	return image, nil
 }
-func (f *fakeDockerEngine) StopContainer(_ context.Context, name string) error {
-	if err := f.maybeFail("stop", name); err != nil {
+func (f *fakeDockerEngine) StopContainer(ctx context.Context, name string) error {
+	if err := f.maybeFail(ctx, "stop", name); err != nil {
 		return err
 	}
 	container, ok := f.containers[name]
@@ -90,10 +109,14 @@ func (f *fakeDockerEngine) StopContainer(_ context.Context, name string) error {
 	}
 	container.State.Running = false
 	f.containers[name] = container
+	if f.slowStop[name] {
+		<-ctx.Done()
+		return errDockerUnavailable
+	}
 	return nil
 }
-func (f *fakeDockerEngine) StartContainer(_ context.Context, name string) error {
-	if err := f.maybeFail("start", name); err != nil {
+func (f *fakeDockerEngine) StartContainer(ctx context.Context, name string) error {
+	if err := f.maybeFail(ctx, "start", name); err != nil {
 		return err
 	}
 	container, ok := f.containers[name]
@@ -107,8 +130,8 @@ func (f *fakeDockerEngine) StartContainer(_ context.Context, name string) error 
 	}
 	return nil
 }
-func (f *fakeDockerEngine) RenameContainer(_ context.Context, name, replacement string) error {
-	if err := f.maybeFail("rename", name); err != nil {
+func (f *fakeDockerEngine) RenameContainer(ctx context.Context, name, replacement string) error {
+	if err := f.maybeFail(ctx, "rename", name); err != nil {
 		return err
 	}
 	container, ok := f.containers[name]
@@ -116,7 +139,7 @@ func (f *fakeDockerEngine) RenameContainer(_ context.Context, name, replacement 
 		return errDockerNotFound
 	}
 	if _, exists := f.containers[replacement]; exists {
-		return errors.New("name exists")
+		return &dockerStatusError{Code: http.StatusConflict}
 	}
 	delete(f.containers, name)
 	container.Name = "/" + replacement
@@ -141,9 +164,12 @@ func (f *fakeDockerEngine) CreateReplacement(_ context.Context, name string, old
 	f.containers[name] = created
 	return created.ID, nil
 }
-func (f *fakeDockerEngine) RemoveContainer(_ context.Context, name string, force bool) error {
+func (f *fakeDockerEngine) RemoveContainer(ctx context.Context, name string, force bool) error {
 	f.removals = append(f.removals, fakeRemoval{name: name, force: force})
-	if err := f.maybeFail("remove", name); err != nil {
+	if f.onRemove != nil {
+		f.onRemove(name)
+	}
+	if err := f.maybeFail(ctx, "remove", name); err != nil {
 		return err
 	}
 	container, ok := f.containers[name]
@@ -313,61 +339,101 @@ func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDocker
 	return controller, engine, request
 }
 
-// CHARACTERIZATION: what rollback does TODAY when an Engine call fails.
+// WHAT ROLLBACK DOES WHEN AN ENGINE CALL FAILS PART-WAY THROUGH IT.
 //
-// These tests pin behaviour that is about to change. They exist because the five
-// indeterminate branches in rollback() had no coverage at all — `grep
-// indeterminate docker_helper_test.go` returned nothing — and changing untested
-// error paths is how a fix quietly becomes a second defect.
+// These started as characterization tests, pinning three exits that wrote a
+// TERMINAL receipt with nothing running at all. The agent container is the data
+// plane (network_mode: host), and restart: unless-stopped does not restart a
+// container that was explicitly stopped, so those exits stopped forwarding with
+// no automatic recovery — and processCurrent short-circuits on a terminal phase
+// forever, so the panel saw only silence.
 //
-// What they record is the defect, not a desired property: three of these
-// branches write a TERMINAL receipt with NOTHING running under the target name.
-// The agent container is the data plane (network_mode: host) and both compose
-// services carry restart: unless-stopped, which does not restart a container that
-// was explicitly stopped — so this is forwarding stopped with no automatic
-// recovery, and processCurrent short-circuits on the terminal phase forever.
+// The rule they now pin: a rollback either restores the previous container, or
+// it starts EXACTLY ONE container before it writes a terminal receipt, and the
+// receipt says which. That is whatever holds the target name — what `docker
+// compose start` would start — or, only when its identity is verified AND the
+// target name is proven empty, the retained one under its backup name. The
+// receipt stays indeterminate — a rollback that
+// could not complete has no proven outcome and must not acquire one — but the
+// node keeps serving, and the agent in it can come back and report.
 //
-// When the retryable/terminal split lands, the three marked STOPS THE NODE must
-// change; :403 and :421 must not, because both already asked the engine to start
-// something and it refused.
-func TestDockerRollbackFailureBranchesToday(t *testing.T) {
-	transportErr := errors.New("Docker Engine request failed")
-
+// Exactly one matters as much as at least one: two agents with one identity on
+// host networking is a split-brain, so every case also checks that nothing else
+// is running.
+func TestDockerRollbackFailureBranches(t *testing.T) {
+	backupName := "node-agent-upgrade-" + shortTaskID("tsk_docker_upgrade_001")
+	const (
+		oldID         = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		replacementID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
 	for _, tc := range []struct {
-		name         string
-		fail         map[string]error
-		wantError    string
-		wantsRunning bool // is anything running under the target name afterwards?
+		name     string
+		fail     map[string]error
+		failOnce map[string]error
+		phase    string
+		errors   []string
+		// running names the one container that must be running afterwards, and
+		// runningID its identity; "" means nothing may be running at all.
+		running, runningID string
 	}{
 		{
-			// :409-411 — STOPS THE NODE. The replacement was already stopped on the
-			// line above, with its error discarded.
+			// The replacement could not be removed, so it is the only candidate —
+			// the retained container cannot be renamed into a name that is taken.
 			name:      "remove of the replacement fails",
-			fail:      map[string]error{"remove": transportErr},
-			wantError: "replacement Docker container could not be removed during rollback",
+			fail:      map[string]error{"remove": &dockerStatusError{Code: http.StatusInternalServerError}},
+			phase:     "indeterminate",
+			errors:    []string{"replacement Docker container could not be removed during rollback", "the replacement container this upgrade created was started so the node keeps serving"},
+			running:   "node-agent",
+			runningID: replacementID,
 		},
 		{
-			// :413-415 — STOPS THE NODE, and this is the least deserved of the
-			// three: the retained container is fine, the engine just could not be
-			// reached for one call.
-			name:      "inspect of the retained container fails",
-			fail:      map[string]error{"inspect:node-agent-upgrade-" + shortTaskID("tsk_docker_upgrade_001"): transportErr},
-			wantError: "retained Docker rollback container is unavailable",
+			// The engine missed one call and answered the next. The retained
+			// container was intact the whole time, so this now completes.
+			name:      "inspect of the retained container misses once",
+			failOnce:  map[string]error{"inspect:" + backupName: errDockerUnavailable},
+			phase:     "failed",
+			errors:    []string{"previous managed container restored"},
+			running:   "node-agent",
+			runningID: oldID,
 		},
 		{
-			// :417-418 — STOPS THE NODE. Identity was verified on the line above.
-			name: "rename of the retained container back fails",
+			// An engine that keeps failing still gets exactly one more read. The
+			// replacement is already gone and nothing unidentified may be started,
+			// so nothing serves — and the receipt says so instead of implying
+			// otherwise.
+			name:   "inspect of the retained container keeps failing",
+			fail:   map[string]error{"inspect:" + backupName: errDockerUnavailable},
+			phase:  "indeterminate",
+			errors: []string{"retained Docker rollback container is unavailable", "could not be started either, so nothing is serving"},
+		},
+		{
+			// A 404 is an answer, not a missed call, so it is not asked again. The
+			// injection fires once: a second read would find the container, which
+			// is how this case tells the two apart.
+			name:     "the retained container is reported gone",
+			failOnce: map[string]error{"inspect:" + backupName: errDockerNotFound},
+			phase:    "indeterminate",
+			errors:   []string{"retained Docker rollback container is unavailable", "nothing is serving"},
+		},
+		{
+			// Identity was verified and the target name is empty, so the retained
+			// container runs — under its backup name, which the receipt has to say.
 			// Keyed to the BACKUP name: rollback renames backup -> target, while the
-			// forward swap renames target -> backup. An unkeyed injection hits the
-			// forward one and never reaches the branch under test.
-			fail:      map[string]error{"rename:node-agent-upgrade-" + shortTaskID("tsk_docker_upgrade_001"): transportErr},
-			wantError: "retained Docker container could not be restored",
+			// forward swap renames target -> backup.
+			name:      "rename of the retained container back fails",
+			fail:      map[string]error{"rename:" + backupName: &dockerStatusError{Code: http.StatusInternalServerError}},
+			phase:     "indeterminate",
+			errors:    []string{"retained Docker container could not be restored", "still named " + backupName, "rename it back to node-agent before running docker compose up"},
+			running:   backupName,
+			runningID: oldID,
 		},
 		{
-			// :421 — NOT a defect. A start was issued and the engine refused it.
-			name:      "start of the restored container fails",
-			fail:      map[string]error{"start:node-agent": errors.New("engine refused")},
-			wantError: "retained Docker container was restored but could not be started",
+			// UNCHANGED. A start was issued and the engine refused it; asking the
+			// same engine again is not a different answer.
+			name:   "start of the restored container fails",
+			fail:   map[string]error{"start:node-agent": errors.New("engine refused")},
+			phase:  "indeterminate",
+			errors: []string{"retained Docker container was restored but could not be started"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -376,60 +442,232 @@ func TestDockerRollbackFailureBranchesToday(t *testing.T) {
 			controller.options.Poll = time.Millisecond
 			// The upgrade never converges, so a rollback is attempted; the injected
 			// failure then decides which branch of it runs.
-			engine.fail = tc.fail
+			engine.fail, engine.failOnce = tc.fail, tc.failOnce
 
 			if err := controller.processCurrent(t.Context()); err == nil {
-				t.Fatal("an upgrade that could neither converge nor roll back reported success")
+				t.Fatal("an upgrade that never converged reported success")
 			}
+			receipt := readDockerReceipt(t, controller, request)
+			assertDockerReceipt(t, receipt, tc.phase, tc.errors...)
 
-			var receipt Receipt
-			if err := ReadDocument(controller.receiptsDir(), request.Task.ID+".json", &receipt); err != nil {
-				t.Fatal(err)
-			}
-			// TODAY: terminal. This is the half that changes for the retryable cases.
-			if receipt.Phase != "indeterminate" {
-				t.Fatalf("phase = %q, want indeterminate", receipt.Phase)
-			}
-			if receipt.ErrorCode != "agent_upgrade_indeterminate" {
-				t.Fatalf("error code = %q", receipt.ErrorCode)
-			}
-			if !strings.Contains(receipt.Error, tc.wantError) {
-				t.Fatalf("error = %q, want it to contain %q", receipt.Error, tc.wantError)
-			}
-
-			// A TERMINAL PHASE IS THE END OF THE LINE. processCurrent returns nil
-			// and does nothing on every later poll, forever.
-			engine.fail = nil
+			// A TERMINAL PHASE IS THE END OF THE LINE, whichever one it is.
+			// processCurrent returns nil and does nothing on every later poll.
+			engine.fail, engine.failOnce = nil, nil
 			if err := controller.processCurrent(t.Context()); err != nil {
 				t.Fatalf("a later poll on a terminal receipt did something: %v", err)
 			}
-			var after Receipt
-			if err := ReadDocument(controller.receiptsDir(), request.Task.ID+".json", &after); err != nil {
-				t.Fatal(err)
-			}
-			if after.Phase != "indeterminate" {
+			if after := readDockerReceipt(t, controller, request); after.Phase != tc.phase {
 				t.Fatalf("a later poll changed the terminal phase to %q", after.Phase)
 			}
-
-			// AND WHAT IS ACTUALLY RUNNING. This is the assertion that makes the
-			// defect visible rather than described.
-			active, err := engine.InspectContainer(t.Context(), controller.options.TargetName)
-			running := err == nil && active.State.Running
-			if running != tc.wantsRunning {
-				t.Fatalf("running under %q = %v, want %v (err=%v)", controller.options.TargetName, running, tc.wantsRunning, err)
-			}
+			assertOnlyRunning(t, engine, tc.running, tc.runningID)
 		})
 	}
 }
 
-// CHARACTERIZATION: the two remaining terminal branches, reached through recover().
+// THE ROLLBACK OF AN INTERRUPTED SWAP, reached through recover().
 //
-// :403 is the rollback that finds the ORIGINAL container still under the target
-// name, stopped, and cannot start it. :442 is recover() refusing a transaction
-// document it cannot trust. Neither is changed by the rollback fix — :403 already
-// asked the engine to start something, and :442 has nothing identified to act
-// on — so these are pinned to stay exactly as they are.
-func TestDockerRecoveryTerminalBranchesToday(t *testing.T) {
+// The helper can stop anywhere, so recovery starts from whatever the swap left:
+// the original container stopped under its backup name and a replacement under
+// the target name, which may still be running. These are the cases the forward
+// path cannot reach — the stop there always succeeds before the rollback begins.
+func TestDockerRollbackAfterAnInterruptedSwap(t *testing.T) {
+	const (
+		oldID         = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		replacementID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		strangerID    = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	)
+	stopUnconfirmed := map[string]error{"stop:node-agent": errDockerUnavailable}
+
+	t.Run("a replacement whose stop did not finish is forced out", func(t *testing.T) {
+		for _, recorded := range []string{replacementID, ""} {
+			t.Run(map[string]string{replacementID: "recorded", "": "never recorded"}[recorded], func(t *testing.T) {
+				controller, engine, request, receipt := swappedDockerFixture(t, replacementID, recorded)
+				engine.fail = stopUnconfirmed
+				if err := controller.recover(t.Context(), receipt); err == nil {
+					t.Fatal("an interrupted upgrade reported success")
+				}
+				assertDockerReceipt(t, readDockerReceipt(t, controller, request), "failed", "previous managed container restored")
+				assertOnlyRunning(t, engine, "node-agent", oldID)
+				if want := []fakeRemoval{{"node-agent", false}, {"node-agent", true}}; !equalRemovals(engine.removals, want) {
+					t.Fatalf("removals = %+v, want %+v", engine.removals, want)
+				}
+			})
+		}
+	})
+
+	t.Run("a container that is not the recorded replacement is never forced", func(t *testing.T) {
+		controller, engine, request, receipt := swappedDockerFixture(t, strangerID, replacementID)
+		engine.fail = stopUnconfirmed
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
+			"replacement Docker container could not be removed during rollback", "whatever holds the target name was started so the node keeps serving")
+		for _, removal := range engine.removals {
+			if removal.force {
+				t.Fatalf("forced the removal of a container whose identity did not match: %+v", engine.removals)
+			}
+		}
+		// It was not displaced, so it stays the one candidate, and the retained
+		// container is not started beside it.
+		assertOnlyRunning(t, engine, "node-agent", strangerID)
+	})
+
+	t.Run("a replacement that vanished before its removal counts as removed", func(t *testing.T) {
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		engine.onRemove = func(name string) { delete(engine.containers, name) }
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "failed", "previous managed container restored")
+		assertOnlyRunning(t, engine, "node-agent", oldID)
+	})
+
+	t.Run("the retained container is not started beside a replacement it could not displace", func(t *testing.T) {
+		// The first inspect misses, so the removal is skipped by design and the
+		// running replacement still holds the target name when the rename comes.
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		engine.failOnce = map[string]error{"inspect:node-agent": errDockerUnavailable}
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
+			"retained Docker container could not be restored", "whatever holds the target name was started")
+		assertOnlyRunning(t, engine, "node-agent", replacementID)
+	})
+
+	t.Run("a stranger under the backup name is never started", func(t *testing.T) {
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		backupName := "node-agent-upgrade-" + shortTaskID(request.Task.ID)
+		stranger := engine.containers[backupName]
+		stranger.ID = strangerID
+		engine.containers[backupName] = stranger
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		// The replacement was removed before the mismatch was found, so the target
+		// name is empty and the honest outcome is that nothing serves.
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
+			"retained Docker rollback container is unavailable", "nothing is serving")
+		assertOnlyRunning(t, engine, "", "")
+	})
+
+	t.Run("the last-resort start survives a rollback budget spent by a hung call", func(t *testing.T) {
+		defer func(budget time.Duration) { dockerRollbackBudget = budget }(dockerRollbackBudget)
+		dockerRollbackBudget = 20 * time.Millisecond
+		// The stop works but its answer never comes in time, so the removal after
+		// it runs on a spent budget and fails, and the replacement — stopped by
+		// then — is the one candidate. Started on the spent budget, it never would be.
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		engine.slowStop = map[string]bool{"node-agent": true}
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
+			"replacement Docker container could not be removed during rollback",
+			"the replacement container this upgrade created was started so the node keeps serving")
+		assertOnlyRunning(t, engine, "node-agent", replacementID)
+	})
+}
+
+// swappedDockerFixture leaves the engine where an interrupted upgrade leaves it
+// after the swap: the original container stopped under its backup name, and a
+// running container under the target name with identity replacementID. The
+// transaction records recordedID as the replacement — "" when the helper stopped
+// before it could persist one.
+func swappedDockerFixture(t *testing.T, replacementID, recordedID string) (*dockerHelperController, *fakeDockerEngine, Request, Receipt) {
+	t.Helper()
+	controller, engine, request := dockerControllerFixture(t)
+	backupName := controller.options.TargetName + "-upgrade-" + shortTaskID(request.Task.ID)
+	old := engine.containers[controller.options.TargetName]
+	old.Name, old.State.Running = "/"+backupName, false
+	replacement := old
+	replacement.ID, replacement.Name, replacement.State.Running = replacementID, "/"+controller.options.TargetName, true
+	engine.containers = map[string]dockerContainer{backupName: old, controller.options.TargetName: replacement}
+	transaction := dockerTransaction{
+		OldContainerID: old.ID, OldImage: DockerImageRepository + ":beta", BackupName: backupName,
+		NewImageID:     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		NewImage:       DockerImageRepository + ":" + request.Args.Version,
+		NewContainerID: recordedID,
+	}
+	receipt := Receipt{Request: request, Phase: "activating", Result: &Result{Version: request.Args.Version, PreviousVersion: request.Args.ExpectedVersion}}
+	if err := controller.writeTransaction(request.Task.ID, transaction); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.writeReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+	return controller, engine, request, receipt
+}
+
+func readDockerReceipt(t *testing.T, controller *dockerHelperController, request Request) Receipt {
+	t.Helper()
+	var receipt Receipt
+	if err := ReadDocument(controller.receiptsDir(), request.Task.ID+".json", &receipt); err != nil {
+		t.Fatal(err)
+	}
+	return receipt
+}
+
+func assertDockerReceipt(t *testing.T, receipt Receipt, phase string, fragments ...string) {
+	t.Helper()
+	if receipt.Phase != phase {
+		t.Fatalf("phase = %q, want %q (error %q)", receipt.Phase, phase, receipt.Error)
+	}
+	if receipt.Result != nil {
+		t.Fatalf("a rollback receipt carries a result: %+v", receipt.Result)
+	}
+	wantCode := map[string]string{"failed": "agent_upgrade_failed", "indeterminate": "agent_upgrade_indeterminate"}[phase]
+	if receipt.ErrorCode != wantCode {
+		t.Fatalf("error code = %q, want %q", receipt.ErrorCode, wantCode)
+	}
+	for _, fragment := range fragments {
+		if !strings.Contains(receipt.Error, fragment) {
+			t.Fatalf("error = %q, want it to contain %q", receipt.Error, fragment)
+		}
+	}
+}
+
+// assertOnlyRunning checks what is actually running, which is the assertion that
+// makes a stranded node visible rather than described. name == "" means nothing.
+func assertOnlyRunning(t *testing.T, engine *fakeDockerEngine, name, id string) {
+	t.Helper()
+	for containerName, container := range engine.containers {
+		if !container.State.Running {
+			continue
+		}
+		if containerName != name || container.ID != id {
+			t.Fatalf("%q (%s) is running; want only %q (%s)", containerName, container.ID, name, id)
+		}
+	}
+	if name == "" {
+		return
+	}
+	if container, ok := engine.containers[name]; !ok || !container.State.Running {
+		t.Fatalf("nothing is running under %q; want %s", name, id)
+	}
+}
+
+func equalRemovals(got, want []fakeRemoval) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// THE TWO TERMINAL BRANCHES THAT START NOTHING, reached through recover().
+//
+// One is the rollback that finds the ORIGINAL container still under the target
+// name, stopped, and cannot start it. The other is recover() refusing a
+// transaction document it cannot trust. The keep-serving rule does not reach
+// either: the first already asked the engine to start the one container it
+// could, and the second has nothing identified to act on.
+func TestDockerRecoveryTerminalBranches(t *testing.T) {
 	t.Run("the original container cannot be restarted", func(t *testing.T) {
 		controller, engine, request := dockerControllerFixture(t)
 		old := engine.containers[controller.options.TargetName]
