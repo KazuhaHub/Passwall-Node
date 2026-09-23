@@ -395,3 +395,89 @@ func TestDockerRollbackFailureBranchesToday(t *testing.T) {
 		})
 	}
 }
+
+// CHARACTERIZATION: the two remaining terminal branches, reached through recover().
+//
+// :403 is the rollback that finds the ORIGINAL container still under the target
+// name, stopped, and cannot start it. :442 is recover() refusing a transaction
+// document it cannot trust. Neither is changed by the rollback fix — :403 already
+// asked the engine to start something, and :442 has nothing identified to act
+// on — so these are pinned to stay exactly as they are.
+func TestDockerRecoveryTerminalBranchesToday(t *testing.T) {
+	t.Run("the original container cannot be restarted", func(t *testing.T) {
+		controller, engine, request := dockerControllerFixture(t)
+		old := engine.containers[controller.options.TargetName]
+		old.State.Running = false
+		engine.containers[controller.options.TargetName] = old
+		engine.fail = map[string]error{"start:node-agent": errors.New("engine refused")}
+		transaction := dockerTransaction{
+			OldContainerID: old.ID, OldImage: DockerImageRepository + ":beta",
+			BackupName: controller.options.TargetName + "-upgrade-" + shortTaskID(request.Task.ID),
+			NewImageID: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			NewImage:   DockerImageRepository + ":" + request.Args.Version,
+		}
+		receipt := Receipt{Request: request, Phase: "activating", Result: &Result{Version: request.Args.Version, PreviousVersion: request.Args.ExpectedVersion}}
+		if err := controller.writeTransaction(request.Task.ID, transaction); err != nil {
+			t.Fatal(err)
+		}
+		if err := controller.writeReceipt(receipt); err != nil {
+			t.Fatal(err)
+		}
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("a recovery that could not start anything reported success")
+		}
+		var final Receipt
+		if err := ReadDocument(controller.receiptsDir(), request.Task.ID+".json", &final); err != nil {
+			t.Fatal(err)
+		}
+		if final.Phase != "indeterminate" || !strings.Contains(final.Error, "retained Docker container could not be restarted") {
+			t.Fatalf("receipt = %+v", final)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		write func(*dockerHelperController, Request) error
+	}{
+		{"no transaction document", func(*dockerHelperController, Request) error { return nil }},
+		{"an old container id too short to be one", func(c *dockerHelperController, r Request) error {
+			return c.writeTransaction(r.Task.ID, dockerTransaction{
+				OldContainerID: "short", OldImage: DockerImageRepository + ":beta",
+				BackupName: "node-agent-upgrade-" + shortTaskID(r.Task.ID), NewImage: DockerImageRepository + ":" + r.Args.Version,
+			})
+		}},
+		{"an image that is not the official one", func(c *dockerHelperController, r Request) error {
+			return c.writeTransaction(r.Task.ID, dockerTransaction{
+				OldContainerID: strings.Repeat("a", 64), OldImage: "example.com/not-ours:1",
+				BackupName: "node-agent-upgrade-" + shortTaskID(r.Task.ID), NewImage: DockerImageRepository + ":" + r.Args.Version,
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, engine, request := dockerControllerFixture(t)
+			if err := tc.write(controller, request); err != nil {
+				t.Fatal(err)
+			}
+			receipt := Receipt{Request: request, Phase: "activating", Result: &Result{Version: request.Args.Version, PreviousVersion: request.Args.ExpectedVersion}}
+			if err := controller.writeReceipt(receipt); err != nil {
+				t.Fatal(err)
+			}
+			before := engine.containers[controller.options.TargetName]
+			if err := controller.recover(t.Context(), receipt); err == nil {
+				t.Fatal("recovery without a trustworthy transaction reported success")
+			}
+			var final Receipt
+			if err := ReadDocument(controller.receiptsDir(), request.Task.ID+".json", &final); err != nil {
+				t.Fatal(err)
+			}
+			if final.Phase != "indeterminate" || final.Error != "interrupted Docker upgrade has no valid rollback identity" {
+				t.Fatalf("receipt = %+v", final)
+			}
+			// Nothing identified, so nothing touched: whatever the interrupted swap
+			// left is exactly what is left.
+			if after := engine.containers[controller.options.TargetName]; after.ID != before.ID || after.State.Running != before.State.Running {
+				t.Fatalf("recovery acted on a container it could not identify: %+v -> %+v", before, after)
+			}
+		})
+	}
+}
