@@ -13,9 +13,17 @@ env:
   GOWORK: "off"
   GOTOOLCHAIN: "local"
 
+# A PR push supersedes the one before it, so cancelling the older run is right
+# there. A MAIN PUSH IS NOT SUPERSEDED BY THE NEXT MERGE: the group used to be
+# keyed on the ref for both events, so each merge cancelled the run of the merge
+# before it, and 7 of 59 main runs ended cancelled. Branch protection lets a
+# tested PR merge without updating to the latest base, so that run is the only
+# verdict on the merged commit, and a release tag cut from it has no other. A
+# main push and a manual run get a group of their own — `github.run_id` — and
+# cancel nothing.
 concurrency:
-  group: test-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: test-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -24,6 +32,29 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+      # THE BUILD CACHE IS PER JOB, AND setup-go's IS NOT. setup-go keys its cache
+      # on go.sum alone, and a key that exists is never saved again, so every x64
+      # Go job here and in the other workflows restores one entry that whichever
+      # job finished first wrote once: darwin/arm64's objects, 176 MB, frozen.
+      # Everything else compiles from source: the darwin/arm64 leg builds in 5s
+      # and the other five targets take 18-32s, vet takes 35s, and the race job
+      # spends ~47s compiling before its first result. setup-go keeps
+      # `cache: true` for the module cache, which that one entry does serve.
+      # Its restore lands in the same directory after this one, so every entry
+      # saved here carries those darwin/arm64 objects too: quota, not correctness.
+      #
+      # A KEY PER JOB, because a shared key freezes whichever job saved it first.
+      # RESTORED ON EVERY EVENT, SAVED ONLY FROM MAIN: a PR's cache is scoped to
+      # refs/pull/N/merge, so a PR save serves only later pushes to that one PR,
+      # and it costs the upload and the quota main's entries need. The save key
+      # ends in the run id, because a key that exists cannot be written again,
+      # and the restore picks the newest entry by prefix. A prefix restore is
+      # safe because the cache is content-addressed: a stale entry can only miss.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-checks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-checks-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -38,8 +69,10 @@ jobs:
         run: go vet ./...
       - name: Verify pinned build toolchain
         run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
-      - name: Unit and integration tests
-        run: go test -count=1 -timeout=10m ./...
+      # THE FULL SUITE RUNS ONCE, in the race job. No file in this module is built
+      # only without -race, so a plain `go test ./...` here ran the same tests a
+      # second time. The named PTY test below stays: it asserts that one test ran
+      # and passed, which a suite-wide pass does not.
       - name: Require named Linux PTY transfer-meter test to run and pass
         shell: bash
         run: |
@@ -57,10 +90,13 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      - name: Validate container entrypoint
-        run: sh -n docker-entrypoint.sh
       - name: Validate immutable image publishing check
         run: node --test deployment/check_image_test.mjs
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-checks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   race:
     name: race detector
@@ -68,6 +104,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+      # The build cache pair the checks job explains.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-race-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         env:
           GOTOOLCHAIN: auto
@@ -76,6 +118,11 @@ jobs:
           cache: true
       - name: Run race detector
         run: go test -race -count=1 -timeout=15m ./...
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   verify:
     name: test, vet, format
@@ -108,6 +155,13 @@ jobs:
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v6
+      # The build cache pair the checks job explains, one per target: a target's
+      # objects are its own, and the leg that has them builds in about 5s.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -124,6 +178,11 @@ jobs:
         run: |
           go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
           sh deployment/check-build.sh "passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$GITHUB_SHA"
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   upgrade-systemd:
     name: upgrade helper sandbox (${{ matrix.arch }})
@@ -137,6 +196,12 @@ jobs:
           - { runner: ubuntu-24.04-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@v6
+      # The build cache pair the checks job explains.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         env:
           GOTOOLCHAIN: auto
@@ -185,26 +250,39 @@ jobs:
           export PN_E2E_SOURCE_DIR="$GITHUB_WORKSPACE"
           go test -v ./internal/upgrade -run '^TestUpgradeSystemdRealNodeE2E$' -count=1 -timeout=12m | tee "$RUNNER_TEMP/upgrade-node-e2e-tests.log"
           ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/upgrade-node-e2e-tests.log"
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   container:
     name: container
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # A STAMP THAT IS NOT THE DEFAULT, or the identity check proves nothing. The
+      # image used to be built with no build-args, so its label and its binary both
+      # said "dev" and the check compared the Dockerfile's two defaults with each
+      # other. It passed while every -X in the Dockerfile named the pre-/v4 package
+      # and stamped nothing: the linker ignores a -X for a symbol it cannot find.
+      IMAGE_VERSION: 4.0.0
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
+      # NO LAYER CACHE: NOTHING IN IT IS WORTH WHAT EXPORTING IT COSTS. The one
+      # expensive layer is `go build` (21-28s), and it sits after `COPY . .`, so
+      # every commit rebuilds it. What the cache could restore is the golang base
+      # and the module layer: that took 5.9-9.6s, and the run that missed the
+      # module layer downloaded the modules in 3.9s. Exporting the cache took 12.6s
+      # on a PR and 17.6-38.6s on main, and a builder that can export needed
+      # setup-buildx, another 6-14s. So this is the runner's default builder,
+      # which also loads the result into the local image store the checks below
+      # read.
       - name: Build image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile
-          load: true
-          tags: passwall-node:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: docker build --build-arg VERSION="$IMAGE_VERSION" --build-arg COMMIT="$GITHUB_SHA" --tag passwall-node:test .
       - name: Verify image entrypoint, build identity and project license
         run: |
-          docker run --rm passwall-node:test --version
+          test "$(docker run --rm passwall-node:test --version)" = "$IMAGE_VERSION ($GITHUB_SHA)"
           upgrade_info="$(docker run --rm passwall-node:test --upgrade-info)"
           docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
           docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -

@@ -13,9 +13,12 @@ env:
   GOWORK: "off"
   GOTOOLCHAIN: "local"
 
+# Same rule as test.yml, for the same reason: a PR push cancels its predecessor,
+# a main push or a manual run never cancels, because it is the only verdict the
+# merged commit gets.
 concurrency:
-  group: real-core-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: real-core-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   real-core:
@@ -30,6 +33,13 @@ jobs:
           - { runner: ubuntu-24.04-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@v6
+      # The build cache pair test.yml's checks job explains: a key per job and
+      # architecture, restored on every event, saved only from main.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-real-core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-real-core-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -76,3 +86,8 @@ jobs:
             ${{ runner.temp }}/core-acceptance-tests.json
           if-no-files-found: warn
           retention-days: 7
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-real-core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}

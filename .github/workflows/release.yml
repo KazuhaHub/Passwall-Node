@@ -79,7 +79,19 @@ jobs:
           GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
-          cache: true
+          # NO SHARED CACHE IN A PUBLISHING RUN, in any of this workflow's jobs.
+          # setup-go's entry is keyed on go.sum and written by whichever main
+          # push saves it first (test.yml, core-acceptance.yml), and a tag run
+          # restores it. Go trusts what it finds there: the module cache is
+          # checked against go.sum only when a module is downloaded, and a build
+          # object is trusted by its action ID. So one compromised step on a
+          # main push could plant code that is then compiled into the six signed
+          # binaries, the image, and sign-release while it holds the key. The
+          # panel and SAP closed the same path, and
+          # deployment/release_cache_test.go keeps this one closed. It costs
+          # little: the entry held the modules and darwin/arm64's objects, and
+          # the other five legs compiled from source anyway (18-32s).
+          cache: false
       # THE DEFAULT IS A PRE-RELEASE, STATED OR NOT. A release published without an
       # explicit channel goes out as one, because that is the direction a deliberate
       # promotion can correct and the one that cannot move `latest` or
@@ -213,7 +225,8 @@ jobs:
           GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
-          cache: true
+          # Published bytes never come out of a shared cache (see setup).
+          cache: false
       - name: Build daemon
         shell: bash
         env:
@@ -240,17 +253,105 @@ jobs:
           name: passwall-node-${{ matrix.goos }}-${{ matrix.goarch }}
           path: out/passwall-node${{ matrix.ext }}
           if-no-files-found: error
-          retention-days: 1
+          # A WEEK, because both jobs that read these wait for the approval, and
+          # one approval has already taken 11.8h (v4.0.1.3). Re-running failed
+          # jobs does not rebuild, so a binary that expired before the approval
+          # fails the approved job with no way back inside the run.
+          retention-days: 7
+
+  # NOTHING ABOVE ASKS WHETHER THE COMMIT IS ANY GOOD. Setup binds the tag to
+  # the checkout and refuses a re-release; it never asked whether the commit is
+  # on main, or whether Test passed on it. A tag pushed from an unmerged branch,
+  # or onto a main commit whose Test failed or was cancelled, built, signed and
+  # published an immutable release all the same.
+  #
+  # A JOB OF ITS OWN, so the build legs do not wait behind it: it runs beside
+  # them, and only the two publishing jobs need it. The release job asks for its
+  # approval after this passes, so a reviewer is never asked about a commit
+  # whose verdict is still out.
+  gate:
+    name: Require a tested commit on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: setup
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.setup.outputs.sha }}
+          fetch-depth: 0
+      - name: Refuse a commit that is not on main
+        shell: bash
+        env:
+          SHA: ${{ needs.setup.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # MAIN IS FETCHED BY NAME rather than assumed from the checkout, so the
+          # answer is about main as it is now and not about whatever the checkout
+          # happened to bring along.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$SHA" origin/main || {
+            echo "${SHA:0:7} is not on main; a release is cut from a merged commit, never from a branch" >&2
+            exit 1
+          }
+      - name: Refuse a commit the test suite has not passed on main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.setup.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # THE MAIN PUSH'S RUN, AND THE WHOLE RUN'S CONCLUSION. A pull request's
+          # run tested a merge ref rather than this commit, so only the push to
+          # main is a verdict on it. And `test, vet, format` aggregates the checks
+          # and race jobs only; cross-compile, upgrade-systemd and the container
+          # are outside it, and a release needs all of them.
+          #
+          # IT WAITS, BOUNDED, because the tag usually arrives first: v4.0.1.5's
+          # release started 51s after Test on the same commit, which then took
+          # 114s. Main runs take 82-371s; the bound is 25 minutes, above the
+          # slowest Test job's own 20-minute timeout. Any other conclusion fails
+          # at once. A cancelled or failed run is re-run in Test first, and then
+          # this workflow's failed jobs are re-run; nothing is re-tagged.
+          for _ in $(seq 1 50); do
+            verdict=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow test.yml \
+              --commit "$SHA" --branch main --event push --limit 1 \
+              --json status,conclusion \
+              --jq '.[0] | "\(.status // "none") \(.conclusion // "")"')
+            case "$verdict" in
+              "completed success")
+                echo "Test passed on ${SHA:0:7}"
+                exit 0
+                ;;
+              completed*)
+                echo "Test on ${SHA:0:7} concluded ${verdict#completed }; re-run it, then re-run this workflow's failed jobs" >&2
+                exit 1
+                ;;
+            esac
+            sleep 30
+          done
+          # NO RUN AT ALL IS NOT A SLOW RUN, and re-running Test cannot help it.
+          # A push runs Test on its head commit only, so a commit that was not
+          # the head of its push to main, or skipped CI, never gets a verdict.
+          if [ "$verdict" = "none " ]; then
+            echo "no push to main ran Test on ${SHA:0:7} in 25 minutes; only the head commit of a push gets a run, so release a commit that was one" >&2
+          else
+            echo "Test did not finish on ${SHA:0:7} within 25 minutes (last seen: ${verdict})" >&2
+          fi
+          exit 1
 
   release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [setup, build]
+    needs: [setup, build, gate]
     # The private signing key is scoped to this protected environment. Approve
     # only after reviewing the exact tag plus signing code/workflow diff;
     # release assets remain unusable by native auto-upgrade until this job
-    # signs their manifest.
+    # signs their manifest. The image job waits for this one, so the same
+    # approval releases the image and moves its pointers.
     environment: release-signing
     permissions:
       contents: write
@@ -263,7 +364,8 @@ jobs:
           GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
-          cache: true
+          # This job compiles sign-release next to the key; see setup.
+          cache: false
       - name: Download binaries
         uses: actions/download-artifact@v8
         with:
@@ -329,8 +431,23 @@ jobs:
           go run ./deployment/cmd/sign-release \
             -manifest dist/SHA256SUMS.txt \
             -output dist/SHA256SUMS.txt.sig
+      # PINNED TO A COMMIT, because this job holds the signing key. Every secret
+      # a job references is handed to the runner when the job starts, and a
+      # later step can read it back out of the runner's memory, which is how the
+      # 2025 tj-actions compromise dumped its victims' secrets into their logs.
+      # A major tag is a pointer its owner can move; a commit is not.
+      #
+      # NOT `gh release create`, although that would take third-party code out
+      # of this job altogether, because the two differ after a failure. This
+      # action finds an existing release for the tag, appends regenerated notes,
+      # resets the prerelease flag, and uploads only the assets it lacks; gh
+      # refuses a published release and deletes its own draft when an upload
+      # fails. This action also publishes a pre-release before its assets
+      # upload, where gh publishes after them. Swapping one for the other
+      # changes how a failed release is recovered, which is a decision to make
+      # on purpose rather than as part of a pin.
       - name: Publish release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ needs.setup.outputs.tag }}
           target_commitish: ${{ needs.setup.outputs.sha }}
@@ -344,11 +461,26 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # AFTER THE SIGNED RELEASE, NOT BESIDE IT. This job has no environment, and it
+  # used to need only the builds, so the image, `beta` and — on a stable
+  # dispatch — `latest` moved as soon as the builds finished, before anyone
+  # approved anything: v4.0.1.3's `beta` pointed for 11h46m at an image with no
+  # release and no signed manifest while the approval waited. Moving a pointer
+  # consumers follow is the same decision as publishing, which is why
+  # promote.yml sits behind the same environment; here the image waits for the
+  # approved release instead. A rejected or expired approval leaves no image
+  # behind, so the re-run finds the exact tag still absent and the check below
+  # lets it through.
+  #
+  # THE ORDER HAS A WINDOW OF ITS OWN, the harmless way round. If this job
+  # fails, the release stays published with no image, and `beta` and `latest`
+  # stay where they were, until the failed job is re-run. A pull of the new
+  # version fails meanwhile; no pointer names an image nobody approved.
   docker:
     name: Publish container image
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [setup, build]
+    needs: [setup, build, gate, release]
     permissions:
       contents: read
       packages: write
@@ -366,16 +498,19 @@ jobs:
         with:
           name: passwall-node-linux-arm64
           path: bin/linux-arm64
-      - uses: docker/setup-buildx-action@v4
+      # The docker/* actions are pinned to commits for the release action's
+      # reason, with a smaller prize: this job's token can write packages.
+      # Dependabot moves each commit and its version comment together.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ needs.setup.outputs.owner_lc }}/passwall-node
           tags: |
@@ -410,7 +545,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.setup.outputs.version }}
         run: node deployment/check-image.mjs "$IMAGE_REPOSITORY" "$RELEASE_VERSION"
       - name: Build and push multi-arch image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.release

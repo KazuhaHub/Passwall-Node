@@ -319,10 +319,17 @@ go test -race ./...
 go vet ./...
 ```
 
-CI repeats those checks, cross-compiles `cmd/node` for six targets, and builds
-the container. A `v*` tag publishes archives plus `SHA256SUMS.txt` and a
-multi-architecture GHCR image. `:latest` is stable-only; `:beta` follows the
-newest release of either stability class.
+CI runs the suite once, under the race detector, vets it, cross-compiles
+`cmd/node` for six targets, and builds the container. A `v*` tag publishes
+archives plus `SHA256SUMS.txt` and a multi-architecture GHCR image. `:latest`
+is stable-only; `:beta` follows the newest release of either stability class.
+The tagged commit must be on `main`, and its Test run there must have
+succeeded; the release waits for that run and refuses any other conclusion, so
+a cancelled or failed run is re-run first.
+The image, and with it `:beta` or `:latest`, is pushed only after the approved,
+signed release is published. If the image job fails, the release stays
+published without an image, and the pointers stay where they were, until that
+failed job is re-run.
 
 ## Contract harness
 

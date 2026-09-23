@@ -18,9 +18,9 @@ RUN target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${target_arch}" \
     go build -trimpath \
       -ldflags="-s -w \
-        -X github.com/KazuhaHub/passwall-node/internal/version.Version=${VERSION} \
-        -X github.com/KazuhaHub/passwall-node/internal/version.Commit=${COMMIT} \
-        -X github.com/KazuhaHub/passwall-node/internal/version.BuildDate=${BUILD_DATE}" \
+        -X github.com/KazuhaHub/passwall-node/v4/internal/version.Version=${VERSION} \
+        -X github.com/KazuhaHub/passwall-node/v4/internal/version.Commit=${COMMIT} \
+        -X github.com/KazuhaHub/passwall-node/v4/internal/version.BuildDate=${BUILD_DATE}" \
       -o /out/passwall-node ./cmd/node
 
 # The entrypoint starts as root only to turn a read-only Docker secret into the
