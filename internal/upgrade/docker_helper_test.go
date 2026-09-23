@@ -308,9 +308,11 @@ func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDocker
 	old := dockerContainer{
 		ID:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Name: "/node-agent", Config: config, HostConfig: host,
+		// Bind mounts, as compose.example.yaml creates them: the fixture is the
+		// installation the project ships, not the one the validator used to want.
 		Mounts: []dockerMount{
-			{Type: "volume", Name: "data", Destination: DockerDataDir, RW: true},
-			{Type: "volume", Name: "control", Destination: DockerControlDir, RW: true},
+			{Type: "bind", Source: "/srv/passwall-node/data", Destination: DockerDataDir, RW: true},
+			{Type: "bind", Source: "/srv/passwall-node/upgrades", Destination: DockerControlDir, RW: true},
 		},
 	}
 	old.State.Running = true
@@ -810,4 +812,117 @@ func TestDockerHelperHeartbeatSurvivesALongUpgrade(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	close(release)
+}
+
+// THE SHIPPED EXAMPLE MUST BE UPGRADEABLE.
+//
+// The validator once accepted only named volumes, while compose.example.yaml —
+// pinned by deployment/baseline_test.go to project-directory bind mounts — never
+// used one. Each side was tested alone, so every installation that followed the
+// example was refused at the first remote upgrade and nothing failed. This test
+// derives the mounts from the example itself, so the two cannot drift apart again.
+func TestDockerUpgradeAcceptsTheExampleComposeInstallation(t *testing.T) {
+	controller, engine, request := dockerControllerFixture(t)
+	old := engine.containers[controller.options.TargetName]
+	old.Mounts = composeExampleAgentMounts(t)
+	engine.containers[controller.options.TargetName] = old
+	engine.onStart = func(name string) {
+		if name != controller.options.TargetName {
+			return
+		}
+		receipt := readDockerReceipt(t, controller, request)
+		ready := Ready{
+			TaskID: request.Task.ID, InputSHA256: request.Task.InputSHA256, Version: request.Args.Version,
+			ActivationNonce: receipt.ActivationNonce, PID: 1,
+			BinarySHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		}
+		if err := AtomicDocument(controller.requestsDir(), request.Task.ID+".ready.json", ready, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := controller.processCurrent(t.Context()); err != nil {
+		t.Fatalf("an installation made from compose.example.yaml was refused: %v", err)
+	}
+	if receipt := readDockerReceipt(t, controller, request); receipt.Phase != "succeeded" {
+		t.Fatalf("receipt = %+v", receipt)
+	}
+	// The replacement inherits HostConfig whole, so the same host directories
+	// carry the state across the swap.
+	replacement := engine.containers[controller.options.TargetName]
+	if len(replacement.Mounts) != len(old.Mounts) {
+		t.Fatalf("replacement mounts = %+v, want %+v", replacement.Mounts, old.Mounts)
+	}
+}
+
+// What the validator is really checking is that the agent's state and its
+// upgrade-control directory OUTLIVE THE CONTAINER, because the upgrade replaces
+// it. A named volume and a bind mount both do; a tmpfs does not, and a read-only
+// mount cannot be written by the replacement.
+func TestDockerValidatorRequiresPersistentWritableStateMounts(t *testing.T) {
+	volume := func(destination string) dockerMount {
+		return dockerMount{Type: "volume", Name: "state", Destination: destination, RW: true}
+	}
+	bind := func(destination string) dockerMount {
+		return dockerMount{Type: "bind", Source: "/srv/passwall-node/state", Destination: destination, RW: true}
+	}
+	for _, tc := range []struct {
+		name   string
+		mounts []dockerMount
+		ok     bool
+	}{
+		{"named volumes", []dockerMount{volume(DockerDataDir), volume(DockerControlDir)}, true},
+		{"bind mounts", []dockerMount{bind(DockerDataDir), bind(DockerControlDir)}, true},
+		{"one of each", []dockerMount{bind(DockerDataDir), volume(DockerControlDir)}, true},
+		{"a tmpfs data directory", []dockerMount{{Type: "tmpfs", Destination: DockerDataDir, RW: true}, bind(DockerControlDir)}, false},
+		{"a read-only control mount", []dockerMount{bind(DockerDataDir), {Type: "bind", Source: "/srv/u", Destination: DockerControlDir}}, false},
+		{"no control mount", []dockerMount{bind(DockerDataDir)}, false},
+		{"the Docker socket beside valid mounts", []dockerMount{bind(DockerDataDir), bind(DockerControlDir), bind(dockerSocket)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, engine, _ := dockerControllerFixture(t)
+			container := engine.containers[controller.options.TargetName]
+			container.Mounts = tc.mounts
+			_, err := controller.validateContainer(container, "4.1.0")
+			if (err == nil) != tc.ok {
+				t.Fatalf("validateContainer = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}
+
+// composeExampleAgentMounts returns what Docker reports in .Mounts for the agent
+// service's project-directory volumes in the shipped compose.example.yaml. Its
+// tmpfs entries are HostConfig.Tmpfs, which Docker does not list there.
+func composeExampleAgentMounts(t *testing.T) []dockerMount {
+	t.Helper()
+	data, err := os.ReadFile("../../compose.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	start, end := strings.Index(text, "\n  passwall-node:\n"), strings.Index(text, "\n  passwall-node-updater:\n")
+	if start < 0 || end < start {
+		t.Fatal("compose.example.yaml no longer has the agent service followed by the updater")
+	}
+	var mounts []dockerMount
+	destinations := map[string]bool{}
+	for _, line := range strings.Split(text[start:end], "\n") {
+		entry, ok := strings.CutPrefix(strings.TrimSpace(line), "- ./")
+		if !ok {
+			continue
+		}
+		parts := strings.Split(entry, ":")
+		if len(parts) < 2 {
+			t.Fatalf("unrecognised volume line %q", line)
+		}
+		mounts = append(mounts, dockerMount{
+			Type: "bind", Source: "/srv/passwall-node/" + parts[0], Destination: parts[1],
+			RW: len(parts) < 3 || parts[2] != "ro",
+		})
+		destinations[parts[1]] = true
+	}
+	if !destinations[DockerDataDir] || !destinations[DockerControlDir] {
+		t.Fatalf("compose.example.yaml agent mounts %+v no longer include %s and %s as project-directory binds", mounts, DockerDataDir, DockerControlDir)
+	}
+	return mounts
 }

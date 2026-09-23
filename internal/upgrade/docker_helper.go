@@ -344,20 +344,28 @@ func (c *dockerHelperController) validateContainer(container dockerContainer, ex
 		!containsEnv(config.Env, "PSP_NODE_DOCKER_REMOTE_UPGRADE", "true") {
 		return config, errors.New("managed Docker container environment is not upgrade-enabled")
 	}
+	// THE STATE HAS TO OUTLIVE THE CONTAINER, because the upgrade replaces it.
+	// A named volume and a bind mount both do, and compose.example.yaml uses bind
+	// mounts; accepting only volumes refused every installation made from it. A
+	// tmpfs does not persist, and a read-only mount cannot be written by the
+	// replacement, so both are still refused.
+	persistent := func(mount dockerMount) bool {
+		return (mount.Type == "volume" || mount.Type == "bind") && mount.RW
+	}
 	data, control := false, false
 	for _, mount := range container.Mounts {
 		if mount.Destination == dockerSocket {
 			return config, errors.New("network-facing node container must not receive the Docker socket")
 		}
-		if mount.Type == "volume" && mount.RW && mount.Destination == DockerDataDir {
+		if persistent(mount) && mount.Destination == DockerDataDir {
 			data = true
 		}
-		if mount.Type == "volume" && mount.RW && mount.Destination == DockerControlDir {
+		if persistent(mount) && mount.Destination == DockerControlDir {
 			control = true
 		}
 	}
 	if !data || !control {
-		return config, errors.New("managed Docker data and upgrade-control volumes are missing")
+		return config, errors.New("managed Docker data and upgrade-control mounts are missing or not persistent")
 	}
 	return config, nil
 }
