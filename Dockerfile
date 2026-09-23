@@ -1,6 +1,6 @@
 # Build the production daemon as a static Linux binary. BuildKit supplies
 # TARGETOS/TARGETARCH for ordinary and multi-platform builds.
-FROM golang:1.26.8-alpine3.24 AS builder
+FROM golang:1.27.0-alpine3.24 AS builder
 ENV GOTOOLCHAIN=local GOWORK=off
 WORKDIR /src
 
