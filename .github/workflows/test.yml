@@ -280,16 +280,42 @@ jobs:
       # read.
       - name: Build image
         run: docker build --build-arg VERSION="$IMAGE_VERSION" --build-arg COMMIT="$GITHUB_SHA" --tag passwall-node:test .
+      # THE IMAGE THAT SHIPS IS BUILT FROM Dockerfile.release, and until this step
+      # only a tag ever built it. Its runtime stage is a near-copy of Dockerfile's
+      # (a diff shows the ARG handling and the COPY source), so a fix made to one
+      # and not the other was proven here on the recipe that does not ship. It is
+      # built the way release.yml builds it — the prebuilt linux binary under
+      # bin/linux-${TARGETARCH}/, the version, schema and contract as build-args —
+      # from the binary the image above already compiled, so it costs a docker cp
+      # and one alpine layer (about 10s) rather than a second Go build.
+      - name: Build the release recipe from the same binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin/linux-amd64
+          compiled=$(docker create passwall-node:test)
+          docker cp "$compiled:/usr/local/bin/passwall-node" bin/linux-amd64/passwall-node
+          docker rm "$compiled" > /dev/null
+          upgrade_info="$(docker run --rm passwall-node:test --upgrade-info)"
+          docker build --file Dockerfile.release \
+            --build-arg VERSION="$IMAGE_VERSION" \
+            --build-arg STATE_SCHEMA="$(printf '%s' "$upgrade_info" | jq -er .state_schema)" \
+            --build-arg UPGRADE_CONTRACT="$(printf '%s' "$upgrade_info" | jq -er .upgrade_contract)" \
+            --tag passwall-node:release .
+          # BuildKit picked the binary by TARGETARCH, and it is this one.
+          docker run --rm --entrypoint cat passwall-node:release /usr/local/bin/passwall-node | cmp bin/linux-amd64/passwall-node -
       - name: Verify image entrypoint, build identity and project license
         run: |
-          test "$(docker run --rm passwall-node:test --version)" = "$IMAGE_VERSION ($GITHUB_SHA)"
-          upgrade_info="$(docker run --rm passwall-node:test --upgrade-info)"
-          docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
-          docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' passwall-node:test)" = "Apache-2.0"
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .version)"
-          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
-          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
+          for image in passwall-node:test passwall-node:release; do
+            test "$(docker run --rm "$image" --version)" = "$IMAGE_VERSION ($GITHUB_SHA)"
+            upgrade_info="$(docker run --rm "$image" --upgrade-info)"
+            docker run --rm --entrypoint cat "$image" /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
+            docker run --rm --entrypoint cat "$image" /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image")" = "Apache-2.0"
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .version)"
+            test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
+            test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
+          done
       - name: Verify BusyBox entrypoint with directory bind mounts
         shell: bash
         run: |
