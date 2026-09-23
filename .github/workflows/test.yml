@@ -328,16 +328,22 @@ jobs:
           # NAS produces. Without this mode the check ran with a world-readable file
           # and could not see that reading the mounted credential needs DAC_OVERRIDE.
           chmod 0600 "$fixture/config/node-credential.txt"
+          # EVERY LINE OF THE STAND-IN IS AN ASSERTION, AND `set -e` IS WHAT MAKES IT
+          # ONE. Without it a failed `test` was a status nobody read and the ready
+          # marker was written anyway, so none of these could fail the check. `-x`
+          # puts the line that failed, with its values, in the container's log.
           cat > "$fixture/fake-node" <<'SCRIPT'
           #!/bin/sh
+          set -eux
           test "$(id -u):$(id -g)" = 10001:10001
           test -w /var/lib/passwall-node
+          # Root keeps the runtime directory and the agent can only traverse it.
+          test "$(stat -c '%u:%a' /run/passwall-node)" = "0:711"
           # THE HAND-OFF ITSELF, asserted from the side that depends on it. 0600 by the
           # service account is the one shape both ends agree on: the agent refuses a
           # credential with any group or other bit, and root here cannot write a file
           # the service account owns.
           test "$(stat -c '%u:%a' /run/passwall-node/credential)" = "10001:600"
-          cmp /run/passwall-node/credential /run/secrets/passwall-node/node-credential.txt
           touch /var/lib/passwall-node/entrypoint-ready
           exec sleep 30
           SCRIPT
@@ -382,3 +388,7 @@ jobs:
             exit 1
           fi
           test "$(stat -c %u:%g "$fixture/data")" = 10001:10001
+          # THE COPY IS THE MOUNTED CREDENTIAL, compared by the container's root. The
+          # agent cannot make this comparison, which is the point of the mode: the
+          # mounted file is 0600 and belongs to the account that installed it.
+          docker exec "$container" cmp /run/passwall-node/credential /run/secrets/passwall-node/node-credential.txt
