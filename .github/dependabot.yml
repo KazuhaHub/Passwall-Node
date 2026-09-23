@@ -1,0 +1,53 @@
+# Dependency updates for passwall-node.
+#
+# This file is the only thing that keeps dependencies moving on a schedule.
+# govulncheck in test.yml reports only what the Go vulnerability database
+# already knows, and only when a push or a PR happens to run it. The panel
+# learned what that leaves out: GHSA-qhrp-hfff-vphr was in neither the Go
+# database nor the GitHub Advisory Database, so every scanner reported clean
+# while the panel was affected. Routine version updates close that gap because
+# they do not wait for an advisory. This daemon is the network-facing half of
+# the product, running on every operator's host, so the gap matters more here.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+    groups:
+      # Everything else can land together to keep PR noise down.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+        exclude-patterns:
+          - "github.com/KazuhaHub/passwall-protocol"
+          - "google.golang.org/grpc"
+          - "golang.org/x/net"
+    # Each of these gets a PR of its own, never buried in a batch.
+    # passwall-protocol is the wire contract with the panel, so a bump is a
+    # contract change. grpc and x/net are the network stack the node exposes.
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    # A MAJOR BUMP OF actions/setup-go FAILS TestBuildBaselinesStayAligned, and
+    # that is deliberate. deployment/baseline_test.go pins the major because how
+    # setup-go chooses a toolchain under GOTOOLCHAIN=local is a behaviour of that
+    # major. Such a PR is a conscious edit of the guard, not a merge.
+
+  - package-ecosystem: docker
+    # One directory covers both Dockerfile and Dockerfile.release.
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "docker"
+    # A golang builder bump fails TestBuildBaselinesStayAligned until go.mod's
+    # toolchain moves with it. The two name one compiler, so they change together.
