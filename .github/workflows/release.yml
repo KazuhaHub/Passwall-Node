@@ -242,11 +242,94 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # NOTHING ABOVE ASKS WHETHER THE COMMIT IS ANY GOOD. Setup binds the tag to
+  # the checkout and refuses a re-release; it never asked whether the commit is
+  # on main, or whether Test passed on it. A tag pushed from an unmerged branch,
+  # or onto a main commit whose Test failed or was cancelled, built, signed and
+  # published an immutable release all the same.
+  #
+  # A JOB OF ITS OWN, so the build legs do not wait behind it: it runs beside
+  # them, and only the two publishing jobs need it. The release job asks for its
+  # approval after this passes, so a reviewer is never asked about a commit
+  # whose verdict is still out.
+  gate:
+    name: Require a tested commit on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: setup
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.setup.outputs.sha }}
+          fetch-depth: 0
+      - name: Refuse a commit that is not on main
+        shell: bash
+        env:
+          SHA: ${{ needs.setup.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # MAIN IS FETCHED BY NAME rather than assumed from the checkout, so the
+          # answer is about main as it is now and not about whatever the checkout
+          # happened to bring along.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$SHA" origin/main || {
+            echo "${SHA:0:7} is not on main; a release is cut from a merged commit, never from a branch" >&2
+            exit 1
+          }
+      - name: Refuse a commit the test suite has not passed on main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.setup.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # THE MAIN PUSH'S RUN, AND THE WHOLE RUN'S CONCLUSION. A pull request's
+          # run tested a merge ref rather than this commit, so only the push to
+          # main is a verdict on it. And `test, vet, format` aggregates the checks
+          # and race jobs only; cross-compile, upgrade-systemd and the container
+          # are outside it, and a release needs all of them.
+          #
+          # IT WAITS, BOUNDED, because the tag usually arrives first: v4.0.1.5's
+          # release started 51s after Test on the same commit, which then took
+          # 114s. Main runs take 82-371s; the bound is 25 minutes, above the
+          # slowest Test job's own 20-minute timeout. Any other conclusion fails
+          # at once. A cancelled or failed run is re-run in Test first, and then
+          # this workflow's failed jobs are re-run; nothing is re-tagged.
+          for _ in $(seq 1 50); do
+            verdict=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow test.yml \
+              --commit "$SHA" --branch main --event push --limit 1 \
+              --json status,conclusion \
+              --jq '.[0] | "\(.status // "none") \(.conclusion // "")"')
+            case "$verdict" in
+              "completed success")
+                echo "Test passed on ${SHA:0:7}"
+                exit 0
+                ;;
+              completed*)
+                echo "Test on ${SHA:0:7} concluded ${verdict#completed }; re-run it, then re-run this workflow's failed jobs" >&2
+                exit 1
+                ;;
+            esac
+            sleep 30
+          done
+          # NO RUN AT ALL IS NOT A SLOW RUN, and re-running Test cannot help it.
+          # A push runs Test on its head commit only, so a commit that was not
+          # the head of its push to main, or skipped CI, never gets a verdict.
+          if [ "$verdict" = "none " ]; then
+            echo "no push to main ran Test on ${SHA:0:7} in 25 minutes; only the head commit of a push gets a run, so release a commit that was one" >&2
+          else
+            echo "Test did not finish on ${SHA:0:7} within 25 minutes (last seen: ${verdict})" >&2
+          fi
+          exit 1
+
   release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [setup, build]
+    needs: [setup, build, gate]
     # The private signing key is scoped to this protected environment. Approve
     # only after reviewing the exact tag plus signing code/workflow diff;
     # release assets remain unusable by native auto-upgrade until this job
@@ -348,7 +431,7 @@ jobs:
     name: Publish container image
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [setup, build]
+    needs: [setup, build, gate]
     permissions:
       contents: read
       packages: write

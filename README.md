@@ -323,6 +323,9 @@ CI runs the suite once, under the race detector, vets it, cross-compiles
 `cmd/node` for six targets, and builds the container. A `v*` tag publishes
 archives plus `SHA256SUMS.txt` and a multi-architecture GHCR image. `:latest`
 is stable-only; `:beta` follows the newest release of either stability class.
+The tagged commit must be on `main`, and its Test run there must have
+succeeded; the release waits for that run and refuses any other conclusion, so
+a cancelled or failed run is re-run first.
 
 ## Contract harness
 
