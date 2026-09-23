@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,54 @@ import (
 const dockerAPIVersion = "v1.41"
 
 var errDockerNotFound = errors.New("Docker object not found")
+
+// THE ENGINE'S FAILURES ARE NOT ALL THE SAME KIND, and rollback has to be able to
+// tell them apart. A 404 says the object is not there, which a second attempt
+// will not change. A transport failure, a 5xx or a truncated body says the engine
+// could not answer THIS call, which a second attempt very often will. These used
+// to be one opaque string each, so a caller holding one could only treat every
+// failure as final — and in rollback, final means the node stays stopped.
+//
+// The messages are unchanged: nothing matched on them, and keeping them
+// byte-identical keeps this change invisible to everything except the classifier.
+var (
+	// errDockerUnavailable is the request never getting an HTTP answer.
+	errDockerUnavailable = errors.New("Docker Engine request failed")
+	// errDockerInvalidResponse is an answer that could not be decoded, which on a
+	// local socket is almost always a response cut short.
+	errDockerInvalidResponse = errors.New("Docker Engine response was invalid")
+)
+
+// dockerStatusError is an HTTP status the call did not accept. It is a type
+// rather than a formatted string so a caller can read the code: 409 and 503 mean
+// very different things to a rollback.
+type dockerStatusError struct{ Code int }
+
+func (e *dockerStatusError) Error() string {
+	return fmt.Sprintf("Docker Engine returned HTTP %d", e.Code)
+}
+
+// dockerTransient reports whether an engine failure may clear by itself.
+//
+// 409 IS TRANSIENT HERE, and that is specific to how this package calls the
+// engine. RemoveContainer is issued with force=false, so removing a container
+// whose preceding stop had not finished — rollback discards that stop's error —
+// answers 409, as does a removal the engine already has in progress. Both resolve
+// without anyone doing anything. A caller that needs 409 to be final must not use
+// this.
+//
+// An error this does not recognise is NOT transient. The classification exists to
+// spend retries on failures known to be worth retrying, not to retry everything.
+func dockerTransient(err error) bool {
+	if errors.Is(err, errDockerUnavailable) || errors.Is(err, errDockerInvalidResponse) {
+		return true
+	}
+	var status *dockerStatusError
+	if errors.As(err, &status) {
+		return status.Code == http.StatusConflict || status.Code >= 500
+	}
+	return false
+}
 
 type dockerMount struct {
 	Type        string `json:"Type"`
@@ -72,7 +121,11 @@ type dockerEngine interface {
 	StartContainer(context.Context, string) error
 	RenameContainer(context.Context, string, string) error
 	CreateReplacement(context.Context, string, dockerContainer, dockerImage, string) (string, error)
-	RemoveContainer(context.Context, string) error
+	// RemoveContainer removes a container. force=false is refused with 409 while
+	// the container is running, which is the behaviour almost every caller wants;
+	// force=true removes it regardless and is reserved for a caller that has
+	// already established the container's identity.
+	RemoveContainer(ctx context.Context, name string, force bool) error
 }
 
 type dockerHTTP struct {
@@ -166,8 +219,8 @@ func (d *dockerHTTP) RenameContainer(ctx context.Context, name, replacement stri
 	return d.call(ctx, http.MethodPost, path, nil, []int{http.StatusNoContent}, nil)
 }
 
-func (d *dockerHTTP) RemoveContainer(ctx context.Context, name string) error {
-	return d.call(ctx, http.MethodDelete, "/"+dockerAPIVersion+"/containers/"+url.PathEscape(name)+"?v=false&force=false", nil,
+func (d *dockerHTTP) RemoveContainer(ctx context.Context, name string, force bool) error {
+	return d.call(ctx, http.MethodDelete, "/"+dockerAPIVersion+"/containers/"+url.PathEscape(name)+"?v=false&force="+strconv.FormatBool(force), nil,
 		[]int{http.StatusNoContent}, nil)
 }
 
@@ -220,7 +273,7 @@ func (d *dockerHTTP) call(ctx context.Context, method, path string, body io.Read
 	}
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return errors.New("Docker Engine request failed")
+		return errDockerUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -232,7 +285,7 @@ func (d *dockerHTTP) call(ctx context.Context, method, path string, body io.Read
 	}
 	if !valid {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("Docker Engine returned HTTP %d", resp.StatusCode)
+		return &dockerStatusError{Code: resp.StatusCode}
 	}
 	if output == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -240,7 +293,7 @@ func (d *dockerHTTP) call(ctx context.Context, method, path string, body io.Read
 	}
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, (2<<20)+1))
 	if err := decoder.Decode(output); err != nil {
-		return errors.New("Docker Engine response was invalid")
+		return errDockerInvalidResponse
 	}
 	return nil
 }

@@ -163,6 +163,13 @@ only on a trusted node host. It accepts official exact release tags, retains the
 stopped previous container, and commits only after the replacement Agent has
 authenticated to PSP and converged its core configuration. A failed or timed-out
 replacement is removed and the retained container is restored automatically.
+If the Docker Engine fails part-way through that rollback, the task ends
+`indeterminate` for an operator to inspect, but the updater first starts one
+container so the node keeps serving and can report; the task's error names it.
+When that is the previous container still running under its
+`passwall-node-agent-upgrade-…` backup name, rename it back to
+`passwall-node-agent` before the next `docker compose up`. Otherwise Compose
+starts a second Agent with the same identity beside it.
 
 On Linux hosts where unprivileged processes cannot bind ports below 1024, use
 listener ports at or above 1024 or deliberately configure the host's
@@ -391,7 +398,13 @@ It is checked again after backup preparation, immediately before stopping the
 daemon. Customized systemd drop-ins or an unverified current service process
 require manual maintenance and are rejected before downloading or stopping it.
 Download failures leave the running agent untouched. Startup/readiness failures
-restore the retained previous managed files and restart them; interrupted tasks
+restore the retained previous managed files and restart them. If that restore
+itself cannot run — a full disk, an I/O error — the outcome is indeterminate and
+needs a person, but the daemon is still brought back first: what is installed at
+that point is either the retained previous release or a target that already
+passed the signed manifest, its exact digest and its own version self-report, and
+one of those running beats the node sitting stopped. A binary matching neither is
+not started. Interrupted tasks
 read durable receipts rather than blindly download/execute again. **Only equal
 state schemas and upgrade-contract versions support automatic upgrade/rollback.**
 Changes to either require manual maintenance. No database/VM snapshot framework

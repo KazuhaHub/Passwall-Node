@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,8 +33,16 @@ type dockerHelperOptions struct {
 	Clock      func() (string, int64, error)
 	Poll       time.Duration
 	ReadyWait  time.Duration
-	Logger     *log.Logger
+	// HeartbeatInterval is how often the helper proves it is alive. Zero means
+	// the production interval; tests shorten it to observe the heartbeat moving
+	// while an upgrade is in progress.
+	HeartbeatInterval time.Duration
+	Logger            *log.Logger
 }
+
+// dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
+// (validateDockerUpgradeControl), so one missed tick is not a stale heartbeat.
+const dockerHeartbeatInterval = 5 * time.Second
 
 type dockerHelperController struct{ options dockerHelperOptions }
 
@@ -137,18 +146,57 @@ func ensureDockerDirectory(path string, uid, gid uint32, mode os.FileMode) error
 }
 
 func (c *dockerHelperController) run(ctx context.Context) error {
+	// THE HEARTBEAT HAS ITS OWN GOROUTINE, because an upgrade holds the main loop
+	// for minutes and the heartbeat is what the upgrade depends on.
+	//
+	// It used to share one select with processCurrent, which is synchronous. A
+	// Docker upgrade inside processCurrent pulls the target image, swaps the
+	// containers and then waits up to ReadyWait for the new agent to prove itself
+	// — and the new agent, when it starts, checks this very file and refuses to
+	// construct its upgrade client if it is older than 30 seconds
+	// (cmd/node/upgrade_linux.go validateDockerUpgradeControl, called from
+	// dockerRemoteUpgradeEnabled at startup). Without the client it never wires
+	// OnSynced, so it never writes the Ready document the helper is waiting for.
+	//
+	// So an image pull that took longer than about half a minute turned every
+	// upgrade into a rollback, and a rollback into a manual_attention result,
+	// because the restored agent started with the heartbeat just as stale. The
+	// helper was starving the one signal its own transaction needed.
+	//
+	// A failed write still stops the helper, as it always did: an updater that
+	// cannot prove it is alive must not keep accepting upgrades. The error only
+	// reaches the loop once processCurrent returns, which is the same moment it
+	// could have been acted on before.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	interval := c.options.HeartbeatInterval
+	if interval <= 0 {
+		interval = dockerHeartbeatInterval
+	}
+	heartbeatFailed := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := c.writeHeartbeat(); err != nil {
+					heartbeatFailed <- err
+					return
+				}
+			}
+		}
+	}()
 	poll := time.NewTicker(c.options.Poll)
-	heartbeat := time.NewTicker(5 * time.Second)
 	defer poll.Stop()
-	defer heartbeat.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-heartbeat.C:
-			if err := c.writeHeartbeat(); err != nil {
-				return err
-			}
+		case err := <-heartbeatFailed:
+			return err
 		case <-poll.C:
 			if err := c.processCurrent(ctx); err != nil && !errors.Is(err, os.ErrNotExist) {
 				c.options.Logger.Printf("upgrade request held: %v", err)
@@ -271,7 +319,7 @@ func (c *dockerHelperController) processCurrent(ctx context.Context) error {
 	// Success is durable before cleanup. A failed cleanup retains a stopped
 	// rollback container; it must never turn a healthy activated node back into
 	// an indeterminate transaction.
-	if err := c.options.Engine.RemoveContainer(ctx, backupName); err != nil {
+	if err := c.options.Engine.RemoveContainer(ctx, backupName, false); err != nil {
 		c.options.Logger.Printf("retained rollback container %s requires manual cleanup", backupName)
 	}
 	return nil
@@ -296,20 +344,28 @@ func (c *dockerHelperController) validateContainer(container dockerContainer, ex
 		!containsEnv(config.Env, "PSP_NODE_DOCKER_REMOTE_UPGRADE", "true") {
 		return config, errors.New("managed Docker container environment is not upgrade-enabled")
 	}
+	// THE STATE HAS TO OUTLIVE THE CONTAINER, because the upgrade replaces it.
+	// A named volume and a bind mount both do, and compose.example.yaml uses bind
+	// mounts; accepting only volumes refused every installation made from it. A
+	// tmpfs does not persist, and a read-only mount cannot be written by the
+	// replacement, so both are still refused.
+	persistent := func(mount dockerMount) bool {
+		return (mount.Type == "volume" || mount.Type == "bind") && mount.RW
+	}
 	data, control := false, false
 	for _, mount := range container.Mounts {
 		if mount.Destination == dockerSocket {
 			return config, errors.New("network-facing node container must not receive the Docker socket")
 		}
-		if mount.Type == "volume" && mount.RW && mount.Destination == DockerDataDir {
+		if persistent(mount) && mount.Destination == DockerDataDir {
 			data = true
 		}
-		if mount.Type == "volume" && mount.RW && mount.Destination == DockerControlDir {
+		if persistent(mount) && mount.Destination == DockerControlDir {
 			control = true
 		}
 	}
 	if !data || !control {
-		return config, errors.New("managed Docker data and upgrade-control volumes are missing")
+		return config, errors.New("managed Docker data and upgrade-control mounts are missing or not persistent")
 	}
 	return config, nil
 }
@@ -394,33 +450,162 @@ func (c *dockerHelperController) rollback(ctx context.Context, receipt Receipt, 
 	if err := c.writeReceipt(receipt); err != nil {
 		return err
 	}
-	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dockerRollbackBudget)
 	defer cancel()
+	// A FAILED INSPECT HERE IS DELIBERATELY NOT AN ERROR. Skipping the block falls
+	// through to restoring the retained container from its backup name, which on
+	// this pass is intact — the forward path renamed it there moments ago. That is
+	// a working recovery route, and classifying this error would remove it. If the
+	// replacement is in fact still under the target name, the rename below is
+	// refused, and that branch keeps it as the one container to run.
 	if current, err := c.options.Engine.InspectContainer(rollbackCtx, c.options.TargetName); err == nil {
 		if current.ID == transaction.OldContainerID {
 			if !current.State.Running {
-				if err := c.options.Engine.StartContainer(rollbackCtx, c.options.TargetName); err != nil {
+				if err := c.start(rollbackCtx, c.options.TargetName); err != nil {
 					return c.indeterminate(receipt, "retained Docker container could not be restarted")
 				}
 			}
 			return c.restored(receipt, message)
 		}
+		// The stop's error is still not decisive on its own: a stop that reported
+		// failure may have stopped the container anyway. The removal below asks
+		// the engine directly, and a 409 from it is the ground truth that the
+		// replacement is still running.
 		_ = c.options.Engine.StopContainer(rollbackCtx, c.options.TargetName)
-		if err := c.options.Engine.RemoveContainer(rollbackCtx, c.options.TargetName); err != nil {
-			return c.indeterminate(receipt, "replacement Docker container could not be removed during rollback")
+		if err := c.removeReplacement(rollbackCtx, current, transaction); err != nil {
+			what := "whatever holds the target name"
+			if current.ID == transaction.NewContainerID {
+				what = "the replacement container this upgrade created"
+			}
+			return c.indeterminate(receipt, c.keepServing(rollbackCtx, c.options.TargetName,
+				"replacement Docker container could not be removed during rollback", what))
 		}
 	}
-	backup, err := c.options.Engine.InspectContainer(rollbackCtx, transaction.BackupName)
+	backup, err := c.inspectOnceMore(rollbackCtx, transaction.BackupName)
 	if err != nil || backup.ID != transaction.OldContainerID {
-		return c.indeterminate(receipt, "retained Docker rollback container is unavailable")
+		// Whatever holds the backup name is not started: it is either unread or,
+		// on a mismatch, something other than the container this transaction
+		// retained. The target name is the only candidate left.
+		return c.indeterminate(receipt, c.keepServing(rollbackCtx, c.options.TargetName,
+			"retained Docker rollback container is unavailable",
+			"whatever holds the target name"))
 	}
 	if err := c.options.Engine.RenameContainer(rollbackCtx, transaction.BackupName, c.options.TargetName); err != nil {
-		return c.indeterminate(receipt, "retained Docker container could not be restored")
+		const message = "retained Docker container could not be restored"
+		// NEVER TWO AGENTS. Identity was verified above, so the retained container
+		// is safe to run — but only if nothing else holds the target name. When the
+		// first inspect failed, the removal was skipped and the replacement may
+		// still be there, possibly running; a rename refused with 409 means exactly
+		// that. Two agents with one identity on host networking is a split-brain,
+		// so the retained container is started only when the target name is
+		// proven empty, and otherwise the one already there is the candidate.
+		if _, err := c.inspectOnceMore(rollbackCtx, c.options.TargetName); !errors.Is(err, errDockerNotFound) {
+			return c.indeterminate(receipt, c.keepServing(rollbackCtx, c.options.TargetName, message,
+				"whatever holds the target name"))
+		}
+		// It runs under the BACKUP name, which the receipt has to say plainly: a
+		// later `docker compose up` creates another container under the compose
+		// name, and that is the same split-brain by a different route.
+		return c.indeterminate(receipt, c.keepServing(rollbackCtx, transaction.BackupName, message,
+			"the retained previous container, still named "+transaction.BackupName+
+				" (rename it back to "+c.options.TargetName+" before running docker compose up, or two agents will share one identity)"))
 	}
-	if err := c.options.Engine.StartContainer(rollbackCtx, c.options.TargetName); err != nil {
+	if err := c.start(rollbackCtx, c.options.TargetName); err != nil {
 		return c.indeterminate(receipt, "retained Docker container was restored but could not be started")
 	}
 	return c.restored(receipt, message)
+}
+
+// inspectOnceMore asks ONE MORE TIME, AND ONLY FOR A READ. An inspect has no
+// side effect to repeat, so asking again is safe in a way re-entering the
+// rollback is not. It is used where one missed answer would cost the node its
+// verified previous container: before the retained container is identified, and
+// before the target name is judged empty enough to start it beside. It is one
+// attempt inside the rollback's budget, not a retry loop, and only for a failure
+// that may clear by itself — a 404 is an answer and is not asked again.
+func (c *dockerHelperController) inspectOnceMore(ctx context.Context, name string) (dockerContainer, error) {
+	container, err := c.options.Engine.InspectContainer(ctx, name)
+	if err != nil && dockerTransient(err) {
+		container, err = c.options.Engine.InspectContainer(ctx, name)
+	}
+	return container, err
+}
+
+// The rollback's budget, and the separate one each of its starts gets. They are
+// variables only so a test can exhaust the first without waiting for it.
+var (
+	dockerRollbackBudget = 90 * time.Second
+	dockerStartBudget    = 30 * time.Second
+)
+
+// removeReplacement clears the replacement out of the target name, treating the
+// two outcomes the engine reports as "not removed" by what they actually mean.
+//
+// 404 is success. The state rollback wants is "no replacement under the target
+// name", and a 404 says that is the state it has. Reporting it as a failure made
+// the rollback give up on a system that was already where it was going.
+//
+// 409 is "still running", because the removal is issued with force=false and
+// the stop above may not have finished — its error is discarded for that reason.
+// Forcing is correct only for a container whose identity is established: the
+// replacement this transaction created, or — when NewContainerID was never
+// persisted, because the helper stopped between creating the container and
+// recording it — whatever the target name holds after the original was renamed
+// away. That is this transaction's replacement unless someone ran compose by hand
+// in the meantime, and the unforced path would stop and remove that container
+// just the same; force only stops waiting for a stop that did not finish. A
+// container whose recorded identity does not match is never forced.
+func (c *dockerHelperController) removeReplacement(ctx context.Context, current dockerContainer, transaction dockerTransaction) error {
+	err := c.options.Engine.RemoveContainer(ctx, c.options.TargetName, false)
+	if err == nil || errors.Is(err, errDockerNotFound) {
+		return nil
+	}
+	var status *dockerStatusError
+	if !errors.As(err, &status) || status.Code != http.StatusConflict {
+		return err
+	}
+	if transaction.NewContainerID != "" && current.ID != transaction.NewContainerID {
+		return err
+	}
+	if err := c.options.Engine.RemoveContainer(ctx, c.options.TargetName, true); err != nil && !errors.Is(err, errDockerNotFound) {
+		return err
+	}
+	return nil
+}
+
+// start issues a rollback's start on ITS OWN BUDGET. The calls before it can
+// spend the rollback budget — one that hung, or several that were merely slow —
+// and a start on that expired context fails without reaching the engine at all.
+// That would turn a verified restore, which only needed the engine to start the
+// container it had just put back, into a node with nothing running. Every start
+// in the rollback goes through here, so none of them can be starved that way.
+// WithoutCancel drops the spent deadline and keeps the context's values.
+func (c *dockerHelperController) start(ctx context.Context, name string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dockerStartBudget)
+	defer cancel()
+	return c.options.Engine.StartContainer(ctx, name)
+}
+
+// keepServing starts a container before a terminal receipt is written, and says
+// in that receipt what it managed.
+//
+// THE RECEIPT STAYS INDETERMINATE. A rollback that could not complete has no
+// proven outcome and must not acquire one. What this changes is whether the node
+// is forwarding while it waits for a person, and — because the agent container IS
+// the data plane — whether the agent can come back, read its task's receipt and
+// tell the panel. Before this, three of the rollback's exits returned with
+// nothing running; restart: unless-stopped does not restart a container that was
+// explicitly stopped, so nothing ever would, and the panel saw only silence.
+//
+// It never returns an error, for the reason restartAfterFailedRestore gives on the
+// systemd path: the outcome is already indeterminate, and a failed start must not
+// replace that with a different wrong answer. Start is safe to issue against a
+// container that is already running — the engine answers 304.
+func (c *dockerHelperController) keepServing(ctx context.Context, name, message, what string) string {
+	if err := c.start(ctx, name); err != nil {
+		return message + "; " + what + " could not be started either, so nothing is serving"
+	}
+	return message + "; " + what + " was started so the node keeps serving"
 }
 
 func (c *dockerHelperController) restored(receipt Receipt, message string) error {

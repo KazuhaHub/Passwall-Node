@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -81,3 +82,114 @@ func TestDockerPullRequiresOfficialExactRelease(t *testing.T) {
 }
 
 const targetDockerVersion = "4.1.3"
+
+// THE CLASSIFICATION HAS TO SURVIVE THE REAL TRANSPORT, not just the classifier.
+//
+// Rollback decides between "try again next poll" and "stop for good" on this
+// answer, so it is measured through dockerHTTP.call — the code that actually
+// turns a socket failure or a status line into an error — rather than by handing
+// the classifier values constructed in the test. A classifier that is correct on
+// its own inputs and never sees them from the engine would pass here and fail in
+// production.
+func TestDockerEngineFailuresAreClassifiedThroughTheRealTransport(t *testing.T) {
+	respond := func(code int, body string) *dockerHTTP {
+		return &dockerHTTP{client: &http.Client{Transport: dockerRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+		})}}
+	}
+	unreachable := &dockerHTTP{client: &http.Client{Transport: dockerRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial unix /var/run/docker.sock: connect: connection refused")
+	})}}
+
+	for _, tc := range []struct {
+		name      string
+		call      func() error
+		transient bool
+		notFound  bool
+	}{
+		{
+			// The case that stranded nodes: the engine did not answer this one call.
+			name: "socket unreachable", transient: true,
+			call: func() error { _, err := unreachable.InspectContainer(t.Context(), "node-agent"); return err },
+		},
+		{
+			name: "engine error", transient: true,
+			call: func() error {
+				return respond(http.StatusInternalServerError, "").RemoveContainer(t.Context(), "node-agent", false)
+			},
+		},
+		{
+			// force=false against a container whose stop has not finished.
+			name: "removal conflict", transient: true,
+			call: func() error {
+				return respond(http.StatusConflict, "").RemoveContainer(t.Context(), "node-agent", false)
+			},
+		},
+		{
+			// A body cut short is a transport problem on a local socket.
+			name: "truncated body", transient: true,
+			call: func() error {
+				_, err := respond(http.StatusOK, `{"Id":`).InspectContainer(t.Context(), "node-agent")
+				return err
+			},
+		},
+		{
+			// NOT transient: the object is not there, and asking again will not
+			// make it be. This must stay final.
+			name: "not found", notFound: true,
+			call: func() error {
+				_, err := respond(http.StatusNotFound, "").InspectContainer(t.Context(), "node-agent")
+				return err
+			},
+		},
+		{
+			// A request the engine understood and rejected on its merits.
+			name: "bad request",
+			call: func() error {
+				return respond(http.StatusBadRequest, "").RemoveContainer(t.Context(), "node-agent", false)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("the engine failure was not reported at all")
+			}
+			if got := dockerTransient(err); got != tc.transient {
+				t.Fatalf("dockerTransient(%v) = %v, want %v", err, got, tc.transient)
+			}
+			if got := errors.Is(err, errDockerNotFound); got != tc.notFound {
+				t.Fatalf("errors.Is(%v, errDockerNotFound) = %v, want %v", err, got, tc.notFound)
+			}
+		})
+	}
+
+	// AN ERROR THE CLASSIFIER HAS NEVER SEEN IS NOT TRANSIENT. Retries are spent on
+	// failures known to be worth retrying, not on everything that is not a 404.
+	if dockerTransient(errors.New("something else entirely")) {
+		t.Fatal("an unrecognised error was classified as transient")
+	}
+}
+
+// FORCED REMOVAL HAS TO REACH THE ENGINE AS FORCED.
+//
+// force=true is a destructive capability added for one caller that has already
+// established identity. A flag that is accepted by the method and silently sent
+// as false would reproduce the stranding it exists to prevent — and would pass
+// every test that only checks the method returned.
+func TestDockerRemoveContainerSendsTheForceItWasGiven(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		var query string
+		client := &dockerHTTP{client: &http.Client{Transport: dockerRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			query = request.URL.RawQuery
+			return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+		})}}
+		if err := client.RemoveContainer(t.Context(), "node-agent", force); err != nil {
+			t.Fatal(err)
+		}
+		want := "v=false&force=" + map[bool]string{false: "false", true: "true"}[force]
+		if query != want {
+			t.Fatalf("force=%v sent %q, want %q", force, query, want)
+		}
+	}
+}
