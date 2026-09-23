@@ -198,6 +198,13 @@ jobs:
     name: container
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # A STAMP THAT IS NOT THE DEFAULT, or the identity check proves nothing. The
+      # image used to be built with no build-args, so its label and its binary both
+      # said "dev" and the check compared the Dockerfile's two defaults with each
+      # other. It passed while every -X in the Dockerfile named the pre-/v4 package
+      # and stamped nothing: the linker ignores a -X for a symbol it cannot find.
+      IMAGE_VERSION: 4.0.0
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
@@ -208,11 +215,14 @@ jobs:
           file: Dockerfile
           load: true
           tags: passwall-node:test
+          build-args: |
+            VERSION=${{ env.IMAGE_VERSION }}
+            COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Verify image entrypoint, build identity and project license
         run: |
-          docker run --rm passwall-node:test --version
+          test "$(docker run --rm passwall-node:test --version)" = "$IMAGE_VERSION ($GITHUB_SHA)"
           upgrade_info="$(docker run --rm passwall-node:test --upgrade-info)"
           docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
           docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -

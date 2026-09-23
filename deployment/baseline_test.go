@@ -1,8 +1,11 @@
 package deployment
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -96,6 +99,52 @@ func TestBuildBaselinesStayAligned(t *testing.T) {
 		}
 		if (strings.HasSuffix(path, "/test.yml") || strings.HasSuffix(path, "/release.yml")) && !strings.Contains(workflow, "deployment/check-build.sh") {
 			t.Fatalf("%s must inspect actual release compiler provenance", path)
+		}
+	}
+}
+
+// THE LINKER IGNORES A -X FOR A SYMBOL IT CANNOT FIND, so a version stamp that
+// names a package outside the module builds a binary that reports "dev" and
+// fails nothing. The /v4 module rename updated release.yml and test.yml and
+// missed the Dockerfile, whose source-built image then said "dev" under a label
+// naming the release. Every stamp, in every file that builds the daemon, must
+// name the version package under go.mod's module path.
+func TestVersionStampsNameTheModulePath(t *testing.T) {
+	mod, err := os.ReadFile("../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := regexp.MustCompile(`(?m)^module (\S+)$`).FindSubmatch(mod)
+	if len(module) != 2 {
+		t.Fatal("go.mod must name one module path")
+	}
+	want := string(module[1]) + "/internal/version"
+	workflows, err := filepath.Glob("../.github/workflows/*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := regexp.MustCompile(`-X[=\s]+(\S+/internal/version)\.\w+=`)
+	stamps := map[string]int{}
+	for _, path := range append([]string{"../Dockerfile", "../Dockerfile.release"}, workflows...) {
+		text, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) && path == "../Dockerfile.release" {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range stamp.FindAllStringSubmatch(string(text), -1) {
+			stamps[path]++
+			if match[1] != want {
+				t.Errorf("%s stamps %s, which is not this module's version package %s", path, match[1], want)
+			}
+		}
+	}
+	// A pattern that matches nothing passes on anything, so the files known to
+	// stamp a version must be seen stamping one.
+	for _, path := range []string{"../Dockerfile", "../.github/workflows/release.yml", "../.github/workflows/test.yml"} {
+		if stamps[path] == 0 {
+			t.Errorf("%s stamps no version this guard can see", path)
 		}
 	}
 }
