@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,10 +22,27 @@ type fakeDockerEngine struct {
 	images     map[string]dockerImage
 	pulled     string
 	onStart    func(string)
+	// fail injects an engine failure for one operation, keyed "op" or "op:name".
+	// The rollback path's failure branches are otherwise unreachable from a test,
+	// which is why they had no coverage at all.
+	fail map[string]error
+}
+
+func (f *fakeDockerEngine) maybeFail(op, name string) error {
+	if f.fail == nil {
+		return nil
+	}
+	if err, ok := f.fail[op+":"+name]; ok {
+		return err
+	}
+	return f.fail[op]
 }
 
 func (f *fakeDockerEngine) Ping(context.Context) error { return nil }
 func (f *fakeDockerEngine) InspectContainer(_ context.Context, name string) (dockerContainer, error) {
+	if err := f.maybeFail("inspect", name); err != nil {
+		return dockerContainer{}, err
+	}
 	container, ok := f.containers[name]
 	if !ok {
 		return dockerContainer{}, errDockerNotFound
@@ -46,6 +64,9 @@ func (f *fakeDockerEngine) InspectImage(_ context.Context, reference string) (do
 	return image, nil
 }
 func (f *fakeDockerEngine) StopContainer(_ context.Context, name string) error {
+	if err := f.maybeFail("stop", name); err != nil {
+		return err
+	}
 	container, ok := f.containers[name]
 	if !ok {
 		return errDockerNotFound
@@ -55,6 +76,9 @@ func (f *fakeDockerEngine) StopContainer(_ context.Context, name string) error {
 	return nil
 }
 func (f *fakeDockerEngine) StartContainer(_ context.Context, name string) error {
+	if err := f.maybeFail("start", name); err != nil {
+		return err
+	}
 	container, ok := f.containers[name]
 	if !ok {
 		return errDockerNotFound
@@ -67,6 +91,9 @@ func (f *fakeDockerEngine) StartContainer(_ context.Context, name string) error 
 	return nil
 }
 func (f *fakeDockerEngine) RenameContainer(_ context.Context, name, replacement string) error {
+	if err := f.maybeFail("rename", name); err != nil {
+		return err
+	}
 	container, ok := f.containers[name]
 	if !ok {
 		return errDockerNotFound
@@ -98,6 +125,9 @@ func (f *fakeDockerEngine) CreateReplacement(_ context.Context, name string, old
 	return created.ID, nil
 }
 func (f *fakeDockerEngine) RemoveContainer(_ context.Context, name string) error {
+	if err := f.maybeFail("remove", name); err != nil {
+		return err
+	}
 	if _, ok := f.containers[name]; !ok {
 		return errDockerNotFound
 	}
@@ -255,4 +285,113 @@ func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDocker
 		Poll: time.Millisecond, ReadyWait: time.Second, Logger: log.New(io.Discard, "", 0),
 	}}
 	return controller, engine, request
+}
+
+// CHARACTERIZATION: what rollback does TODAY when an Engine call fails.
+//
+// These tests pin behaviour that is about to change. They exist because the five
+// indeterminate branches in rollback() had no coverage at all — `grep
+// indeterminate docker_helper_test.go` returned nothing — and changing untested
+// error paths is how a fix quietly becomes a second defect.
+//
+// What they record is the defect, not a desired property: three of these
+// branches write a TERMINAL receipt with NOTHING running under the target name.
+// The agent container is the data plane (network_mode: host) and both compose
+// services carry restart: unless-stopped, which does not restart a container that
+// was explicitly stopped — so this is forwarding stopped with no automatic
+// recovery, and processCurrent short-circuits on the terminal phase forever.
+//
+// When the retryable/terminal split lands, the three marked STOPS THE NODE must
+// change; :403 and :421 must not, because both already asked the engine to start
+// something and it refused.
+func TestDockerRollbackFailureBranchesToday(t *testing.T) {
+	transportErr := errors.New("Docker Engine request failed")
+
+	for _, tc := range []struct {
+		name         string
+		fail         map[string]error
+		wantError    string
+		wantsRunning bool // is anything running under the target name afterwards?
+	}{
+		{
+			// :409-411 — STOPS THE NODE. The replacement was already stopped on the
+			// line above, with its error discarded.
+			name:      "remove of the replacement fails",
+			fail:      map[string]error{"remove": transportErr},
+			wantError: "replacement Docker container could not be removed during rollback",
+		},
+		{
+			// :413-415 — STOPS THE NODE, and this is the least deserved of the
+			// three: the retained container is fine, the engine just could not be
+			// reached for one call.
+			name:      "inspect of the retained container fails",
+			fail:      map[string]error{"inspect:node-agent-upgrade-" + shortTaskID("tsk_docker_upgrade_001"): transportErr},
+			wantError: "retained Docker rollback container is unavailable",
+		},
+		{
+			// :417-418 — STOPS THE NODE. Identity was verified on the line above.
+			name: "rename of the retained container back fails",
+			// Keyed to the BACKUP name: rollback renames backup -> target, while the
+			// forward swap renames target -> backup. An unkeyed injection hits the
+			// forward one and never reaches the branch under test.
+			fail:      map[string]error{"rename:node-agent-upgrade-" + shortTaskID("tsk_docker_upgrade_001"): transportErr},
+			wantError: "retained Docker container could not be restored",
+		},
+		{
+			// :421 — NOT a defect. A start was issued and the engine refused it.
+			name:      "start of the restored container fails",
+			fail:      map[string]error{"start:node-agent": errors.New("engine refused")},
+			wantError: "retained Docker container was restored but could not be started",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, engine, request := dockerControllerFixture(t)
+			controller.options.ReadyWait = 5 * time.Millisecond
+			controller.options.Poll = time.Millisecond
+			// The upgrade never converges, so a rollback is attempted; the injected
+			// failure then decides which branch of it runs.
+			engine.fail = tc.fail
+
+			if err := controller.processCurrent(t.Context()); err == nil {
+				t.Fatal("an upgrade that could neither converge nor roll back reported success")
+			}
+
+			var receipt Receipt
+			if err := ReadDocument(controller.receiptsDir(), request.Task.ID+".json", &receipt); err != nil {
+				t.Fatal(err)
+			}
+			// TODAY: terminal. This is the half that changes for the retryable cases.
+			if receipt.Phase != "indeterminate" {
+				t.Fatalf("phase = %q, want indeterminate", receipt.Phase)
+			}
+			if receipt.ErrorCode != "agent_upgrade_indeterminate" {
+				t.Fatalf("error code = %q", receipt.ErrorCode)
+			}
+			if !strings.Contains(receipt.Error, tc.wantError) {
+				t.Fatalf("error = %q, want it to contain %q", receipt.Error, tc.wantError)
+			}
+
+			// A TERMINAL PHASE IS THE END OF THE LINE. processCurrent returns nil
+			// and does nothing on every later poll, forever.
+			engine.fail = nil
+			if err := controller.processCurrent(t.Context()); err != nil {
+				t.Fatalf("a later poll on a terminal receipt did something: %v", err)
+			}
+			var after Receipt
+			if err := ReadDocument(controller.receiptsDir(), request.Task.ID+".json", &after); err != nil {
+				t.Fatal(err)
+			}
+			if after.Phase != "indeterminate" {
+				t.Fatalf("a later poll changed the terminal phase to %q", after.Phase)
+			}
+
+			// AND WHAT IS ACTUALLY RUNNING. This is the assertion that makes the
+			// defect visible rather than described.
+			active, err := engine.InspectContainer(t.Context(), controller.options.TargetName)
+			running := err == nil && active.State.Running
+			if running != tc.wantsRunning {
+				t.Fatalf("running under %q = %v, want %v (err=%v)", controller.options.TargetName, running, tc.wantsRunning, err)
+			}
+		})
+	}
 }
