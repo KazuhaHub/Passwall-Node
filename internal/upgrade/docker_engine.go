@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -120,7 +121,11 @@ type dockerEngine interface {
 	StartContainer(context.Context, string) error
 	RenameContainer(context.Context, string, string) error
 	CreateReplacement(context.Context, string, dockerContainer, dockerImage, string) (string, error)
-	RemoveContainer(context.Context, string) error
+	// RemoveContainer removes a container. force=false is refused with 409 while
+	// the container is running, which is the behaviour almost every caller wants;
+	// force=true removes it regardless and is reserved for a caller that has
+	// already established the container's identity.
+	RemoveContainer(ctx context.Context, name string, force bool) error
 }
 
 type dockerHTTP struct {
@@ -214,8 +219,8 @@ func (d *dockerHTTP) RenameContainer(ctx context.Context, name, replacement stri
 	return d.call(ctx, http.MethodPost, path, nil, []int{http.StatusNoContent}, nil)
 }
 
-func (d *dockerHTTP) RemoveContainer(ctx context.Context, name string) error {
-	return d.call(ctx, http.MethodDelete, "/"+dockerAPIVersion+"/containers/"+url.PathEscape(name)+"?v=false&force=false", nil,
+func (d *dockerHTTP) RemoveContainer(ctx context.Context, name string, force bool) error {
+	return d.call(ctx, http.MethodDelete, "/"+dockerAPIVersion+"/containers/"+url.PathEscape(name)+"?v=false&force="+strconv.FormatBool(force), nil,
 		[]int{http.StatusNoContent}, nil)
 }
 

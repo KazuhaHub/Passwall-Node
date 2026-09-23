@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,14 @@ type fakeDockerEngine struct {
 	// The rollback path's failure branches are otherwise unreachable from a test,
 	// which is why they had no coverage at all.
 	fail map[string]error
+	// removals records every removal and whether it was forced. A forced removal
+	// is a destructive capability, so tests need to see exactly when it is used.
+	removals []fakeRemoval
+}
+
+type fakeRemoval struct {
+	name  string
+	force bool
 }
 
 func (f *fakeDockerEngine) maybeFail(op, name string) error {
@@ -132,12 +141,21 @@ func (f *fakeDockerEngine) CreateReplacement(_ context.Context, name string, old
 	f.containers[name] = created
 	return created.ID, nil
 }
-func (f *fakeDockerEngine) RemoveContainer(_ context.Context, name string) error {
+func (f *fakeDockerEngine) RemoveContainer(_ context.Context, name string, force bool) error {
+	f.removals = append(f.removals, fakeRemoval{name: name, force: force})
 	if err := f.maybeFail("remove", name); err != nil {
 		return err
 	}
-	if _, ok := f.containers[name]; !ok {
+	container, ok := f.containers[name]
+	if !ok {
 		return errDockerNotFound
+	}
+	// THE REAL ENGINE REFUSES TO REMOVE A RUNNING CONTAINER without force. This
+	// fake used to delete it silently, which made the whole 409 family invisible:
+	// a rollback whose stop had failed looked, to the test suite, exactly like one
+	// whose stop had succeeded.
+	if container.State.Running && !force {
+		return &dockerStatusError{Code: http.StatusConflict}
 	}
 	delete(f.containers, name)
 	return nil

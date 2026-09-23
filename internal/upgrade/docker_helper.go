@@ -318,7 +318,7 @@ func (c *dockerHelperController) processCurrent(ctx context.Context) error {
 	// Success is durable before cleanup. A failed cleanup retains a stopped
 	// rollback container; it must never turn a healthy activated node back into
 	// an indeterminate transaction.
-	if err := c.options.Engine.RemoveContainer(ctx, backupName); err != nil {
+	if err := c.options.Engine.RemoveContainer(ctx, backupName, false); err != nil {
 		c.options.Logger.Printf("retained rollback container %s requires manual cleanup", backupName)
 	}
 	return nil
@@ -453,7 +453,7 @@ func (c *dockerHelperController) rollback(ctx context.Context, receipt Receipt, 
 			return c.restored(receipt, message)
 		}
 		_ = c.options.Engine.StopContainer(rollbackCtx, c.options.TargetName)
-		if err := c.options.Engine.RemoveContainer(rollbackCtx, c.options.TargetName); err != nil {
+		if err := c.options.Engine.RemoveContainer(rollbackCtx, c.options.TargetName, false); err != nil {
 			return c.indeterminate(receipt, "replacement Docker container could not be removed during rollback")
 		}
 	}
