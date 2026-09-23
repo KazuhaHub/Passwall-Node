@@ -319,10 +319,10 @@ go test -race ./...
 go vet ./...
 ```
 
-CI repeats those checks, cross-compiles `cmd/node` for six targets, and builds
-the container. A `v*` tag publishes archives plus `SHA256SUMS.txt` and a
-multi-architecture GHCR image. `:latest` is stable-only; `:beta` follows the
-newest release of either stability class.
+CI runs the suite once, under the race detector, vets it, cross-compiles
+`cmd/node` for six targets, and builds the container. A `v*` tag publishes
+archives plus `SHA256SUMS.txt` and a multi-architecture GHCR image. `:latest`
+is stable-only; `:beta` follows the newest release of either stability class.
 
 ## Contract harness
 

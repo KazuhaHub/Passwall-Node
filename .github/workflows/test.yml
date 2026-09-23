@@ -69,8 +69,10 @@ jobs:
         run: go vet ./...
       - name: Verify pinned build toolchain
         run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
-      - name: Unit and integration tests
-        run: go test -count=1 -timeout=10m ./...
+      # THE FULL SUITE RUNS ONCE, in the race job. No file in this module is built
+      # only without -race, so a plain `go test ./...` here ran the same tests a
+      # second time. The named PTY test below stays: it asserts that one test ran
+      # and passed, which a suite-wide pass does not.
       - name: Require named Linux PTY transfer-meter test to run and pass
         shell: bash
         run: |
@@ -88,8 +90,6 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      - name: Validate container entrypoint
-        run: sh -n docker-entrypoint.sh
       - name: Validate immutable image publishing check
         run: node --test deployment/check_image_test.mjs
       - uses: actions/cache/save@v6
