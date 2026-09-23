@@ -79,7 +79,19 @@ jobs:
           GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
-          cache: true
+          # NO SHARED CACHE IN A PUBLISHING RUN, in any of this workflow's jobs.
+          # setup-go's entry is keyed on go.sum and written by whichever main
+          # push saves it first (test.yml, core-acceptance.yml), and a tag run
+          # restores it. Go trusts what it finds there: the module cache is
+          # checked against go.sum only when a module is downloaded, and a build
+          # object is trusted by its action ID. So one compromised step on a
+          # main push could plant code that is then compiled into the six signed
+          # binaries, the image, and sign-release while it holds the key. The
+          # panel and SAP closed the same path, and
+          # deployment/release_cache_test.go keeps this one closed. It costs
+          # little: the entry held the modules and darwin/arm64's objects, and
+          # the other five legs compiled from source anyway (18-32s).
+          cache: false
       # THE DEFAULT IS A PRE-RELEASE, STATED OR NOT. A release published without an
       # explicit channel goes out as one, because that is the direction a deliberate
       # promotion can correct and the one that cannot move `latest` or
@@ -213,7 +225,8 @@ jobs:
           GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
-          cache: true
+          # Published bytes never come out of a shared cache (see setup).
+          cache: false
       - name: Build daemon
         shell: bash
         env:
@@ -351,7 +364,8 @@ jobs:
           GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
-          cache: true
+          # This job compiles sign-release next to the key; see setup.
+          cache: false
       - name: Download binaries
         uses: actions/download-artifact@v8
         with:

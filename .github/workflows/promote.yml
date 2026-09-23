@@ -46,7 +46,11 @@ jobs:
           GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
-          cache: true
+          # NO SHARED CACHE, for release.yml's reason: this job compiles
+          # release-tag beside a token that can rewrite the release and move
+          # `latest`. release-tag imports nothing outside this module, so the
+          # cache only ever saved a compile of a few seconds.
+          cache: false
 
       - name: Resolve the release and the version it is stamped with
         id: identity
