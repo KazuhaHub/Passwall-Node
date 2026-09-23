@@ -43,6 +43,10 @@ type fakeDockerEngine struct {
 	// only after the caller has given up: the call blocks until its context is
 	// done. That is how one hung engine call spends a whole rollback budget.
 	slowStop map[string]bool
+	// delay makes an operation, keyed "op:name", take this long. Like a real
+	// client it gives up when its context is done, and then the operation never
+	// happens — so a few slow calls can spend a budget without any one failing.
+	delay map[string]time.Duration
 	// removals records every removal and whether it was forced. A forced removal
 	// is a destructive capability, so tests need to see exactly when it is used.
 	removals []fakeRemoval
@@ -58,6 +62,15 @@ func (f *fakeDockerEngine) maybeFail(ctx context.Context, op, name string) error
 	// fake does too — otherwise an exhausted budget would be invisible here.
 	if err := ctx.Err(); err != nil {
 		return errDockerUnavailable
+	}
+	if d := f.delay[op+":"+name]; d > 0 {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return errDockerUnavailable
+		}
 	}
 	for _, key := range []string{op + ":" + name, op} {
 		if err, ok := f.failOnce[key]; ok {
@@ -372,8 +385,11 @@ func TestDockerRollbackFailureBranches(t *testing.T) {
 		name     string
 		fail     map[string]error
 		failOnce map[string]error
-		phase    string
-		errors   []string
+		// setup arranges anything a failure map cannot, such as a failure armed
+		// only after the forward path has made its own call.
+		setup  func(*fakeDockerEngine)
+		phase  string
+		errors []string
 		// running names the one container that must be running afterwards, and
 		// runningID its identity; "" means nothing may be running at all.
 		running, runningID string
@@ -431,9 +447,14 @@ func TestDockerRollbackFailureBranches(t *testing.T) {
 		},
 		{
 			// UNCHANGED. A start was issued and the engine refused it; asking the
-			// same engine again is not a different answer.
-			name:   "start of the restored container fails",
-			fail:   map[string]error{"start:node-agent": errors.New("engine refused")},
+			// same engine again is not a different answer. Armed by the forward
+			// start, so the replacement does run and this row reaches rollback
+			// through the readiness timeout like the others — a plain
+			// "start:node-agent" failure would refuse the forward start instead.
+			name: "start of the restored container fails",
+			setup: func(e *fakeDockerEngine) {
+				e.onStart = func(string) { e.fail = map[string]error{"start:node-agent": errors.New("engine refused")} }
+			},
 			phase:  "indeterminate",
 			errors: []string{"retained Docker container was restored but could not be started"},
 		},
@@ -445,6 +466,9 @@ func TestDockerRollbackFailureBranches(t *testing.T) {
 			// The upgrade never converges, so a rollback is attempted; the injected
 			// failure then decides which branch of it runs.
 			engine.fail, engine.failOnce = tc.fail, tc.failOnce
+			if tc.setup != nil {
+				tc.setup(engine)
+			}
 
 			if err := controller.processCurrent(t.Context()); err == nil {
 				t.Fatal("an upgrade that never converged reported success")
@@ -536,6 +560,101 @@ func TestDockerRollbackAfterAnInterruptedSwap(t *testing.T) {
 		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
 			"retained Docker container could not be restored", "whatever holds the target name was started")
 		assertOnlyRunning(t, engine, "node-agent", replacementID)
+	})
+
+	t.Run("a forced removal followed by a refused restart", func(t *testing.T) {
+		// The one combination the forward path cannot reach: the replacement was
+		// still running, had to be forced out, and then the engine refused the
+		// restart of the container put back in its place.
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		engine.fail = map[string]error{"stop:node-agent": errDockerUnavailable, "start:node-agent": errors.New("engine refused")}
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
+			"retained Docker container was restored but could not be started")
+		if want := []fakeRemoval{{"node-agent", false}, {"node-agent", true}}; !equalRemovals(engine.removals, want) {
+			t.Fatalf("removals = %+v, want %+v", engine.removals, want)
+		}
+		if restored := engine.containers["node-agent"]; restored.ID != oldID {
+			t.Fatalf("target name holds %s, want the restored %s", restored.ID, oldID)
+		}
+		assertOnlyRunning(t, engine, "", "")
+	})
+
+	t.Run("after a failed rename, one missed read does not cost the verified container", func(t *testing.T) {
+		// The replacement is removed, so the target name really is empty; the
+		// read that is meant to prove it misses once. Armed by the removal, so it
+		// is that read and not the first one that misses.
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		backupName := "node-agent-upgrade-" + shortTaskID(request.Task.ID)
+		engine.fail = map[string]error{"rename:" + backupName: &dockerStatusError{Code: http.StatusInternalServerError}}
+		engine.onRemove = func(string) { engine.failOnce = map[string]error{"inspect:node-agent": errDockerUnavailable} }
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
+			"retained Docker container could not be restored", "still named "+backupName)
+		assertOnlyRunning(t, engine, backupName, oldID)
+	})
+
+	t.Run("after a failed rename, an unreadable target name never gets a second agent", func(t *testing.T) {
+		// Every read of the target name fails, so the removal is skipped and the
+		// running replacement is still there when the rename is refused. Unread
+		// is not empty: the retained container must stay stopped.
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		engine.fail = map[string]error{"inspect:node-agent": errDockerUnavailable}
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "indeterminate",
+			"retained Docker container could not be restored", "whatever holds the target name was started")
+		assertOnlyRunning(t, engine, "node-agent", replacementID)
+	})
+
+	t.Run("a verified restore's start is not starved by slow calls before it", func(t *testing.T) {
+		defer func(budget time.Duration) { dockerRollbackBudget = budget }(dockerRollbackBudget)
+		dockerRollbackBudget = 300 * time.Millisecond
+		// Nothing fails. The rename is slow but lands inside the budget; the
+		// start after it needs longer than what is left.
+		controller, engine, request, receipt := swappedDockerFixture(t, replacementID, replacementID)
+		backupName := "node-agent-upgrade-" + shortTaskID(request.Task.ID)
+		engine.delay = map[string]time.Duration{"rename:" + backupName: 200 * time.Millisecond, "start:node-agent": 200 * time.Millisecond}
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "failed", "previous managed container restored")
+		assertOnlyRunning(t, engine, "node-agent", oldID)
+	})
+
+	t.Run("an original container never renamed away is restarted even when slow", func(t *testing.T) {
+		defer func(budget time.Duration) { dockerRollbackBudget = budget }(dockerRollbackBudget)
+		dockerRollbackBudget = 300 * time.Millisecond
+		// Interrupted before the rename: the original is still under the target
+		// name, stopped. The read that finds it is slow; so is its restart.
+		controller, engine, request := dockerControllerFixture(t)
+		old := engine.containers["node-agent"]
+		old.State.Running = false
+		engine.containers["node-agent"] = old
+		transaction := dockerTransaction{
+			OldContainerID: old.ID, OldImage: DockerImageRepository + ":beta",
+			BackupName: "node-agent-upgrade-" + shortTaskID(request.Task.ID),
+			NewImageID: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			NewImage:   DockerImageRepository + ":" + request.Args.Version,
+		}
+		receipt := Receipt{Request: request, Phase: "activating", Result: &Result{Version: request.Args.Version, PreviousVersion: request.Args.ExpectedVersion}}
+		if err := controller.writeTransaction(request.Task.ID, transaction); err != nil {
+			t.Fatal(err)
+		}
+		if err := controller.writeReceipt(receipt); err != nil {
+			t.Fatal(err)
+		}
+		engine.delay = map[string]time.Duration{"inspect:node-agent": 200 * time.Millisecond, "start:node-agent": 200 * time.Millisecond}
+		if err := controller.recover(t.Context(), receipt); err == nil {
+			t.Fatal("an interrupted upgrade reported success")
+		}
+		assertDockerReceipt(t, readDockerReceipt(t, controller, request), "failed", "previous managed container restored")
+		assertOnlyRunning(t, engine, "node-agent", oldID)
 	})
 
 	t.Run("a stranger under the backup name is never started", func(t *testing.T) {

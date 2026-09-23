@@ -461,7 +461,7 @@ func (c *dockerHelperController) rollback(ctx context.Context, receipt Receipt, 
 	if current, err := c.options.Engine.InspectContainer(rollbackCtx, c.options.TargetName); err == nil {
 		if current.ID == transaction.OldContainerID {
 			if !current.State.Running {
-				if err := c.options.Engine.StartContainer(rollbackCtx, c.options.TargetName); err != nil {
+				if err := c.start(rollbackCtx, c.options.TargetName); err != nil {
 					return c.indeterminate(receipt, "retained Docker container could not be restarted")
 				}
 			}
@@ -481,16 +481,7 @@ func (c *dockerHelperController) rollback(ctx context.Context, receipt Receipt, 
 				"replacement Docker container could not be removed during rollback", what))
 		}
 	}
-	backup, err := c.options.Engine.InspectContainer(rollbackCtx, transaction.BackupName)
-	if err != nil && dockerTransient(err) {
-		// ONE MORE READ, AND ONLY A READ. An inspect has no side effect to repeat,
-		// so asking again is safe in a way re-entering the rollback is not. This is
-		// the case that most deserved better: the replacement has just been
-		// removed, the retained container is intact, and the engine failed to
-		// answer one call — which left the node with nothing running. It is one
-		// attempt, inside the rollback's budget, not a retry loop.
-		backup, err = c.options.Engine.InspectContainer(rollbackCtx, transaction.BackupName)
-	}
+	backup, err := c.inspectOnceMore(rollbackCtx, transaction.BackupName)
 	if err != nil || backup.ID != transaction.OldContainerID {
 		// Whatever holds the backup name is not started: it is either unread or,
 		// on a mismatch, something other than the container this transaction
@@ -508,7 +499,7 @@ func (c *dockerHelperController) rollback(ctx context.Context, receipt Receipt, 
 		// that. Two agents with one identity on host networking is a split-brain,
 		// so the retained container is started only when the target name is
 		// proven empty, and otherwise the one already there is the candidate.
-		if _, err := c.options.Engine.InspectContainer(rollbackCtx, c.options.TargetName); !errors.Is(err, errDockerNotFound) {
+		if _, err := c.inspectOnceMore(rollbackCtx, c.options.TargetName); !errors.Is(err, errDockerNotFound) {
 			return c.indeterminate(receipt, c.keepServing(rollbackCtx, c.options.TargetName, message,
 				"whatever holds the target name"))
 		}
@@ -519,17 +510,32 @@ func (c *dockerHelperController) rollback(ctx context.Context, receipt Receipt, 
 			"the retained previous container, still named "+transaction.BackupName+
 				" (rename it back to "+c.options.TargetName+" before running docker compose up, or two agents will share one identity)"))
 	}
-	if err := c.options.Engine.StartContainer(rollbackCtx, c.options.TargetName); err != nil {
+	if err := c.start(rollbackCtx, c.options.TargetName); err != nil {
 		return c.indeterminate(receipt, "retained Docker container was restored but could not be started")
 	}
 	return c.restored(receipt, message)
 }
 
-// The rollback's budget, and the separate one its last-resort start gets. They
-// are variables only so a test can exhaust the first without waiting for it.
+// inspectOnceMore asks ONE MORE TIME, AND ONLY FOR A READ. An inspect has no
+// side effect to repeat, so asking again is safe in a way re-entering the
+// rollback is not. It is used where one missed answer would cost the node its
+// verified previous container: before the retained container is identified, and
+// before the target name is judged empty enough to start it beside. It is one
+// attempt inside the rollback's budget, not a retry loop, and only for a failure
+// that may clear by itself — a 404 is an answer and is not asked again.
+func (c *dockerHelperController) inspectOnceMore(ctx context.Context, name string) (dockerContainer, error) {
+	container, err := c.options.Engine.InspectContainer(ctx, name)
+	if err != nil && dockerTransient(err) {
+		container, err = c.options.Engine.InspectContainer(ctx, name)
+	}
+	return container, err
+}
+
+// The rollback's budget, and the separate one each of its starts gets. They are
+// variables only so a test can exhaust the first without waiting for it.
 var (
-	dockerRollbackBudget    = 90 * time.Second
-	dockerKeepServingBudget = 30 * time.Second
+	dockerRollbackBudget = 90 * time.Second
+	dockerStartBudget    = 30 * time.Second
 )
 
 // removeReplacement clears the replacement out of the target name, treating the
@@ -567,6 +573,19 @@ func (c *dockerHelperController) removeReplacement(ctx context.Context, current 
 	return nil
 }
 
+// start issues a rollback's start on ITS OWN BUDGET. The calls before it can
+// spend the rollback budget — one that hung, or several that were merely slow —
+// and a start on that expired context fails without reaching the engine at all.
+// That would turn a verified restore, which only needed the engine to start the
+// container it had just put back, into a node with nothing running. Every start
+// in the rollback goes through here, so none of them can be starved that way.
+// WithoutCancel drops the spent deadline and keeps the context's values.
+func (c *dockerHelperController) start(ctx context.Context, name string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dockerStartBudget)
+	defer cancel()
+	return c.options.Engine.StartContainer(ctx, name)
+}
+
 // keepServing starts a container before a terminal receipt is written, and says
 // in that receipt what it managed.
 //
@@ -583,13 +602,7 @@ func (c *dockerHelperController) removeReplacement(ctx context.Context, current 
 // replace that with a different wrong answer. Start is safe to issue against a
 // container that is already running — the engine answers 304.
 func (c *dockerHelperController) keepServing(ctx context.Context, name, message, what string) string {
-	// ITS OWN BUDGET. One engine call that hung can spend the whole rollback
-	// budget, and a start issued on that expired context fails without reaching
-	// the engine at all — in exactly the slow-engine case this exists for.
-	// WithoutCancel drops the spent deadline and keeps the context's values.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dockerKeepServingBudget)
-	defer cancel()
-	if err := c.options.Engine.StartContainer(ctx, name); err != nil {
+	if err := c.start(ctx, name); err != nil {
 		return message + "; " + what + " could not be started either, so nothing is serving"
 	}
 	return message + "; " + what + " was started so the node keeps serving"
