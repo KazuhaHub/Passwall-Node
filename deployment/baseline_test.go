@@ -149,6 +149,70 @@ func TestVersionStampsNameTheModulePath(t *testing.T) {
 	}
 }
 
+// AND THE RELEASE RUNS THE STAMP IT BUILT. The guard above holds the path, which
+// is one way the stamp can fail to take; the release's linux/amd64 leg executes
+// its binary and compares what it reports with what a node will ask for. That
+// comparison is a shell line, so it is RUN here against a stand-in compiler whose
+// binary reports whatever the case says: a line that compared the wrong string,
+// or ran on no leg, would pass a string check and publish "dev".
+func TestTheReleaseRunsTheVersionStampItBuilt(t *testing.T) {
+	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := extractStepScript(t, workflowJob(t, string(raw), "build"), "      - name: Build daemon\n")
+	// The one expression inside the script; every leg the guard runs is a
+	// non-Windows one, whose extension is empty.
+	script = strings.ReplaceAll(script, "${{ matrix.ext }}", "")
+	const (
+		version = "4.0.99.1"
+		commit  = "0123456789abcdef0123456789abcdef01234567"
+	)
+	run := func(t *testing.T, goos, goarch, reports string) (string, error) {
+		t.Helper()
+		work := t.TempDir()
+		bin := filepath.Join(work, "stub-bin")
+		for _, dir := range []string{bin, filepath.Join(work, "deployment")} {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// `go build -o PATH` leaves a binary at PATH that prints $REPORTS, the
+		// way a stamp that did or did not take would. Provenance is check-build.sh's
+		// own test's business, so it passes here.
+		goStub := "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -o ]; then printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$REPORTS\"\\n' > \"$2\"; chmod +x \"$2\"; exit 0; fi\n  shift\ndone\nexit 1\n"
+		if err := os.WriteFile(filepath.Join(bin, "go"), []byte(goStub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, "deployment", "check-build.sh"), []byte("exit 0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "-c", script)
+		cmd.Dir = work
+		cmd.Env = append(os.Environ(),
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"GOOS="+goos, "GOARCH="+goarch,
+			"VERSION="+version, "COMMIT="+commit, "BUILD_DATE=2026-09-24T00:00:00Z",
+			"REPORTS="+reports,
+		)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := run(t, "linux", "amd64", version+" (0123456)"); err != nil {
+		t.Fatalf("a binary reporting its release version and short commit was refused: %v\n%s", err, out)
+	}
+	for _, reports := range []string{"dev", version, version + " (" + commit + ")", "4.0.99.2 (0123456)"} {
+		if out, err := run(t, "linux", "amd64", reports); err == nil {
+			t.Errorf("the linux/amd64 leg accepted a binary reporting %q:\n%s", reports, out)
+		}
+	}
+	// The other legs build for a platform this runner cannot execute, so they
+	// never try; their stamp is the same line.
+	if out, err := run(t, "darwin", "arm64", "dev"); err != nil {
+		t.Fatalf("a leg this runner cannot execute tried to run its binary: %v\n%s", err, out)
+	}
+}
+
 // A TOOL PINNED IN A `run:` LINE IS ONE DECISION, WHEREVER IT RUNS. Dependabot
 // reads go.mod and `uses:` lines, never `go run tool@version`, so these pins are
 // moved by hand, and a second copy of one is the copy a bump misses: the weekly

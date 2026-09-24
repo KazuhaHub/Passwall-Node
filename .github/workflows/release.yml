@@ -247,6 +247,22 @@ jobs:
           go build -trimpath -ldflags="${ldflags}" \
             -o "out/passwall-node${{ matrix.ext }}" ./cmd/node
           sh deployment/check-build.sh "out/passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$COMMIT"
+          # THE STAMP IS RUN, NOT ASSUMED. The linker ignores a -X for a symbol it
+          # cannot find, so a stamp naming the wrong package builds a binary that
+          # says "dev" and fails nothing — the Dockerfile's did, for as long as the
+          # /v4 rename went unnoticed. check-build.sh reads provenance and never
+          # executes a binary, so it cannot see this. The one leg whose binary runs
+          # on this runner runs it, the way test.yml runs the ones it builds; the
+          # other five share this ldflags line. A native node refuses a release
+          # whose binary reports another version only after downloading it, and a
+          # Docker node would run it reporting "dev".
+          if [ "$GOOS/$GOARCH" = linux/amd64 ]; then
+            stamped=$(out/passwall-node --version)
+            test "$stamped" = "${VERSION} (${short_sha})" || {
+              echo "the built binary reports '${stamped}', not '${VERSION} (${short_sha})'" >&2
+              exit 1
+            }
+          fi
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
