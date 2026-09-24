@@ -78,17 +78,27 @@ func TestPromotionIsOnlyEverDispatchedByHand(t *testing.T) {
 // A PARTIAL PROMOTION IS A STATE TO FINISH, NOT A FAILURE TO RETRY FROM SCRATCH.
 // The release state, the image pointer and any policy naming this version are
 // three systems; the run has to be safe to repeat, and it has to say so when it
-// stopped part-way rather than report success.
+// stopped part-way rather than report success. That the flip is safe to repeat is
+// RUN, in TestTheFlipStatesStableAndLatestOnEveryRun; what is held here is that
+// the report exists and comes last, so a read-back that finds the pointers wrong
+// is reported as pending too.
 func TestAPartialPromotionIsRepeatableAndSaysSo(t *testing.T) {
 	raw, err := os.ReadFile("../.github/workflows/promote.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	if !strings.Contains(text, `if [ "$ALREADY" = false ]`) {
-		t.Fatal("the prerelease flip is unconditional, so a re-run is not a no-op")
-	}
-	if !strings.Contains(text, "if: failure()") || !strings.Contains(text, "promotion_pending") {
+	report := strings.Index(text, "      - name: Report a partial promotion\n        if: failure()\n")
+	if report < 0 || !strings.Contains(text[report:], "promotion_pending") {
 		t.Fatal("a partial promotion is not reported as pending")
+	}
+	for _, step := range []string{"      - name: Flip the release to stable\n", "      - name: Move the latest image pointer to the verified digest\n", "      - name: Confirm what the stable pointers now name\n"} {
+		at := strings.Index(text, step)
+		if at < 0 {
+			t.Fatalf("the promotion lost the step %q", strings.TrimSpace(step))
+		}
+		if at > report {
+			t.Fatalf("%q runs after the partial-promotion report, so its failure is not reported", strings.TrimSpace(step))
+		}
 	}
 }
