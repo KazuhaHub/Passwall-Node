@@ -1,16 +1,34 @@
 name: Published container acceptance
 
-# Run against the release tag ref after its exact public image has been published.
+# Run against a release tag after its exact public image has been published.
 # This is native image execution/identity acceptance, not proxy, credential or
 # persistent-data acceptance. It never starts the agent business loop.
+#
+# IT RUNS AFTER EVERY RELEASE, because a gate somebody has to remember lapsed.
+# HANDOFF makes two-architecture package and container acceptance a release
+# step; while this was dispatch-only, six releases in a row went out without it.
+# A Release run that completed is what starts it now: only a tag push is a
+# release, and only a successful one has pushed its image, since the image is
+# the last thing Release does. workflow_run always runs main's copy of this
+# file, which binds itself to the tag below exactly as a dispatch does. A
+# dispatch still accepts any published tag, from any branch.
 on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Published release tag; select the same tag ref"
+        # No default: the one it had named a release from before the address
+        # changed, and a form that fills itself in accepts the wrong release.
+        description: "Published release tag, for example v4.0.1.5"
         required: true
         type: string
-        default: release/4.0.1.2
+
+# THE TAG IS IN THE TITLE, because the title is what promote.yml finds this
+# acceptance by: a workflow_run's own ref is main, so nothing else about the run
+# names the release it accepted.
+run-name: Published container acceptance of ${{ inputs.tag || github.event.workflow_run.head_branch }}
 
 permissions:
   contents: read
@@ -22,6 +40,9 @@ env:
 jobs:
   published-container:
     name: execute published image Linux/${{ matrix.arch }}
+    # For a tag push, head_branch is the tag. A Release dispatch names its tag in
+    # an input this event does not carry, so it is accepted by dispatching this.
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -31,7 +52,7 @@ jobs:
           - { runner: ubuntu-24.04, arch: amd64 }
           - { runner: ubuntu-24.04-arm, arch: arm64 }
     env:
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
       ACCEPTANCE_ARCH: ${{ matrix.arch }}
       IMAGE_REPOSITORY: ghcr.io/kazuhahub/passwall-node
     steps:
