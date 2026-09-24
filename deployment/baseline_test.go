@@ -85,7 +85,7 @@ func TestBuildBaselinesStayAligned(t *testing.T) {
 	if len(base) != 1 || len(releaseBase) != 1 || base[0][1] != releaseBase[0][1] {
 		t.Fatal("source and release images must share one exact patched runtime base")
 	}
-	for _, path := range []string{".github/workflows/test.yml", ".github/workflows/release.yml", ".github/workflows/core-acceptance.yml", ".github/workflows/installation-acceptance.yml", ".github/workflows/container-acceptance.yml", ".github/workflows/installer.yml"} {
+	for _, path := range []string{".github/workflows/test.yml", ".github/workflows/release.yml", ".github/workflows/core-acceptance.yml", ".github/workflows/installation-acceptance.yml", ".github/workflows/container-acceptance.yml", ".github/workflows/installer.yml", ".github/workflows/watch.yml"} {
 		workflow := read(path)
 		if !strings.Contains(workflow, "go-version-file: go.mod") || !strings.Contains(workflow, `GOTOOLCHAIN: "local"`) {
 			t.Fatalf("%s must select and inspect the pinned compiler without auto-upgrading", path)
@@ -145,6 +145,40 @@ func TestVersionStampsNameTheModulePath(t *testing.T) {
 	for _, path := range []string{"../Dockerfile", "../.github/workflows/release.yml", "../.github/workflows/test.yml"} {
 		if stamps[path] == 0 {
 			t.Errorf("%s stamps no version this guard can see", path)
+		}
+	}
+}
+
+// A TOOL PINNED IN A `run:` LINE IS ONE DECISION, WHEREVER IT RUNS. Dependabot
+// reads go.mod and `uses:` lines, never `go run tool@version`, so these pins are
+// moved by hand, and a second copy of one is the copy a bump misses: the weekly
+// govulncheck would keep scanning with the version test.yml had left behind.
+func TestToolPinsAgreeAcrossWorkflows(t *testing.T) {
+	workflows, err := filepath.Glob("../.github/workflows/*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := regexp.MustCompile(`go run ([^@\s]+)@(\S+)`)
+	pinned := map[string]map[string][]string{}
+	for _, path := range workflows {
+		text, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range pin.FindAllStringSubmatch(string(text), -1) {
+			tool, version := match[1], match[2]
+			if pinned[tool] == nil {
+				pinned[tool] = map[string][]string{}
+			}
+			pinned[tool][version] = append(pinned[tool][version], filepath.Base(path))
+		}
+	}
+	if len(pinned["golang.org/x/vuln/cmd/govulncheck"]) == 0 {
+		t.Fatal("no workflow pins govulncheck; this guard reads nothing")
+	}
+	for tool, versions := range pinned {
+		if len(versions) > 1 {
+			t.Errorf("%s is pinned at more than one version: %v", tool, versions)
 		}
 	}
 }

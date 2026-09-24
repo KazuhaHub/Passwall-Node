@@ -1,0 +1,133 @@
+name: Weekly watch
+
+# TWO FACTS THAT GO STALE WITH NOBODY EDITING ANYTHING, checked once a week.
+#
+# The reviewed core catalog is a claim about two upstreams that keep shipping:
+# corecatalog/catalog.json lists the Xray and sing-box releases this project has
+# reviewed, the panel offers exactly those, and nothing noticed a newer upstream
+# release — only core-acceptance.yml reads upstream at all, and it pins exact
+# versions by digest. These are network-facing binaries whose upstreams ship
+# security fixes, so a release nobody has looked at deserves a signal.
+#
+# govulncheck in test.yml reports what the Go vulnerability database knows only
+# when a push or a PR happens to run it. An advisory published during a quiet
+# week against a dependency this daemon ships was reported at the next commit,
+# whenever that was.
+#
+# Neither job edits anything. Reviewing a core means acceptance evidence and a
+# tier, and a job that wrote the catalog would be asserting what it did not
+# verify; what it refuses to allow is silence. A red run is the signal, not a
+# broken build, and neither job is required.
+on:
+  schedule:
+    # Mondays 04:41 UTC. Off the hour on purpose: scheduled runs at :00 queue
+    # behind everyone else's and get delayed or dropped.
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+  # A catalog edit that puts it out of its watcher's reach is caught on the PR,
+  # not on the next Monday.
+  pull_request:
+    paths:
+      - corecatalog/catalog.json
+      - .github/workflows/watch.yml
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+concurrency:
+  group: watch-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  cores:
+    name: reviewed cores vs upstream releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Lifts the API quota off the anonymous 60/hour-per-IP limit runners share,
+      # so "could not tell" is about the upstream rather than the neighbours.
+      GH_TOKEN: ${{ github.token }}
+      # A release REVIEWED AND DECLINED, one per line: `engine version reason`.
+      # The newest upstream release is accounted for when the catalog reaches it
+      # or when it is listed here; a newer one after it is a new question.
+      PASSED_OVER: ""
+    steps:
+      - uses: actions/checkout@v6
+      # THE NEWEST PLAIN vX.Y.Z RELEASE, WHATEVER ITS PRE-RELEASE FLAG. Xray marks
+      # most releases pre-release — the recommended 26.6.27 is one — so the flag
+      # says nothing about whether one is reviewable, while sing-box's alphas,
+      # betas and release candidates carry a suffix and are never catalogued.
+      #
+      # Exit 1 is a real gap: an upstream release newer than anything reviewed.
+      # Exit 2 is a comparison that could not be made (the API, an upstream that
+      # moved, a catalog shape this cannot read), which is deliberately not
+      # green: an upstream whose releases we cannot read looks exactly like one
+      # that has shipped nothing.
+      - name: Compare the catalog with the newest upstream releases
+        shell: bash
+        run: |
+          set -uo pipefail
+          check() {
+            local engine=$1 repository=$2 tags newest reviewed
+            if ! tags=$(gh api "repos/${repository}/releases?per_page=30" --jq '.[] | select(.draft | not) | .tag_name'); then
+              echo "::error::cannot read ${repository}'s releases"
+              return 2
+            fi
+            newest=$(printf '%s\n' "$tags" | sed -n 's/^v\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\)$/\1/p' | sort -V | tail -n 1)
+            if [ -z "$newest" ]; then
+              echo "::error::${repository} lists no plain vX.Y.Z release among its newest 30"
+              return 2
+            fi
+            reviewed=$(jq -r --arg engine "$engine" '.releases[] | select(.engine == $engine) | .version' corecatalog/catalog.json | sort -V | tail -n 1)
+            if [ -z "$reviewed" ]; then
+              echo "::error::corecatalog/catalog.json lists no ${engine} release this can read"
+              return 2
+            fi
+            if [ "$(printf '%s\n%s\n' "$reviewed" "$newest" | sort -V | tail -n 1)" = "$reviewed" ]; then
+              echo "${engine}: newest upstream ${newest}, reviewed up to ${reviewed}"
+              return 0
+            fi
+            if printf '%s\n' "$PASSED_OVER" | awk -v engine="$engine" -v version="$newest" '$1 == engine && $2 == version { found = 1 } END { exit !found }'; then
+              echo "${engine}: newest upstream ${newest} was passed over, reviewed up to ${reviewed}"
+              return 0
+            fi
+            echo "::error::${engine} ${newest} (${repository}) is newer than anything corecatalog/catalog.json has reviewed; the newest reviewed is ${reviewed}"
+            return 1
+          }
+          worst=0
+          for pair in xray=XTLS/Xray-core sing-box=SagerNet/sing-box; do
+            code=0
+            check "${pair%%=*}" "${pair#*=}" || code=$?
+            if [ "$code" -gt "$worst" ]; then worst=$code; fi
+          done
+          case "$worst" in
+            0) echo "::notice::The reviewed core catalog accounts for the newest release of both upstreams." ;;
+            1) echo "::error::An upstream core is ahead of the catalog. Review it into corecatalog/catalog.json with the evidence its tier needs, or list it in PASSED_OVER in this workflow with the reason." ;;
+            *) echo "::error::A comparison could not be made; the watcher itself needs attention. This is NOT a clean bill of health." ;;
+          esac
+          exit "$worst"
+
+  govulncheck:
+    name: reachable vulnerabilities on main
+    # The PR trigger exists for the catalog; test.yml already scans every PR.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The same pin as test.yml's step; baseline_test.go keeps the two one
+      # decision, since Dependabot cannot see a version in a `run:` line.
+      - name: Reachable vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
