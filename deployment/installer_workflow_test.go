@@ -32,7 +32,7 @@ func TestTheInstallerWorkflowPackagesWithTheReleasesOwnStep(t *testing.T) {
 	job, step := reader[1], reader[2]
 	script := extractStepScript(t, workflowJob(t, release, job), "      - name: "+step+"\n")
 	// The step it finds is the one that writes the archives and the manifest.
-	for _, required := range []string{`tar -C build -czf "dist/${package}.tar.gz" "$package"`, "(cd dist && sha256sum -- * > SHA256SUMS.txt)"} {
+	for _, required := range []string{`> "dist/${package}.tar.gz"`, `"../dist/${package}.zip"`, "(cd dist && sha256sum -- * > SHA256SUMS.txt)"} {
 		if !strings.Contains(script, required) {
 			t.Errorf("release.yml's %q step no longer runs %s; installer.yml would package something else", step, required)
 		}

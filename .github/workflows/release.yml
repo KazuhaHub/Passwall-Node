@@ -157,9 +157,14 @@ jobs:
             exit 1
           fi
           owner_lc=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          # Successful build-job retries reuse this stamp instead of changing
-          # the daemon bytes by reading a fresh clock in every build job.
-          build_date=$(date -u +%FT%TZ)
+          # THE STAMP IS THE TAGGED COMMIT'S TIME, NOT THE CLOCK'S, so one commit
+          # builds one set of bytes on every run and on anyone's machine. A clock
+          # reading survived a build-job retry but not a new run, and it was the
+          # one input to the daemon nobody could reproduce: with -trimpath and the
+          # pinned toolchain and modules, it alone stood between a tag and an
+          # independent rebuild that matches what was signed. The packaging step
+          # dates the archive members from the same commit.
+          build_date=$(date -u -d "@$(git show -s --format=%ct "$release_sha")" +%FT%TZ)
           upgrade_info=$(go run ./cmd/node --upgrade-info)
           state_schema=$(printf '%s' "$upgrade_info" | jq -er '.state_schema | select(type == "number" and . > 0)')
           upgrade_contract=$(printf '%s' "$upgrade_info" | jq -er '.upgrade_contract | select(type == "number" and . > 0)')
@@ -394,6 +399,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build dist
+          # THE ARCHIVES ARE A FUNCTION OF THE COMMIT, like the binaries in them.
+          # They used to carry the copy time of every member, the runner's uid and
+          # whatever order the directory listed in, so each packaging produced
+          # different bytes and a different manifest. That matters on a retry: the
+          # publishing action makes the release public BEFORE its assets upload
+          # and, with overwrite_files off, keeps what an earlier attempt uploaded,
+          # so a re-run after a failed upload could publish a signed manifest that
+          # describes archives other than the ones beside it. Every member is now
+          # dated from the commit, owned by 0:0, mode-normalised and listed in
+          # byte order, and neither compressor records a name or a clock.
+          epoch=$(git log -1 --format=%ct HEAD)
           for dir in artifacts/passwall-node-*; do
             platform="${dir#artifacts/passwall-node-}"
             goos="${platform%-*}"
@@ -404,14 +420,22 @@ jobs:
             ext=""
             if [ "$goos" = "windows" ]; then ext=".exe"; fi
             cp "${dir}/passwall-node${ext}" "${package_dir}/passwall-node${ext}"
-            chmod +x "${package_dir}/passwall-node${ext}" || true
+            # An artifact download drops the executable bit.
+            chmod 0755 "${package_dir}/passwall-node${ext}"
             cp LICENSE NOTICE README.md HANDOFF.md compose.example.yaml install.sh "${package_dir}/"
             mkdir -p "${package_dir}/deployment"
             cp deployment/install.sh "${package_dir}/deployment/"
+            chmod -R u=rwX,go=rX "$package_dir"
+            find "$package_dir" -exec touch -h -d "@${epoch}" {} +
             if [ "$goos" = "windows" ]; then
-              (cd build && zip -qr "../dist/${package}.zip" "$package")
+              # -X leaves out the extra fields that carry uid, gid and access
+              # time; zip stores local time, so the zone is fixed too.
+              (cd build && find "$package" | LC_ALL=C sort |
+                TZ=UTC zip -qX -@ "../dist/${package}.zip")
             else
-              tar -C build -czf "dist/${package}.tar.gz" "$package"
+              tar --format=gnu --sort=name --mtime="@${epoch}" \
+                --owner=0 --group=0 --numeric-owner \
+                -C build -cf - "$package" | gzip -n > "dist/${package}.tar.gz"
             fi
           done
           # THE TEMPLATE IS PUBLISHED BY ITSELF, SIGNED WITH EVERYTHING ELSE.
