@@ -90,6 +90,13 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      # THE STANDALONE SCRIPTS GOT `sh -n` AT MOST. actionlint shellchecks only the
+      # `run:` blocks, and install.sh is served from main to root shells. The runner
+      # image ships shellcheck. Two codes are off on purpose: SC2034, because the
+      # unused names are `read` fields and rendered template values kept by name,
+      # and SC1007, because `CDPATH= cd` is the portable idiom it warns about.
+      - name: Shellcheck the standalone shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
       - name: Validate immutable image publishing check
         run: node --test deployment/check_image_test.mjs
       - uses: actions/cache/save@v6
@@ -146,12 +153,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `vet` marks the one leg per non-Linux OS that also vets the module for
+        # it; see the step below.
         include:
           - { goos: linux,   goarch: amd64, ext: ""     }
           - { goos: linux,   goarch: arm64, ext: ""     }
           - { goos: darwin,  goarch: amd64, ext: ""     }
-          - { goos: darwin,  goarch: arm64, ext: ""     }
-          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: darwin,  goarch: arm64, ext: "",     vet: true }
+          - { goos: windows, goarch: amd64, ext: ".exe", vet: true }
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v6
@@ -178,6 +187,21 @@ jobs:
         run: |
           go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
           sh deployment/check-build.sh "passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$GITHUB_SHA"
+      # THE DARWIN AND WINDOWS CODE WAS COMPILED AND NEVER VETTED. The checks job
+      # vets linux/amd64, and the build above compiles ./cmd/node alone, so the
+      # suspend-inclusive task clock on darwin, the Windows process and signal
+      # handling, and every test file under another GOOS were never even
+      # type-checked — the first vet for Windows failed on a syscall.Stat_t in a
+      # deployment test. One leg per OS, because the code differs by OS rather
+      # than by architecture, and it is this leg because its build cache already
+      # holds the target's objects: about 30s cold, a few seconds warm.
+      - name: Vet the module for this OS
+        if: matrix.vet
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go vet ./...
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:

@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -123,7 +122,10 @@ func TestLinuxInstallReplacesTheReleaseInPlaceAndKeepsIdentityAndState(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if beforeInode, afterInode := before.Sys().(*syscall.Stat_t).Ino, after.Sys().(*syscall.Stat_t).Ino; beforeInode != afterInode {
+	// os.SameFile is the device-and-inode comparison, and unlike a syscall.Stat_t
+	// assertion it compiles for every target the release builds, so this package
+	// can be vetted for Windows too.
+	if !os.SameFile(before, after) {
 		t.Error("the upgrade replaced the state file instead of leaving it in place")
 	}
 
