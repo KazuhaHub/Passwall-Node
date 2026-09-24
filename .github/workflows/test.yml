@@ -316,23 +316,15 @@ jobs:
             test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
             test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
           done
-      - name: Verify BusyBox entrypoint with directory bind mounts
+      - name: Verify BusyBox entrypoint, started directly and from the example compose
         shell: bash
         run: |
           set -euo pipefail
-          fixture="$RUNNER_TEMP/passwall-node-container"
-          mkdir -p "$fixture/config" "$fixture/data"
-          printf 'pspn_%064d\n' 0 > "$fixture/config/node-credential.txt"
-          # 0600, OWNED BY THE RUNNER'S UID — which is what the installation
-          # instructions produce on any host whose installer is not root, and what a
-          # NAS produces. Without this mode the check ran with a world-readable file
-          # and could not see that reading the mounted credential needs DAC_OVERRIDE.
-          chmod 0600 "$fixture/config/node-credential.txt"
           # EVERY LINE OF THE STAND-IN IS AN ASSERTION, AND `set -e` IS WHAT MAKES IT
           # ONE. Without it a failed `test` was a status nobody read and the ready
           # marker was written anyway, so none of these could fail the check. `-x`
           # puts the line that failed, with its values, in the container's log.
-          cat > "$fixture/fake-node" <<'SCRIPT'
+          cat > "$RUNNER_TEMP/fake-node" <<'SCRIPT'
           #!/bin/sh
           set -eux
           test "$(id -u):$(id -g)" = 10001:10001
@@ -347,48 +339,102 @@ jobs:
           touch /var/lib/passwall-node/entrypoint-ready
           exec sleep 30
           SCRIPT
-          chmod 0755 "$fixture/fake-node"
+          chmod 0755 "$RUNNER_TEMP/fake-node"
+          new_fixture() {
+            mkdir -p "$1/config" "$1/data"
+            printf 'pspn_%064d\n' 0 > "$1/config/node-credential.txt"
+            # 0600, OWNED BY THE RUNNER'S UID — which is what the installation
+            # instructions produce on any host whose installer is not root, and what a
+            # NAS produces. Without this mode the check ran with a world-readable file
+            # and could not see that reading the mounted credential needs DAC_OVERRIDE.
+            chmod 0600 "$1/config/node-credential.txt"
+          }
+          # EVERY FAILURE HERE PRINTS WHAT THE CONTAINER SAID. The first version of
+          # this check asserted and exited, so a red run showed the assertion and not
+          # the reason — and the reason is inside the container, where the entrypoint's
+          # own fatal line and the node binary's output live.
+          expect_node_started() {
+            local container=$1 fixture=$2
+            for _ in {1..10}; do
+              test -f "$fixture/data/entrypoint-ready" && break
+              sleep 1
+            done
+            if ! test -f "$fixture/data/entrypoint-ready"; then
+              echo "the entrypoint never reached the node binary; its own output follows" >&2
+              docker logs "$container" >&2
+              return 1
+            fi
+            if ! test "$(docker inspect --format '{{.State.Running}}' "$container")" = true; then
+              echo "the container is not running; its own output follows" >&2
+              docker logs "$container" >&2
+              return 1
+            fi
+            docker logs "$container" > "$RUNNER_TEMP/passwall-node-container.log" 2>&1
+            if grep -Fq 'find: unrecognized: -uid' "$RUNNER_TEMP/passwall-node-container.log"; then
+              cat "$RUNNER_TEMP/passwall-node-container.log" >&2
+              return 1
+            fi
+            test "$(stat -c %u:%g "$fixture/data")" = 10001:10001
+            # THE COPY IS THE MOUNTED CREDENTIAL, compared by the container's root. The
+            # agent cannot make this comparison, which is the point of the mode: the
+            # mounted file is 0600 and belongs to the account that installed it.
+            docker exec "$container" cmp /run/passwall-node/credential /run/secrets/passwall-node/node-credential.txt
+          }
+          trap 'docker rm -f passwall-node-direct passwall-node-agent > /dev/null 2>&1 || true' EXIT
+
+          # STARTED FROM THE IMAGE DIRECTLY, with no tmpfs over /run/passwall-node, so
+          # the entrypoint finds the service account's directory the image built and
+          # has to take it back before it writes there.
+          #
           # THE CAPABILITY SET IS THE COMPOSE'S, AND IT IS THE POINT OF THIS CHECK.
           # Without --cap-drop ALL the container runs with Docker's default set, which
           # includes CAP_DAC_OVERRIDE — and with it root can write into a directory it
           # has handed to PUID, so the credential copy succeeds here and fails on every
           # real installation. That is exactly how a copy that only works with
           # DAC_OVERRIDE reached a published image.
-          container="$(docker run -d --network none \
+          fixture="$RUNNER_TEMP/passwall-node-container"
+          new_fixture "$fixture"
+          docker run -d --name passwall-node-direct --network none \
             --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETGID --cap-add SETUID \
             -e PSP_NODE_ENDPOINT=https://panel.invalid/v1/node/sync \
             -e PSP_NODE_AGENT_ID=agt_container_entrypoint \
             -e PSP_NODE_CREDENTIAL_FILE=/run/secrets/passwall-node/node-credential.txt \
             -v "$fixture/config:/run/secrets/passwall-node:ro" \
             -v "$fixture/data:/var/lib/passwall-node" \
-            -v "$fixture/fake-node:/usr/local/bin/passwall-node:ro" \
-            passwall-node:test)"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          # EVERY FAILURE HERE PRINTS WHAT THE CONTAINER SAID. The first version of
-          # this check asserted and exited, so a red run showed the assertion and not
-          # the reason — and the reason is inside the container, where the entrypoint's
-          # own fatal line and the node binary's output live.
-          for _ in {1..10}; do
-            test -f "$fixture/data/entrypoint-ready" && break
-            sleep 1
-          done
-          if ! test -f "$fixture/data/entrypoint-ready"; then
-            echo "the entrypoint never reached the node binary; its own output follows" >&2
-            docker logs "$container" >&2
-            exit 1
-          fi
-          if ! test "$(docker inspect --format '{{.State.Running}}' "$container")" = true; then
-            echo "the container is not running; its own output follows" >&2
-            docker logs "$container" >&2
-            exit 1
-          fi
-          docker logs "$container" > "$RUNNER_TEMP/passwall-node-container.log" 2>&1
-          if grep -Fq 'find: unrecognized: -uid' "$RUNNER_TEMP/passwall-node-container.log"; then
-            cat "$RUNNER_TEMP/passwall-node-container.log" >&2
-            exit 1
-          fi
-          test "$(stat -c %u:%g "$fixture/data")" = 10001:10001
-          # THE COPY IS THE MOUNTED CREDENTIAL, compared by the container's root. The
-          # agent cannot make this comparison, which is the point of the mode: the
-          # mounted file is 0600 and belongs to the account that installed it.
-          docker exec "$container" cmp /run/passwall-node/credential /run/secrets/passwall-node/node-credential.txt
+            -v "$RUNNER_TEMP/fake-node:/usr/local/bin/passwall-node:ro" \
+            passwall-node:test > /dev/null
+          expect_node_started passwall-node-direct "$fixture"
+
+          # AND FROM compose.example.yaml ITSELF, NOT A COPY OF IT. The case above
+          # carries the capability set by hand; the example also runs the agent
+          # read-only, with a root-owned 0700 tmpfs over /run/passwall-node, under
+          # no-new-privileges, and with the updater's marker directory, and the first
+          # of those is where #58's restart loop lived. The override swaps only what CI
+          # must: the image (the release recipe, which is the one operators pull) and
+          # the stand-in binary. `--no-deps` leaves the updater, and its docker socket,
+          # out; the marker it would write is written here, or the entrypoint would
+          # wait 15s for it, longer than the loop above.
+          fixture="$RUNNER_TEMP/passwall-node-compose"
+          new_fixture "$fixture"
+          mkdir -p "$fixture/upgrades"
+          printf 'agent.upgrade.v1\n' > "$fixture/upgrades/enabled"
+          cat > "$RUNNER_TEMP/compose.ci.yaml" <<YAML
+          services:
+            passwall-node:
+              image: passwall-node:release
+              volumes:
+                - $RUNNER_TEMP/fake-node:/usr/local/bin/passwall-node:ro
+          YAML
+          NODE_VERSION="$IMAGE_VERSION" \
+          PSP_NODE_ENDPOINT=https://panel.invalid/v1/node/sync \
+          PSP_NODE_AGENT_ID=agt_container_compose \
+            docker compose --project-directory "$fixture" \
+              -f compose.example.yaml -f "$RUNNER_TEMP/compose.ci.yaml" \
+              up -d --no-deps passwall-node
+          expect_node_started passwall-node-agent "$fixture"
+          # AND IT STARTED UNDER THE EXAMPLE'S SETTINGS, read from the kernel's side
+          # rather than from what compose was asked for: a read-only root, a tmpfs
+          # runtime directory, and no-new-privileges on the running node.
+          test "$(docker exec passwall-node-agent awk '$2 == "/" { split($4, o, ","); print o[1] }' /proc/mounts)" = ro
+          test "$(docker exec passwall-node-agent awk '$2 == "/run/passwall-node" { print $3 }' /proc/mounts)" = tmpfs
+          docker exec passwall-node-agent grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/1/status

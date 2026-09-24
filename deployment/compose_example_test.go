@@ -133,3 +133,45 @@ func TestTheEntrypointDoesNotGiveAwayAPathItStillHasToWrite(t *testing.T) {
 		t.Error("the credential must be removed before it is copied: a file the service account owns cannot be overwritten by root either")
 	}
 }
+
+// THE CONTAINER JOB STARTS THE EXAMPLE ITSELF, AND ITS OVERRIDE SWAPS ONLY WHAT CI
+// MUST.
+//
+// The runtime check used to carry a hand copy of part of the example, and the part
+// it left out (the read-only root, the tmpfs runtime directory, no-new-privileges,
+// the updater's marker) was never started by anything before a user did. It now
+// starts compose.example.yaml with a small override, and the override is where a
+// hand copy could creep back: a key added there to make CI pass replaces the
+// example's own and proves the example no longer. So the override may name the
+// image and the stand-in binary's mount, and nothing else.
+func TestTheContainerJobStartsTheExampleCompose(t *testing.T) {
+	raw, err := os.ReadFile("../.github/workflows/test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := workflowJob(t, string(raw), "container")
+	for _, required := range []string{
+		"-f compose.example.yaml -f \"$RUNNER_TEMP/compose.ci.yaml\"",
+		"up -d --no-deps passwall-node",
+		"docker build --file Dockerfile.release",
+	} {
+		if !strings.Contains(job, required) {
+			t.Errorf("the container job no longer runs %s", required)
+		}
+	}
+	const opening, closing = "cat > \"$RUNNER_TEMP/compose.ci.yaml\" <<YAML\n", "\n          YAML\n"
+	start := strings.Index(job, opening)
+	if start < 0 {
+		t.Fatal("the container job writes no compose override this guard can find")
+	}
+	end := strings.Index(job[start:], closing)
+	if end < 0 {
+		t.Fatal("the compose override has no end this guard can find")
+	}
+	allowed := map[string]bool{"services:": true, "passwall-node:": true, "image: passwall-node:release": true, "volumes:": true, "- $RUNNER_TEMP/fake-node:/usr/local/bin/passwall-node:ro": true}
+	for _, line := range strings.Split(job[start+len(opening):start+end], "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && !allowed[trimmed] {
+			t.Errorf("the CI override sets %q, which replaces the example's own setting instead of starting it", trimmed)
+		}
+	}
+}
