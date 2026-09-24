@@ -253,8 +253,14 @@ func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(workflow)
+	// `latest` IS NOT PUBLISHED HERE. It moved when a release went out stable,
+	// and a release no longer can: promote.yml moves `latest`, by digest, to an
+	// image it verified. Inverted rather than deleted, so the decision stays
+	// readable.
+	if strings.Contains(text, "type=raw,value=latest") {
+		t.Fatal("the release workflow tags `latest`, which only promote.yml moves")
+	}
 	for _, required := range []string{
-		"type=raw,value=latest,enable=${{ needs.setup.outputs.image_channel == 'true' && needs.setup.outputs.prerelease == 'false' }}",
 		"type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}",
 		"io.kazuhahub.passwall-node.state-schema=${{ needs.setup.outputs.state_schema }}",
 		"io.kazuhahub.passwall-node.upgrade-contract=${{ needs.setup.outputs.upgrade_contract }}",
@@ -280,8 +286,9 @@ func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
 		"prerelease: ${{ steps.channel.outputs.prerelease }}",
 		"prerelease: ${{ needs.setup.outputs.prerelease }}",
 		// THE DEFAULT IS THE RECOVERABLE DIRECTION, AND IT IS NOW THE DEFAULT FOR
-		// EVERY TAG. The arm that made a plain `v*` stable is gone; `stable` is
-		// reachable only through the stated channel input above it.
+		// EVERY TAG. The arm that made a plain `v*` stable is gone, and so is the
+		// stated `stable` input that replaced it: channel_resolution_test.go runs
+		// its refusal.
 		"auto)    prerelease=true ;;",
 	} {
 		if !strings.Contains(text, required) {

@@ -33,13 +33,15 @@ on:
         required: true
         type: string
       channel:
-        description: "Publication channel. auto reads it from the tag; stable and testing state it."
+        # NO `stable`. A release is published as a pre-release and reaches stable
+        # only through promote.yml, after both acceptances passed on it; see the
+        # channel step.
+        description: "Publication channel. Both publish a pre-release; promote.yml makes one stable."
         required: false
         default: auto
         type: choice
         options:
           - auto
-          - stable
           - testing
 
 permissions:
@@ -101,7 +103,8 @@ jobs:
       # `contains(tag, '-')` read a hyphen as pre-release and a plain `v*` as STABLE.
       # That made a v-tag the one publishable mistake with an unrecoverable half, and
       # it is the same legacy shape rule the product scheme had to be exempted from.
-      # Publishing stable is now something a maintainer states through the input.
+      # Nor does this workflow publish stable any more, stated or not: that is
+      # promote.yml's alone (see the channel step).
       #
       # The tag is still read for one thing — whether it addresses a release at all,
       # in the image-channel case — and that is about the ADDRESS, not the channel.
@@ -186,10 +189,22 @@ jobs:
           PINNED_TAG: ${{ steps.identity.outputs.tag }}
         run: |
           set -euo pipefail
+          # STABLE IS PROMOTE.YML'S, NOT THIS WORKFLOW'S. promote.yml is the one
+          # path that moves a stable pointer: it reuses the published bytes and
+          # requires the signature, the image's commit and both acceptances, which
+          # cannot have run on a release that is still being published. A stable
+          # dispatch here skipped all of that, and it was hardly reachable: it has
+          # to run on the tag's commit, the tag's own push has already started an
+          # auto run, and once that run publishes, this one is refused as already
+          # published. So it is refused outright, rather than left as a second
+          # route that only looks usable.
           case "${REQUESTED:-auto}" in
-            stable)  prerelease=false ;;
             testing) prerelease=true ;;
             auto)    prerelease=true ;;
+            stable)
+              echo 'a release is published as a pre-release; once both acceptances pass on it, promote it with promote.yml' >&2
+              exit 1
+              ;;
             *) echo "unknown publication channel: ${REQUESTED}" >&2; exit 1 ;;
           esac
           # WHETHER THE TAG ADDRESSES A RELEASE AT ALL. Both namespaces do: the
@@ -503,19 +518,19 @@ jobs:
 
   # AFTER THE SIGNED RELEASE, NOT BESIDE IT. This job has no environment, and it
   # used to need only the builds, so the image, `beta` and — on a stable
-  # dispatch — `latest` moved as soon as the builds finished, before anyone
-  # approved anything: v4.0.1.3's `beta` pointed for 11h46m at an image with no
-  # release and no signed manifest while the approval waited. Moving a pointer
-  # consumers follow is the same decision as publishing, which is why
-  # promote.yml sits behind the same environment; here the image waits for the
-  # approved release instead. A rejected or expired approval leaves no image
-  # behind, so the re-run finds the exact tag still absent and the check below
-  # lets it through.
+  # dispatch, while there was one — `latest` moved as soon as the builds
+  # finished, before anyone approved anything: v4.0.1.3's `beta` pointed for
+  # 11h46m at an image with no release and no signed manifest while the
+  # approval waited. Moving a pointer consumers follow is the same decision as
+  # publishing, which is why promote.yml sits behind the same environment; here
+  # the image waits for the approved release instead. A rejected or expired
+  # approval leaves no image behind, so the re-run finds the exact tag still
+  # absent and the check below lets it through.
   #
   # THE ORDER HAS A WINDOW OF ITS OWN, the harmless way round. If this job
-  # fails, the release stays published with no image, and `beta` and `latest`
-  # stay where they were, until the failed job is re-run. A pull of the new
-  # version fails meanwhile; no pointer names an image nobody approved.
+  # fails, the release stays published with no image, and `beta` stays where
+  # it was, until the failed job is re-run. A pull of the new version fails
+  # meanwhile; no pointer names an image nobody approved.
   docker:
     name: Publish container image
     runs-on: ubuntu-latest
@@ -564,12 +579,11 @@ jobs:
             # rule stays because the four releases published there are still built
             # by this same job.
             type=raw,value=${{ needs.setup.outputs.version }}
-            # AND THE CHANNEL IS RESOLVED, NOT READ OFF THE TAG TEXT. Both of
-            # these used to test `startsWith(tag, 'v')`, which a product tag has
-            # no prefix for — so neither pointer would have moved. They read the
-            # one answer setup resolved, which is also the answer the release's
-            # prerelease flag uses, so the two cannot disagree.
-            type=raw,value=latest,enable=${{ needs.setup.outputs.image_channel == 'true' && needs.setup.outputs.prerelease == 'false' }}
+            # AND THE CHANNEL IS RESOLVED, NOT READ OFF THE TAG TEXT. This used
+            # to test `startsWith(tag, 'v')`, which a product tag has no prefix
+            # for, so the pointer would not have moved; it reads the answer setup
+            # resolved. `latest` is not here: every release is published as a
+            # pre-release, and promote.yml moves `latest` to a digest it verified.
             type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}
           labels: |
             org.opencontainers.image.title=passwall-node

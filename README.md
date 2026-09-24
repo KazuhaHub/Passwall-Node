@@ -321,18 +321,19 @@ go vet ./...
 
 CI runs the suite once, under the race detector, vets it, cross-compiles
 `cmd/node` for six targets, and builds the container. A `v*` tag publishes
-archives plus `SHA256SUMS.txt` and a multi-architecture GHCR image. `:latest`
-is stable-only; `:beta` follows the newest release of either stability class.
+archives plus `SHA256SUMS.txt` and a multi-architecture GHCR image, always as a
+pre-release. `:latest` is stable-only; `:beta` follows the newest release of
+either stability class.
 The tagged commit must be on `main`, and its Test run there must have
 succeeded; the release waits for that run and refuses any other conclusion, so
 a cancelled or failed run is re-run first.
-The image, and with it `:beta` or `:latest`, is pushed only after the approved,
-signed release is published. If the image job fails, the release stays
-published without an image, and the pointers stay where they were, until that
-failed job is re-run.
+The image, and with it `:beta`, is pushed only after the approved, signed
+release is published. If the image job fails, the release stays published
+without an image, and `:beta` stays where it was, until that failed job is
+re-run.
 The container and installation acceptances run by themselves on amd64 and
-arm64 after every release, and `promote.yml` promotes a release to Stable only
-once both have passed on it.
+arm64 after every release. A release becomes Stable, and `:latest` moves to
+its image, only through `promote.yml`, once both have passed on it.
 
 ## Contract harness
 

@@ -45,7 +45,7 @@ func TestTheReleaseChannelResolution(t *testing.T) {
 		// THE DEFAULT IS A PRE-RELEASE, INCLUDING FOR A PLAIN LEGACY TAG. It used
 		// to be stable for `v1.0.0`, which made a v-tag the one publishable mistake
 		// with an unrecoverable half: it moves a pointer consumers follow.
-		// Publishing stable is now something a maintainer states.
+		// Stable is now promote.yml's alone.
 		{"legacy plain tag", "v1.0.0", "auto", true, true},
 		{"legacy beta", "v0.0.1-beta11", "auto", true, true},
 		{"legacy rc", "v1.0.0-rc1", "auto", true, true},
@@ -57,8 +57,9 @@ func TestTheReleaseChannelResolution(t *testing.T) {
 		{"bare version", "1.0.0", "auto", true, false},
 		{"scratch name", "nightly", "auto", true, false},
 		// An explicit channel overrides the shape, which is what the input is for.
-		{"product tag stated stable", "release/4.0.0", "stable", false, true},
+		// It is testing or nothing: stated stable is refused below.
 		{"legacy tag stated testing", "v1.0.0", "testing", true, true},
+		{"product tag stated testing", "v4.0.1.5", "testing", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prerelease, images := runChannelScript(t, script, tc.tag, tc.requested)
@@ -69,6 +70,25 @@ func TestTheReleaseChannelResolution(t *testing.T) {
 				t.Errorf("images for %s (channel %s) = %v, want %v", tc.tag, tc.requested, images, tc.images)
 			}
 		})
+	}
+
+	// STATED STABLE IS REFUSED, AND SAYS WHERE STABLE COMES FROM. It used to be
+	// the one case here that published stable. promote.yml is the only path that
+	// moves a stable pointer, and it requires the signature, the image's commit
+	// and both acceptances, none of which a release still being published can
+	// have; a stable dispatch here skipped them all. An inverted case rather than
+	// a deleted one, so the decision stays readable.
+	for _, tag := range []string{"v4.0.1.5", "release/4.0.0", "v1.0.0"} {
+		out, err := runChannelScriptRaw(t, script, tag, "stable")
+		if err == nil {
+			t.Errorf("a stable publication of %s was resolved rather than refused:\n%s", tag, out)
+		} else if !strings.Contains(out, "promote.yml") {
+			t.Errorf("the refusal of a stable publication does not name promote.yml:\n%s", out)
+		}
+	}
+	// And the dispatch form no longer offers it.
+	if regexp.MustCompile(`(?m)^          - stable$`).MatchString(text) {
+		t.Error("the release dispatch still offers a stable channel")
 	}
 }
 
@@ -125,6 +145,18 @@ func extractStepScript(t *testing.T, workflow, stepName string) string {
 		lines = append(lines, strings.TrimPrefix(line, "          "))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func runChannelScriptRaw(t *testing.T, script, tag, requested string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PINNED_TAG="+tag,
+		"REQUESTED="+requested,
+		"GITHUB_OUTPUT="+filepath.Join(t.TempDir(), "outputs"),
+	)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func runChannelScript(t *testing.T, script, tag, requested string) (prerelease, images bool) {
