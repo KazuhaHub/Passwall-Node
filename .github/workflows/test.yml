@@ -240,6 +240,22 @@ jobs:
           test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
       - name: Verify native runner architecture
         run: test "$(go env GOHOSTARCH)" = "${{ matrix.arch }}"
+      # THE ONE TEST THAT CAN CONTRADICT THE HOST FIXTURES NEVER RAN. The unit
+      # suite's /proc, /sys and cgroup fixtures encode what their author believed a
+      # kernel writes; TestCollectOnTheRealHost collects from the kernel it runs on
+      # and holds the result to protocol.ValidateHostObservation, which is what the
+      # panel applies to every report. It is gated because it needs a real systemd
+      # host, and these two legs are exactly that — the stock Ubuntu 24.04 that
+      # operators run, on both architectures the release ships. It passes in well
+      # under a second; the gate stays for machines that are not such a host.
+      - name: Host collector against this runner's real kernel
+        env:
+          PSP_HOST_LIVE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./internal/host -run '^TestCollectOnTheRealHost$' -count=1 -timeout=2m | tee "$RUNNER_TEMP/host-live-test.log"
+          grep -q '^--- PASS: TestCollectOnTheRealHost ' "$RUNNER_TEMP/host-live-test.log"
       - name: Run real isolated systemd permission and helper fixture acceptance
         env:
           PN_SYSTEMD_ACCEPTANCE: "1"
