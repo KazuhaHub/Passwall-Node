@@ -3,9 +3,11 @@ package deployment
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -353,6 +355,95 @@ func TestThePromotionReadsBackWhatUsersNowGet(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(out, tc.refusal) {
 				t.Fatalf("want a refusal naming %q, got err=%v:\n%s", tc.refusal, err, out)
+			}
+		})
+	}
+}
+
+// STABLE IS OFFERED ONLY AFTER BOTH ACCEPTANCES PASSED ON THE RELEASE, on main's
+// copy of each and on every leg. The runs are found by title, and the titles here
+// are what each acceptance workflow's own run-name makes of the tag, so a
+// run-name that stopped naming the tag fails this rather than every promotion.
+func TestAReleaseIsPromotedOnlyAfterBothAcceptancesPassed(t *testing.T) {
+	script := promotionStep(t, "Refuse a release the two-architecture acceptance has not passed")
+	const tag = "v4.0.99.1"
+	title := map[string]string{}
+	name := map[string]string{}
+	for _, workflow := range []string{"container-acceptance.yml", "installation-acceptance.yml"} {
+		raw, err := os.ReadFile("../.github/workflows/" + workflow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		named := regexp.MustCompile(`(?m)^name: (.+)$`).FindStringSubmatch(text)
+		runName := regexp.MustCompile(`(?m)^run-name: (.+)$`).FindStringSubmatch(text)
+		if named == nil || runName == nil {
+			t.Fatalf("%s has no name or no run-name", workflow)
+		}
+		name[workflow] = named[1]
+		title[workflow] = strings.ReplaceAll(runName[1], "${{ inputs.tag || github.event.workflow_run.head_branch }}", tag)
+	}
+	type run struct {
+		id           int
+		workflow     string
+		title, event string
+		branch       string
+		legs         []string
+	}
+	accepted := func(id int, workflow string) run {
+		return run{id, workflow, title[workflow], "workflow_run", "main", []string{"success", "success"}}
+	}
+	for _, tc := range []struct {
+		name    string
+		runs    []run
+		refusal string
+	}{
+		{"both accepted after the release", []run{accepted(1, "container-acceptance.yml"), accepted(2, "installation-acceptance.yml")}, ""},
+		{"installation accepted by a dispatch from main", []run{accepted(1, "container-acceptance.yml"),
+			{2, "installation-acceptance.yml", title["installation-acceptance.yml"], "workflow_dispatch", "main", []string{"success", "success"}}}, ""},
+		{"an older run passed where the newest lost a leg", []run{accepted(1, "container-acceptance.yml"),
+			{3, "installation-acceptance.yml", title["installation-acceptance.yml"], "workflow_run", "main", []string{"success", "skipped"}},
+			accepted(2, "installation-acceptance.yml")}, ""},
+		{"no installation acceptance", []run{accepted(1, "container-acceptance.yml")}, "installation-acceptance.yml"},
+		{"no container acceptance", []run{accepted(2, "installation-acceptance.yml")}, "container-acceptance.yml"},
+		{"installation accepted only from a branch", []run{accepted(1, "container-acceptance.yml"),
+			{2, "installation-acceptance.yml", title["installation-acceptance.yml"], "workflow_dispatch", "kazuha/installer", []string{"success", "success"}}}, "installation-acceptance.yml"},
+		{"another tag that starts with this one", []run{accepted(1, "container-acceptance.yml"),
+			{2, "installation-acceptance.yml", title["installation-acceptance.yml"] + "0", "workflow_run", "main", []string{"success", "success"}}}, "installation-acceptance.yml"},
+		{"one architecture only", []run{accepted(1, "container-acceptance.yml"),
+			{2, "installation-acceptance.yml", title["installation-acceptance.yml"], "workflow_run", "main", []string{"success"}}}, "installation-acceptance.yml"},
+		{"a leg that failed", []run{
+			{1, "container-acceptance.yml", title["container-acceptance.yml"], "workflow_run", "main", []string{"success", "failure"}},
+			accepted(2, "installation-acceptance.yml")}, "container-acceptance.yml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newPromotionStub(t)
+			// gh run list answers newest first, with the fields the step asks for.
+			listed := map[string][]string{"container-acceptance.yml": nil, "installation-acceptance.yml": nil}
+			for i := len(tc.runs) - 1; i >= 0; i-- {
+				r := tc.runs[i]
+				listed[r.workflow] = append(listed[r.workflow], fmt.Sprintf(`{"databaseId":%d,"displayTitle":%q,"workflowName":%q,"event":%q,"headBranch":%q}`, r.id, r.title, name[r.workflow], r.event, r.branch))
+				var jobs []string
+				for _, leg := range r.legs {
+					jobs = append(jobs, fmt.Sprintf(`{"conclusion":%q}`, leg))
+				}
+				stub.file(t, fmt.Sprintf("jobs-%d", r.id), `{"jobs":[`+strings.Join(jobs, ",")+`]}`)
+			}
+			for workflow, runs := range listed {
+				stub.file(t, "runs-"+workflow, "["+strings.Join(runs, ",")+"]")
+			}
+			out, err := stub.run(t, script, t.TempDir(), nil, "TAG="+tag)
+			if tc.refusal == "" {
+				if err != nil {
+					t.Fatalf("an accepted release was refused: %v\n%s", err, out)
+				}
+			} else if err == nil || !strings.Contains(out, "no run of "+tc.refusal) {
+				t.Fatalf("want a refusal naming %s, got err=%v:\n%s", tc.refusal, err, out)
+			}
+			for _, asked := range stub.asked(t, "gh") {
+				if strings.HasPrefix(asked, "run list") && (!strings.Contains(asked, "--repo "+promotionRepository) || !strings.Contains(asked, "--status success")) {
+					t.Fatalf("the step asked gh %q", asked)
+				}
 			}
 		})
 	}

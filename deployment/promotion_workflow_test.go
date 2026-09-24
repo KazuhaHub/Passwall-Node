@@ -2,6 +2,7 @@ package deployment
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -82,6 +83,10 @@ func TestPromotionIsOnlyEverDispatchedByHand(t *testing.T) {
 // RUN, in TestTheFlipStatesStableAndLatestOnEveryRun; what is held here is that
 // the report exists and comes last, so a read-back that finds the pointers wrong
 // is reported as pending too.
+//
+// AND A REFUSAL IS NOT ONE. The acceptance, signature and image checks all fail
+// before the flip, which then never runs; the report is RUN with each outcome the
+// flip can have, and says "pending" only once the flip was attempted.
 func TestAPartialPromotionIsRepeatableAndSaysSo(t *testing.T) {
 	raw, err := os.ReadFile("../.github/workflows/promote.yml")
 	if err != nil {
@@ -99,6 +104,35 @@ func TestAPartialPromotionIsRepeatableAndSaysSo(t *testing.T) {
 		}
 		if at > report {
 			t.Fatalf("%q runs after the partial-promotion report, so its failure is not reported", strings.TrimSpace(step))
+		}
+	}
+
+	// The report reads the flip's outcome, and the flip is the first step that
+	// changes anything: every step before it only reads.
+	if !strings.Contains(text, "      - name: Flip the release to stable\n        id: flip\n") ||
+		!strings.Contains(text[report:], "FLIP: ${{ steps.flip.outcome }}\n") {
+		t.Fatal("the report does not know whether the flip ran, so a refusal reads as a partial promotion")
+	}
+	flip := strings.Index(text, "      - name: Flip the release to stable\n")
+	for _, mutation := range []string{"-X PATCH", "imagetools create"} {
+		if at := strings.Index(text, mutation); at < 0 || at < flip {
+			t.Fatalf("%q is not at or after the flip, so a failure before the flip may have moved something", mutation)
+		}
+	}
+	script := promotionStep(t, "Report a partial promotion")
+	for _, tc := range []struct{ flip, want, not string }{
+		{"success", "promotion_pending", "nothing was promoted"},
+		{"failure", "promotion_pending", "nothing was promoted"},
+		{"skipped", "nothing was promoted", "promotion_pending"},
+	} {
+		cmd := exec.Command("bash", "-c", script)
+		cmd.Env = append(os.Environ(), "FLIP="+tc.flip)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("flip %s: the report itself failed: %v\n%s", tc.flip, err, out)
+		}
+		if !strings.Contains(string(out), tc.want) || strings.Contains(string(out), tc.not) {
+			t.Fatalf("flip %s: want %q and not %q, got:\n%s", tc.flip, tc.want, tc.not, out)
 		}
 	}
 }

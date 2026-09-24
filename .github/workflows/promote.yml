@@ -6,10 +6,11 @@ name: Promote a release to stable
 # and "what was tested" are the same bytes rather than the same source. Nothing
 # here builds anything, and the guard beside this file fails if that changes.
 #
-# AND IT CHECKS BEFORE IT MOVES, AND AFTER. A release is promoted only when its
-# manifest carries the release signature, its assets match that manifest and its
-# image was built from the tag's commit; afterwards the pointers users read are
-# read back, rather than the requests' success taken for their result.
+# AND IT CHECKS BEFORE IT MOVES, AND AFTER. A release is promoted only when both
+# acceptances passed on it, its manifest carries the release signature, its assets
+# match that manifest and its image was built from the tag's commit; afterwards
+# the pointers users read are read back, rather than the requests' success taken
+# for their result.
 #
 # IDEMPOTENT BY (RELEASE, CHANNEL, DIGEST). The only trigger is a dispatch, and a
 # human may run it twice, run it after un-prereleasing by hand, or re-run it after
@@ -26,6 +27,8 @@ on:
 permissions:
   contents: write
   packages: write
+  # The acceptance runs are read, never started.
+  actions: read
 
 env:
   GOWORK: "off"
@@ -97,6 +100,49 @@ jobs:
             echo "prerelease=${prerelease}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Refuse a release the two-architecture acceptance has not passed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # HANDOFF puts two-architecture package and container acceptance
+          # between a release and anything that consumes it, and stable is what
+          # the public installer and `latest` hand to everyone, so it is not
+          # offered before that acceptance passed. Both acceptances run after
+          # every release by themselves, and on dispatch for older ones; a run's
+          # title is its workflow's name and the tag it accepted, because a
+          # workflow_run's own ref is main and names no release.
+          #
+          # MAIN'S COPY, A PASSED RUN, AND EVERY LEG. A workflow_run always runs
+          # main's copy; a dispatch counts only from main, because a branch can
+          # carry a copy that checks nothing. And the run's conclusion is not
+          # read alone: its legs are, and there are at least two, amd64 and
+          # arm64, each of which passed.
+          for workflow in container-acceptance.yml installation-acceptance.yml; do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+              --status success --limit 200 \
+              --json databaseId,displayTitle,workflowName,event,headBranch \
+              --jq '.[] | select(.displayTitle == .workflowName + " of " + env.TAG)
+                | select(.event == "workflow_run" or (.event == "workflow_dispatch" and .headBranch == "main"))
+                | .databaseId')
+            accepted=""
+            for run in $runs; do
+              passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs" \
+                --jq '[.jobs[].conclusion] | length >= 2 and all(. == "success")')
+              if [ "$passed" = true ]; then
+                accepted="$run"
+                break
+              fi
+            done
+            if [ -z "$accepted" ]; then
+              echo "no run of ${workflow} from main passed on every architecture for ${TAG}; dispatch it from main with tag ${TAG}, then re-run this" >&2
+              exit 1
+            fi
+            echo "${workflow}: ${TAG} accepted by run ${accepted}"
+          done
+
       - name: Verify the published assets against the signed manifest
         shell: bash
         env:
@@ -160,6 +206,7 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Flip the release to stable
+        id: flip
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -241,9 +288,22 @@ jobs:
       - name: Report a partial promotion
         if: failure()
         shell: bash
+        env:
+          FLIP: ${{ steps.flip.outcome }}
         run: |
           # NOT AN ATOMIC TRANSACTION, AND THIS SAYS SO. The release state, the image
           # pointer and any policy that points at this version are three systems; if
           # one moved and another did not, the run is promotion_pending rather than
           # complete, and re-running it finishes the rest.
-          echo "::error::promotion_pending: part of this promotion did not complete. Re-run this workflow — every step states the desired state, so a re-run finishes the remainder rather than repeating it."
+          #
+          # BUT A REFUSAL IS NOT A PARTIAL PROMOTION. The flip is the first step
+          # that changes anything, and every check above it refuses before it: a
+          # failure there leaves the flip `skipped`, and this run moved nothing.
+          # Calling that pending would send someone looking for half a promotion
+          # that never started.
+          case "$FLIP" in
+            success | failure)
+              echo "::error::promotion_pending: part of this promotion did not complete. Re-run this workflow — every step states the desired state, so a re-run finishes the remainder rather than repeating it." ;;
+            *)
+              echo "::error::nothing was promoted: a step failed before the first change, so this run moved neither the release nor any image pointer. The failed step says why; fix that, then run this again." ;;
+          esac

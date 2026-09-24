@@ -23,6 +23,11 @@ afterwards. Two published releases are needed — `release/4.0.1.1` and
 `release/4.0.1.2` are the first pair that can do it. The run after a release
 does not take this path; it installs the new release on a fresh host.
 
+A run's title names the tag it accepted. `promote.yml` refuses to promote a
+release to stable until a run of this workflow and one of
+`container-acceptance.yml` have passed for its tag, on main's copy of each and
+on every architecture.
+
 The fixture generates an independent temporary AgentID and credential, listens
 only on `127.0.0.1` with HTTPS beneath a PSP-shaped panel prefix, and requires the
 real Bearer credential. Only the disposable runner temporarily trusts its

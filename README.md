@@ -330,6 +330,9 @@ The image, and with it `:beta` or `:latest`, is pushed only after the approved,
 signed release is published. If the image job fails, the release stays
 published without an image, and the pointers stay where they were, until that
 failed job is re-run.
+The container and installation acceptances run by themselves on amd64 and
+arm64 after every release, and `promote.yml` promotes a release to Stable only
+once both have passed on it.
 
 ## Contract harness
 
