@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # THE BUILD CACHE IS PER JOB, AND setup-go's IS NOT. setup-go keys its cache
       # on go.sum alone, and a key that exists is never saved again, so every x64
       # Go job here and in the other workflows restores one entry that whichever
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # The build cache pair the checks job explains.
       - uses: actions/cache/restore@v6
         with:
@@ -163,7 +163,7 @@ jobs:
           - { goos: windows, goarch: amd64, ext: ".exe", vet: true }
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # The build cache pair the checks job explains, one per target: a target's
       # objects are its own, and the leg that has them builds in about 5s.
       - uses: actions/cache/restore@v6
@@ -219,7 +219,7 @@ jobs:
           - { runner: ubuntu-24.04, arch: amd64 }
           - { runner: ubuntu-24.04-arm, arch: arm64 }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # The build cache pair the checks job explains.
       - uses: actions/cache/restore@v6
         with:
@@ -308,7 +308,7 @@ jobs:
       # and stamped nothing: the linker ignores a -X for a symbol it cannot find.
       IMAGE_VERSION: 4.0.0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # NO LAYER CACHE: NOTHING IN IT IS WORTH WHAT EXPORTING IT COSTS. The one
       # expensive layer is `go build` (21-28s), and it sits after `COPY . .`, so
       # every commit rebuilds it. What the cache could restore is the golang base
