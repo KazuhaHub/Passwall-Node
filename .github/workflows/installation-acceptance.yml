@@ -55,7 +55,7 @@ jobs:
       TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
       UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # THE RELEASED COMMIT, AFTER A RELEASE. workflow_run runs main's copy of
           # this file with main checked out, and the tool built below renders the

@@ -56,7 +56,7 @@ jobs:
       # or when it is listed here; a newer one after it is a new question.
       PASSED_OVER: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # THE NEWEST PLAIN vX.Y.Z RELEASE, WHATEVER ITS PRE-RELEASE FLAG. Xray marks
       # most releases pre-release — the recommended 26.6.27 is one — so the flag
       # says nothing about whether one is reviewable, while sing-box's alphas,
@@ -118,7 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.

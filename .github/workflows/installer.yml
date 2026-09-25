@@ -62,7 +62,7 @@ jobs:
       # release, so the package is not mistaken for a published one.
       VERSION: 4.0.99.1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.

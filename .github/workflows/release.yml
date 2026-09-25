@@ -71,7 +71,7 @@ jobs:
       prerelease: ${{ steps.channel.outputs.prerelease }}
       image_channel: ${{ steps.channel.outputs.images }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/setup-go@v6
@@ -235,7 +235,7 @@ jobs:
           - { goos: windows, goarch: amd64, ext: ".exe" }
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.setup.outputs.sha }}
       - uses: actions/setup-go@v6
@@ -314,7 +314,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.setup.outputs.sha }}
           fetch-depth: 0
@@ -392,7 +392,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.setup.outputs.sha }}
       - uses: actions/setup-go@v6
@@ -540,7 +540,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.setup.outputs.sha }}
       - name: Download linux/amd64 binary
