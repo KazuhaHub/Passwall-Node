@@ -283,6 +283,11 @@ PSP_LIVE_NODE_REPO=/absolute/path/to/Passwall-Node \
 它启动本仓库的 `cmd/contract-agent`，不是 PSP 侧假造一个客户端；两轮覆盖 HTTP、SQLite、
 apply、report 与 PSP `PanelClient` 投影。B3 后仍应保留这条为跨仓发布闸门。
 
+本仓库的 `.github/workflows/psp-contract.yml` 在触及 PSP 所读内容的 main push 与 PR 上，用 **PSP main** 的
+四个 `TestLive_RealNode*` 测试（经 PSP 的 `check-go-results.mjs --profile node-wire-v1` 判定）
+和三个漂移包（version 向量、安装器前置命令、core 目录）检查候选节点。它是**早期预警，不是必需检查**：
+PSP main 变红，或本仓库有意先行的契约变更在 PSP 跟进之前，都会让它变红；由作者判断是哪一种。
+
 ## 6. 协议是公开契约
 
 `protocol/` 里的类型是**对外承诺**。目标是别人也能用这个后端，代价是：

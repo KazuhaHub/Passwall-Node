@@ -274,11 +274,19 @@ fi
 # THE VERSION IS EITHER SCHEME, and this check sits here because BOTH sources
 # reach it: the offline path reads it from the binary beside the script, the
 # network path reads it out of the asset name. A legacy version carries its `v`
-# prefix; a product version is three integers with no prefix.
+# prefix; a product version is three integers with no prefix, and a fourth when
+# the release is an incremental fix.
+#
+# THE FOURTH SEGMENT IS WHAT EVERY RELEASE SINCE 4.0.1.1 CARRIES, and this check
+# used to stop at three. The asset-name match above admitted 4.0.1.5 and this line
+# then refused it as non-canonical, so `--channel beta` and `--offline` refused
+# every release published since the fourth segment was first allocated. The
+# fourth is never zero: releaseid refuses 4.0.1.0 as another spelling of 4.0.1,
+# and public_install_test.go holds this check to releaseid's shared vectors.
 case "$version" in *[!0-9A-Za-z._-]*) fail "the selected release source returned an unsafe version: $version" ;; esac
 printf '%s\n' "$version" | awk '
     /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/ { ok = 1 }
-    /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { ok = 1 }
+    /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.[1-9][0-9]*)?$/ { ok = 1 }
     END { exit !ok }' || \
     fail "the selected release source returned a non-canonical version: $version"
 

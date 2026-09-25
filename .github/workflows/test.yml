@@ -90,6 +90,13 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      # THE STANDALONE SCRIPTS GOT `sh -n` AT MOST. actionlint shellchecks only the
+      # `run:` blocks, and install.sh is served from main to root shells. The runner
+      # image ships shellcheck. Two codes are off on purpose: SC2034, because the
+      # unused names are `read` fields and rendered template values kept by name,
+      # and SC1007, because `CDPATH= cd` is the portable idiom it warns about.
+      - name: Shellcheck the standalone shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
       - name: Validate immutable image publishing check
         run: node --test deployment/check_image_test.mjs
       - uses: actions/cache/save@v6
@@ -146,12 +153,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `vet` marks the one leg per non-Linux OS that also vets the module for
+        # it; see the step below.
         include:
           - { goos: linux,   goarch: amd64, ext: ""     }
           - { goos: linux,   goarch: arm64, ext: ""     }
           - { goos: darwin,  goarch: amd64, ext: ""     }
-          - { goos: darwin,  goarch: arm64, ext: ""     }
-          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: darwin,  goarch: arm64, ext: "",     vet: true }
+          - { goos: windows, goarch: amd64, ext: ".exe", vet: true }
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v6
@@ -178,6 +187,21 @@ jobs:
         run: |
           go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
           sh deployment/check-build.sh "passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$GITHUB_SHA"
+      # THE DARWIN AND WINDOWS CODE WAS COMPILED AND NEVER VETTED. The checks job
+      # vets linux/amd64, and the build above compiles ./cmd/node alone, so the
+      # suspend-inclusive task clock on darwin, the Windows process and signal
+      # handling, and every test file under another GOOS were never even
+      # type-checked — the first vet for Windows failed on a syscall.Stat_t in a
+      # deployment test. One leg per OS, because the code differs by OS rather
+      # than by architecture, and it is this leg because its build cache already
+      # holds the target's objects: about 30s cold, a few seconds warm.
+      - name: Vet the module for this OS
+        if: matrix.vet
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go vet ./...
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
@@ -216,6 +240,22 @@ jobs:
           test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
       - name: Verify native runner architecture
         run: test "$(go env GOHOSTARCH)" = "${{ matrix.arch }}"
+      # THE ONE TEST THAT CAN CONTRADICT THE HOST FIXTURES NEVER RAN. The unit
+      # suite's /proc, /sys and cgroup fixtures encode what their author believed a
+      # kernel writes; TestCollectOnTheRealHost collects from the kernel it runs on
+      # and holds the result to protocol.ValidateHostObservation, which is what the
+      # panel applies to every report. It is gated because it needs a real systemd
+      # host, and these two legs are exactly that — the stock Ubuntu 24.04 that
+      # operators run, on both architectures the release ships. It passes in well
+      # under a second; the gate stays for machines that are not such a host.
+      - name: Host collector against this runner's real kernel
+        env:
+          PSP_HOST_LIVE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./internal/host -run '^TestCollectOnTheRealHost$' -count=1 -timeout=2m | tee "$RUNNER_TEMP/host-live-test.log"
+          grep -q '^--- PASS: TestCollectOnTheRealHost ' "$RUNNER_TEMP/host-live-test.log"
       - name: Run real isolated systemd permission and helper fixture acceptance
         env:
           PN_SYSTEMD_ACCEPTANCE: "1"
@@ -280,79 +320,161 @@ jobs:
       # read.
       - name: Build image
         run: docker build --build-arg VERSION="$IMAGE_VERSION" --build-arg COMMIT="$GITHUB_SHA" --tag passwall-node:test .
-      - name: Verify image entrypoint, build identity and project license
-        run: |
-          test "$(docker run --rm passwall-node:test --version)" = "$IMAGE_VERSION ($GITHUB_SHA)"
-          upgrade_info="$(docker run --rm passwall-node:test --upgrade-info)"
-          docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
-          docker run --rm --entrypoint cat passwall-node:test /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' passwall-node:test)" = "Apache-2.0"
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .version)"
-          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
-          test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' passwall-node:test)" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
-      - name: Verify BusyBox entrypoint with directory bind mounts
+      # THE IMAGE THAT SHIPS IS BUILT FROM Dockerfile.release, and until this step
+      # only a tag ever built it. Its runtime stage is a near-copy of Dockerfile's
+      # (a diff shows the ARG handling and the COPY source), so a fix made to one
+      # and not the other was proven here on the recipe that does not ship. It is
+      # built the way release.yml builds it — the prebuilt linux binary under
+      # bin/linux-${TARGETARCH}/, the version, schema and contract as build-args —
+      # from the binary the image above already compiled, so it costs a docker cp
+      # and one alpine layer (about 10s) rather than a second Go build.
+      - name: Build the release recipe from the same binary
         shell: bash
         run: |
           set -euo pipefail
-          fixture="$RUNNER_TEMP/passwall-node-container"
-          mkdir -p "$fixture/config" "$fixture/data"
-          printf 'pspn_%064d\n' 0 > "$fixture/config/node-credential.txt"
-          # 0600, OWNED BY THE RUNNER'S UID — which is what the installation
-          # instructions produce on any host whose installer is not root, and what a
-          # NAS produces. Without this mode the check ran with a world-readable file
-          # and could not see that reading the mounted credential needs DAC_OVERRIDE.
-          chmod 0600 "$fixture/config/node-credential.txt"
-          cat > "$fixture/fake-node" <<'SCRIPT'
+          mkdir -p bin/linux-amd64
+          compiled=$(docker create passwall-node:test)
+          docker cp "$compiled:/usr/local/bin/passwall-node" bin/linux-amd64/passwall-node
+          docker rm "$compiled" > /dev/null
+          upgrade_info="$(docker run --rm passwall-node:test --upgrade-info)"
+          docker build --file Dockerfile.release \
+            --build-arg VERSION="$IMAGE_VERSION" \
+            --build-arg STATE_SCHEMA="$(printf '%s' "$upgrade_info" | jq -er .state_schema)" \
+            --build-arg UPGRADE_CONTRACT="$(printf '%s' "$upgrade_info" | jq -er .upgrade_contract)" \
+            --tag passwall-node:release .
+          # BuildKit picked the binary by TARGETARCH, and it is this one.
+          docker run --rm --entrypoint cat passwall-node:release /usr/local/bin/passwall-node | cmp bin/linux-amd64/passwall-node -
+      - name: Verify image entrypoint, build identity and project license
+        run: |
+          for image in passwall-node:test passwall-node:release; do
+            test "$(docker run --rm "$image" --version)" = "$IMAGE_VERSION ($GITHUB_SHA)"
+            upgrade_info="$(docker run --rm "$image" --upgrade-info)"
+            docker run --rm --entrypoint cat "$image" /usr/share/licenses/passwall-node/LICENSE | cmp LICENSE -
+            docker run --rm --entrypoint cat "$image" /usr/share/licenses/passwall-node/NOTICE | cmp NOTICE -
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image")" = "Apache-2.0"
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .version)"
+            test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
+            test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
+          done
+      - name: Verify BusyBox entrypoint, started directly and from the example compose
+        shell: bash
+        run: |
+          set -euo pipefail
+          # EVERY LINE OF THE STAND-IN IS AN ASSERTION, AND `set -e` IS WHAT MAKES IT
+          # ONE. Without it a failed `test` was a status nobody read and the ready
+          # marker was written anyway, so none of these could fail the check. `-x`
+          # puts the line that failed, with its values, in the container's log.
+          cat > "$RUNNER_TEMP/fake-node" <<'SCRIPT'
           #!/bin/sh
+          set -eux
           test "$(id -u):$(id -g)" = 10001:10001
           test -w /var/lib/passwall-node
+          # Root keeps the runtime directory and the agent can only traverse it.
+          test "$(stat -c '%u:%a' /run/passwall-node)" = "0:711"
           # THE HAND-OFF ITSELF, asserted from the side that depends on it. 0600 by the
           # service account is the one shape both ends agree on: the agent refuses a
           # credential with any group or other bit, and root here cannot write a file
           # the service account owns.
           test "$(stat -c '%u:%a' /run/passwall-node/credential)" = "10001:600"
-          cmp /run/passwall-node/credential /run/secrets/passwall-node/node-credential.txt
           touch /var/lib/passwall-node/entrypoint-ready
           exec sleep 30
           SCRIPT
-          chmod 0755 "$fixture/fake-node"
+          chmod 0755 "$RUNNER_TEMP/fake-node"
+          new_fixture() {
+            mkdir -p "$1/config" "$1/data"
+            printf 'pspn_%064d\n' 0 > "$1/config/node-credential.txt"
+            # 0600, OWNED BY THE RUNNER'S UID — which is what the installation
+            # instructions produce on any host whose installer is not root, and what a
+            # NAS produces. Without this mode the check ran with a world-readable file
+            # and could not see that reading the mounted credential needs DAC_OVERRIDE.
+            chmod 0600 "$1/config/node-credential.txt"
+          }
+          # EVERY FAILURE HERE PRINTS WHAT THE CONTAINER SAID. The first version of
+          # this check asserted and exited, so a red run showed the assertion and not
+          # the reason — and the reason is inside the container, where the entrypoint's
+          # own fatal line and the node binary's output live.
+          expect_node_started() {
+            local container=$1 fixture=$2
+            for _ in {1..10}; do
+              test -f "$fixture/data/entrypoint-ready" && break
+              sleep 1
+            done
+            if ! test -f "$fixture/data/entrypoint-ready"; then
+              echo "the entrypoint never reached the node binary; its own output follows" >&2
+              docker logs "$container" >&2
+              return 1
+            fi
+            if ! test "$(docker inspect --format '{{.State.Running}}' "$container")" = true; then
+              echo "the container is not running; its own output follows" >&2
+              docker logs "$container" >&2
+              return 1
+            fi
+            docker logs "$container" > "$RUNNER_TEMP/passwall-node-container.log" 2>&1
+            if grep -Fq 'find: unrecognized: -uid' "$RUNNER_TEMP/passwall-node-container.log"; then
+              cat "$RUNNER_TEMP/passwall-node-container.log" >&2
+              return 1
+            fi
+            test "$(stat -c %u:%g "$fixture/data")" = 10001:10001
+            # THE COPY IS THE MOUNTED CREDENTIAL, compared by the container's root. The
+            # agent cannot make this comparison, which is the point of the mode: the
+            # mounted file is 0600 and belongs to the account that installed it.
+            docker exec "$container" cmp /run/passwall-node/credential /run/secrets/passwall-node/node-credential.txt
+          }
+          trap 'docker rm -f passwall-node-direct passwall-node-agent > /dev/null 2>&1 || true' EXIT
+
+          # STARTED FROM THE IMAGE DIRECTLY, with no tmpfs over /run/passwall-node, so
+          # the entrypoint finds the service account's directory the image built and
+          # has to take it back before it writes there.
+          #
           # THE CAPABILITY SET IS THE COMPOSE'S, AND IT IS THE POINT OF THIS CHECK.
           # Without --cap-drop ALL the container runs with Docker's default set, which
           # includes CAP_DAC_OVERRIDE — and with it root can write into a directory it
           # has handed to PUID, so the credential copy succeeds here and fails on every
           # real installation. That is exactly how a copy that only works with
           # DAC_OVERRIDE reached a published image.
-          container="$(docker run -d --network none \
+          fixture="$RUNNER_TEMP/passwall-node-container"
+          new_fixture "$fixture"
+          docker run -d --name passwall-node-direct --network none \
             --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETGID --cap-add SETUID \
             -e PSP_NODE_ENDPOINT=https://panel.invalid/v1/node/sync \
             -e PSP_NODE_AGENT_ID=agt_container_entrypoint \
             -e PSP_NODE_CREDENTIAL_FILE=/run/secrets/passwall-node/node-credential.txt \
             -v "$fixture/config:/run/secrets/passwall-node:ro" \
             -v "$fixture/data:/var/lib/passwall-node" \
-            -v "$fixture/fake-node:/usr/local/bin/passwall-node:ro" \
-            passwall-node:test)"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          # EVERY FAILURE HERE PRINTS WHAT THE CONTAINER SAID. The first version of
-          # this check asserted and exited, so a red run showed the assertion and not
-          # the reason — and the reason is inside the container, where the entrypoint's
-          # own fatal line and the node binary's output live.
-          for _ in {1..10}; do
-            test -f "$fixture/data/entrypoint-ready" && break
-            sleep 1
-          done
-          if ! test -f "$fixture/data/entrypoint-ready"; then
-            echo "the entrypoint never reached the node binary; its own output follows" >&2
-            docker logs "$container" >&2
-            exit 1
-          fi
-          if ! test "$(docker inspect --format '{{.State.Running}}' "$container")" = true; then
-            echo "the container is not running; its own output follows" >&2
-            docker logs "$container" >&2
-            exit 1
-          fi
-          docker logs "$container" > "$RUNNER_TEMP/passwall-node-container.log" 2>&1
-          if grep -Fq 'find: unrecognized: -uid' "$RUNNER_TEMP/passwall-node-container.log"; then
-            cat "$RUNNER_TEMP/passwall-node-container.log" >&2
-            exit 1
-          fi
-          test "$(stat -c %u:%g "$fixture/data")" = 10001:10001
+            -v "$RUNNER_TEMP/fake-node:/usr/local/bin/passwall-node:ro" \
+            passwall-node:test > /dev/null
+          expect_node_started passwall-node-direct "$fixture"
+
+          # AND FROM compose.example.yaml ITSELF, NOT A COPY OF IT. The case above
+          # carries the capability set by hand; the example also runs the agent
+          # read-only, with a root-owned 0700 tmpfs over /run/passwall-node, under
+          # no-new-privileges, and with the updater's marker directory, and the first
+          # of those is where #58's restart loop lived. The override swaps only what CI
+          # must: the image (the release recipe, which is the one operators pull) and
+          # the stand-in binary. `--no-deps` leaves the updater, and its docker socket,
+          # out; the marker it would write is written here, or the entrypoint would
+          # wait 15s for it, longer than the loop above.
+          fixture="$RUNNER_TEMP/passwall-node-compose"
+          new_fixture "$fixture"
+          mkdir -p "$fixture/upgrades"
+          printf 'agent.upgrade.v1\n' > "$fixture/upgrades/enabled"
+          cat > "$RUNNER_TEMP/compose.ci.yaml" <<YAML
+          services:
+            passwall-node:
+              image: passwall-node:release
+              volumes:
+                - $RUNNER_TEMP/fake-node:/usr/local/bin/passwall-node:ro
+          YAML
+          NODE_VERSION="$IMAGE_VERSION" \
+          PSP_NODE_ENDPOINT=https://panel.invalid/v1/node/sync \
+          PSP_NODE_AGENT_ID=agt_container_compose \
+            docker compose --project-directory "$fixture" \
+              -f compose.example.yaml -f "$RUNNER_TEMP/compose.ci.yaml" \
+              up -d --no-deps passwall-node
+          expect_node_started passwall-node-agent "$fixture"
+          # AND IT STARTED UNDER THE EXAMPLE'S SETTINGS, read from the kernel's side
+          # rather than from what compose was asked for: a read-only root, a tmpfs
+          # runtime directory, and no-new-privileges on the running node.
+          test "$(docker exec passwall-node-agent awk '$2 == "/" { split($4, o, ","); print o[1] }' /proc/mounts)" = ro
+          test "$(docker exec passwall-node-agent awk '$2 == "/run/passwall-node" { print $3 }' /proc/mounts)" = tmpfs
+          docker exec passwall-node-agent grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/1/status

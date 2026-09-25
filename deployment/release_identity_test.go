@@ -90,9 +90,9 @@ func TestTheReleaseWorkflowKeepsTheTagAndTheVersionApart(t *testing.T) {
 // path carries the product major, one tag names both, and there is no second tag to
 // mistake for one.
 func TestTheNodeReleaseWorkflowTriggersOnTheCurrentNamespaceOnly(t *testing.T) {
-	// Only release.yml triggers on tags. The acceptance workflows are
-	// dispatch-only: they are pointed at a published tag ref by hand, which is
-	// why they need no trigger and why they take the tag as an input.
+	// Only release.yml triggers on tags. The acceptance workflows follow a
+	// completed Release run or a dispatch, and take the tag from one or the
+	// other, which is why they need no tag trigger of their own.
 	workflow, err := os.ReadFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestTheNodeReleaseWorkflowTriggersOnTheCurrentNamespaceOnly(t *testing.T) {
 	}
 }
 
-// The dispatch-only acceptance harness takes a TAG and works out the version
+// The container acceptance harness takes a TAG and works out the version
 // from it. It compares three things — the image tag, the OCI version label and
 // the binary's own `--version` — and all three are the version. Passing the tag
 // to any of them would work for legacy releases and address the wrong image for

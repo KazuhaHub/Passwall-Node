@@ -1,0 +1,137 @@
+name: Panel contract
+
+# THE PANEL'S CONTRACT TESTS RAN ONLY AFTER THIS REPOSITORY HAD PUBLISHED. The
+# release order is fixed — publish the node, then move the panel (HANDOFF.md) —
+# and PSP runs TestLive_RealNode* against the published revision it pins, so a
+# node change that breaks the wire, or breaks PSP's harness through an internal
+# API it compiles against (the /v4 module path and the SyncOnce arity were both
+# found that way, on the PSP side, after a release), surfaced only when PSP
+# bumped its pin. By then the release was published, and PSP offers operators
+# whatever is published. This job runs the same tests, with PSP's own harness and
+# validator, against the candidate: this checkout, before it merges.
+#
+# AN EARLY WARNING, NOT A GATE, and deliberately outside test.yml, whose whole run
+# conclusion the release gate reads. It is coupled to PSP main in both
+# directions: a red PSP main turns it red, and so does a deliberate node-first
+# change — a new installer prerequisite, new version vectors, a catalog edit —
+# until PSP follows. A red here means "PSP needs a change, or this change breaks
+# PSP"; the author decides which. Keep it non-required.
+#
+# PSP MAIN, NOT PSP'S LATEST RELEASE: the newest non-prerelease release is
+# v3.9.3, a V3 build that predates these tests, and the V4 line is all
+# pre-releases.
+on:
+  # THE SAME PATHS ON BOTH EVENTS. A main push that touched none of them hands
+  # PSP the tree its last run already checked, and one that did was, as a rule,
+  # checked on its PR a moment earlier; with no filter every docs push to main
+  # spent 1.5-3 minutes re-running that. What the push run still adds is a PR
+  # that went stale against PSP main before it merged. Drift that starts on
+  # PSP's side is PSP's to catch: its own CI runs these tests against the node
+  # revision it pins. Keep the two lists identical.
+  push:
+    branches: [main]
+    paths:
+      - "**.go"
+      - go.mod
+      - go.sum
+      - "cmd/**"
+      - "internal/**"
+      - "protocol/**"
+      - "releaseid/**"
+      - "corecatalog/**"
+      - deployment/install.sh
+      - .github/workflows/psp-contract.yml
+  # Everything PSP compiles or reads out of this checkout: the Go code its
+  # fixtures build (with anything a package embeds), the version vectors, the
+  # reviewed core catalog, and the installer template whose prerequisites its
+  # migration wrapper must cover.
+  pull_request:
+    paths:
+      - "**.go"
+      - go.mod
+      - go.sum
+      - "cmd/**"
+      - "internal/**"
+      - "protocol/**"
+      - "releaseid/**"
+      - "corecatalog/**"
+      - deployment/install.sh
+      - .github/workflows/psp-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+# test.yml's rule: a PR push supersedes the one before it, a main push does not.
+concurrency:
+  group: psp-contract-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  psp-contract:
+    name: PSP wire contract (candidate node vs PSP main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: node
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: KazuhaHub/Passwall-Sub-Panel
+          ref: main
+          path: psp
+          persist-credentials: false
+      # PSP's compiler, chosen the way PSP's own test.yml chooses it: its go.mod's
+      # toolchain line, installed and then exported as local. It builds this
+      # checkout too, as it does in PSP's job, since PSP's go directive is not
+      # older than this module's.
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: psp/go.mod
+          cache-dependency-path: |
+            psp/go.sum
+            node/go.sum
+      # The evidence validator is PSP's, and PSP runs it on this Node major.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "26"
+      - name: Verify PSP's preferred compiler
+        working-directory: psp
+        run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+      # PSP's own step, pointed at this checkout: the four live tests start the
+      # real node, and check-go-results.mjs fails the step unless each of them
+      # ran and passed — a skip or a `-run` matching nothing is not a pass.
+      - name: PSP's live wire tests against this node
+        working-directory: psp
+        env:
+          PSP_LIVE_NODE_REPO: ${{ github.workspace }}/node
+        run: |
+          set -uo pipefail
+          test_exit=0
+          go test -json -count=1 -timeout=5m ./internal/service/nodesync \
+            -run '^TestLive_RealNode(AgentContract|MigratedServerContract|TaskEvidenceReceipt|TaskExpiryContract)$' \
+            > "$RUNNER_TEMP/go-events.jsonl" 2> "$RUNNER_TEMP/go-stderr.txt" || test_exit=$?
+          cat "$RUNNER_TEMP/go-stderr.txt" >&2
+          node deploy/compat/check-go-results.mjs \
+            --profile node-wire-v1 \
+            --input "$RUNNER_TEMP/go-events.jsonl" \
+            --go-exit-code "$test_exit" \
+            --output "$RUNNER_TEMP/result.json"
+      # PSP's copies of what this repository publishes: the shared version
+      # vectors, the installer's prerequisite list, and the reviewed core catalog.
+      # A red here after a deliberate change here is PSP's bookkeeping to do, not
+      # this change being wrong.
+      - name: PSP's copies of the vectors, the installer prerequisites and the catalog
+        if: ${{ !cancelled() }}
+        working-directory: psp
+        env:
+          PSP_LIVE_NODE_REPO: ${{ github.workspace }}/node
+        run: go test -count=1 ./internal/version/ ./internal/pkg/nodebootstrap/ ./internal/adapters/corecatalogdoc/

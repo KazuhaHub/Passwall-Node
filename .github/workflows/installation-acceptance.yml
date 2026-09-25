@@ -1,30 +1,37 @@
 name: Published Linux installation acceptance
 
-# Opt-in only: this consumes an already public exact release, and mutates only
-# new disposable GitHub-hosted VMs. Never supply real PSP credentials or a host.
+# Disposable hosts only: this consumes an already public exact release, and
+# mutates only new disposable GitHub-hosted VMs. Never supply real PSP
+# credentials or a host.
+#
+# IT RUNS AFTER EVERY RELEASE, for container-acceptance.yml's reason: HANDOFF
+# makes two-architecture package acceptance a release step, and while this was
+# dispatch-only v4.0.1.5 went out without it. A successful Release run from a
+# tag push starts it. A dispatch still accepts any published tag, from any
+# branch, which is how a branch's installer is tried against a published binary.
 on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Already published exact Node release"
-        required: true
-        default: "4.0.0"
-        type: string
+      # THE TAG, NOT THE VERSION, as in container-acceptance.yml: a version no
+      # longer determines one address, and the version is derived from the tag
+      # by the release-tag command. The old default, version 4.0.0 with no tag,
+      # derived `v4.0.0`, which was never published (that release is
+      # `release/4.0.0`), so a form submitted as it came failed.
       tag:
-        description: "Published tag of `version`; empty derives the current namespace, which is wrong for a release published before the address changed"
-        required: false
-        default: ""
-        type: string
-      upgrade_from:
-        description: "Older published release to install first, then upgrade to `version`; empty skips the upgrade scenario"
-        required: false
-        default: ""
+        description: "Published release tag, for example v4.0.1.5 or release/4.0.1.2"
+        required: true
         type: string
       upgrade_from_tag:
-        description: "Published tag of `upgrade_from`"
+        description: "Older published release tag to install first, then upgrade to `tag`; empty skips the upgrade scenario"
         required: false
         default: ""
         type: string
+
+# promote.yml finds a tag's acceptance by this title; see container-acceptance.yml.
+run-name: Published Linux installation acceptance of ${{ inputs.tag || github.event.workflow_run.head_branch }}
 
 permissions:
   contents: read
@@ -36,14 +43,25 @@ env:
 jobs:
   installation:
     name: systemd ${{ matrix.runner }}
+    # See container-acceptance.yml: head_branch is the tag of a tag push.
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    env:
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+      UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # THE RELEASED COMMIT, AFTER A RELEASE. workflow_run runs main's copy of
+          # this file with main checked out, and the tool built below renders the
+          # private installer from the checkout: main's template is not the one
+          # the tag published. Empty on a dispatch, which keeps its own ref.
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -61,22 +79,35 @@ jobs:
           test "$(go tool compile -V | awk '{ print $3 }')" = "$acceptance_toolchain"
       - name: Build disposable installation acceptance tool
         run: go build -trimpath -o "$RUNNER_TEMP/passwall-node-installation-acceptance" ./deployment/acceptance
+      - name: Derive the versions the tags name
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One derivation, the one release.yml and container-acceptance.yml run.
+          # It refuses an unpublishable tag and prints nothing when it does, so an
+          # empty version cannot reach the tool. The values cross a step boundary,
+          # so they go through GITHUB_ENV.
+          version=$(go run ./deployment/cmd/release-tag "$TAG")
+          test -n "$version"
+          upgrade_from=""
+          if [ -n "$UPGRADE_FROM_TAG" ]; then
+            upgrade_from=$(go run ./deployment/cmd/release-tag "$UPGRADE_FROM_TAG")
+            test -n "$upgrade_from"
+          fi
+          {
+            echo "ACCEPTANCE_VERSION=$version"
+            echo "ACCEPTANCE_UPGRADE_FROM=$upgrade_from"
+          } >> "$GITHUB_ENV"
       - name: Install public release (upgrading first when asked), inspect isolation, rerun offline and reinstall
-        env:
-          ACCEPTANCE_VERSION: ${{ inputs.version }}
-          ACCEPTANCE_TAG: ${{ inputs.tag }}
-          ACCEPTANCE_UPGRADE_FROM: ${{ inputs.upgrade_from }}
-          ACCEPTANCE_UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
+        shell: bash
         run: |
           set +x
           set -eu
-          # THE TAG IS PASSED WHEN IT IS GIVEN, and derived otherwise: a version no
-          # longer determines one address, so a release published before the change
-          # can only be reached by naming the tag it is really at.
-          args=(-version "$ACCEPTANCE_VERSION")
-          [ -z "${ACCEPTANCE_TAG:-}" ] || args+=(-tag "$ACCEPTANCE_TAG")
-          [ -z "${ACCEPTANCE_UPGRADE_FROM:-}" ] || args+=(-upgrade-from "$ACCEPTANCE_UPGRADE_FROM")
-          [ -z "${ACCEPTANCE_UPGRADE_FROM_TAG:-}" ] || args+=(-upgrade-from-tag "$ACCEPTANCE_UPGRADE_FROM_TAG")
+          # BOTH IDENTITIES ARE PASSED: the tag is the address, and a release
+          # published before the address changed can only be reached by naming the
+          # tag it is really at; the version is what the installer verifies.
+          args=(-version "$ACCEPTANCE_VERSION" -tag "$TAG")
+          [ -z "${ACCEPTANCE_UPGRADE_FROM:-}" ] || args+=(-upgrade-from "$ACCEPTANCE_UPGRADE_FROM" -upgrade-from-tag "$UPGRADE_FROM_TAG")
           sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             "$RUNNER_TEMP/passwall-node-installation-acceptance" "${args[@]}"
       # No artifacts, raw journal, script, proc environment or diagnostics are

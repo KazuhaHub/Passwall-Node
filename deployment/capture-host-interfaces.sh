@@ -73,7 +73,9 @@ fi
 take /sys/fs/cgroup/cgroup.controllers sys/fs_cgroup/cgroup.controllers
 
 # Per-interface metadata, for every interface the counter table lists.
-for iface in $(ls /sys/class/net 2>/dev/null); do
+for path in /sys/class/net/*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    iface=${path##*/}
     take "/sys/class/net/$iface/flags"     "sys/class_net/$iface/flags"
     take "/sys/class/net/$iface/ifindex"   "sys/class_net/$iface/ifindex"
     take "/sys/class/net/$iface/mtu"       "sys/class_net/$iface/mtu"

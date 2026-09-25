@@ -5,19 +5,28 @@ it on a developer machine, production server or self-hosted runner. It checks
 the root/GitHub-hosted environment and refuses any existing installation,
 systemd unit, installation lock or `passwall-node` account before mutation.
 
-Dispatch `.github/workflows/installation-acceptance.yml` after the exact public
-release (default `v0.0.1-beta4`) has finished publishing. Both `ubuntu-24.04` and
-`ubuntu-24.04-arm` execute the real installer and the **published binary**, not a
-locally built agent. The acceptance tool itself is built from the checkout.
-Before beta4 publication, dispatch the candidate checkout with an explicit
-`version=v0.0.1-beta3` to test the new installer against the existing public binary.
+`.github/workflows/installation-acceptance.yml` runs by itself after every
+successful Release run from a tag push, against that tag, with this tool built
+from the tagged commit. For any other published release, dispatch it with the
+release's `tag` (for example `v4.0.1.5` or `release/4.0.1.2`); the version is
+derived from the tag. Both `ubuntu-24.04` and `ubuntu-24.04-arm` execute the real
+installer and the **published binary**, not a locally built agent. On a dispatch
+the acceptance tool is built from the dispatched ref, so dispatching a branch
+tests that branch's installer against an existing public binary.
 
-With `upgrade_from` set, the tool installs THAT release first and then replaces it
-with `version` through the same private installer an operator runs, asserting what
-an upgrade may and may not change: the state files keep their bytes and their
-inodes, the credential and endpoint are untouched, and the binary, the version
-stamp and the process serving the node are all different afterwards. Two published
-releases are needed — `4.0.1.1` and `4.0.1.2` are the first pair that can do it.
+With `upgrade_from_tag` set, the tool installs THAT release first and then
+replaces it with `tag` through the same private installer an operator runs,
+asserting what an upgrade may and may not change: the state files keep their
+bytes and their inodes, the credential and endpoint are untouched, and the
+binary, the version stamp and the process serving the node are all different
+afterwards. Two published releases are needed — `release/4.0.1.1` and
+`release/4.0.1.2` are the first pair that can do it. The run after a release
+does not take this path; it installs the new release on a fresh host.
+
+A run's title names the tag it accepted. `promote.yml` refuses to promote a
+release to stable until a run of this workflow and one of
+`container-acceptance.yml` have passed for its tag, on main's copy of each and
+on every architecture.
 
 The fixture generates an independent temporary AgentID and credential, listens
 only on `127.0.0.1` with HTTPS beneath a PSP-shaped panel prefix, and requires the

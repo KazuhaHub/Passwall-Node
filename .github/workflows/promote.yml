@@ -6,6 +6,12 @@ name: Promote a release to stable
 # and "what was tested" are the same bytes rather than the same source. Nothing
 # here builds anything, and the guard beside this file fails if that changes.
 #
+# AND IT CHECKS BEFORE IT MOVES, AND AFTER. A release is promoted only when both
+# acceptances passed on it, its manifest carries the release signature, its assets
+# match that manifest and its image was built from the tag's commit; afterwards
+# the pointers users read are read back, rather than the requests' success taken
+# for their result.
+#
 # IDEMPOTENT BY (RELEASE, CHANNEL, DIGEST). The only trigger is a dispatch, and a
 # human may run it twice, run it after un-prereleasing by hand, or re-run it after
 # a partial failure — so every step is a statement of the desired state rather than
@@ -21,6 +27,8 @@ on:
 permissions:
   contents: write
   packages: write
+  # The acceptance runs are read, never started.
+  actions: read
 
 env:
   GOWORK: "off"
@@ -47,9 +55,9 @@ jobs:
         with:
           go-version-file: go.mod
           # NO SHARED CACHE, for release.yml's reason: this job compiles
-          # release-tag beside a token that can rewrite the release and move
-          # `latest`. release-tag imports nothing outside this module, so the
-          # cache only ever saved a compile of a few seconds.
+          # release-tag and verify-release beside a token that can rewrite the
+          # release and move `latest`. Both import nothing outside this module,
+          # so the cache only ever saved a compile of a few seconds.
           cache: false
 
       - name: Resolve the release and the version it is stamped with
@@ -64,13 +72,16 @@ jobs:
           # The VERSION is what the image is tagged with, and for a product release
           # it is not the tag. Asking the pinned identity rule rather than stripping
           # a prefix is what keeps the address and the name from drifting apart —
-          # the same command the publication path runs.
+          # the same command the publication path runs. It also refuses anything
+          # that is not a release tag, before the tag reaches a ref or a URL below.
           version=$(go run ./deployment/cmd/release-tag "$tag")
           test -n "$version" || { echo 'the tag produced no version' >&2; exit 1; }
 
-          # THE RELEASE MUST EXIST AND MUST STILL BE A PRE-RELEASE. Promoting one
-          # that never went out, or one already stable, is not a promotion — and
-          # doing it silently would report success for an action nobody took.
+          # THE RELEASE MUST EXIST AND MUST NOT BE A DRAFT. Promoting one that never
+          # went out is not a promotion, and doing it silently would report success
+          # for an action nobody took. One that is ALREADY STABLE is let through: it
+          # is what a run that stopped part-way leaves behind, and the steps below
+          # state the rest of the desired state rather than repeat a transition.
           release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>/dev/null) || {
             echo "no release is published under ${tag}" >&2
             exit 1
@@ -78,7 +89,6 @@ jobs:
           release_id=$(printf '%s' "$release" | jq -er '.id')
           draft=$(printf '%s' "$release" | jq -r '.draft')
           prerelease=$(printf '%s' "$release" | jq -r '.prerelease')
-          uploader=$(printf '%s' "$release" | jq -r '.author.login // ""')
           if [ "$draft" = true ]; then
             echo 'this release is a draft; publish it before promoting it' >&2
             exit 1
@@ -88,46 +98,115 @@ jobs:
             echo "version=${version}"
             echo "release_id=${release_id}"
             echo "prerelease=${prerelease}"
-            echo "uploader=${uploader}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Verify the published assets are the ones the manifest describes
+      - name: Refuse a release the two-architecture acceptance has not passed
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.identity.outputs.tag }}
-          GHCR_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          owner_lc=$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')
+          # HANDOFF puts two-architecture package and container acceptance
+          # between a release and anything that consumes it, and stable is what
+          # the public installer and `latest` hand to everyone, so it is not
+          # offered before that acceptance passed. Both acceptances run after
+          # every release by themselves, and on dispatch for older ones; a run's
+          # title is its workflow's name and the tag it accepted, because a
+          # workflow_run's own ref is main and names no release.
+          #
+          # MAIN'S COPY, A PASSED RUN, AND EVERY LEG. A workflow_run always runs
+          # main's copy; a dispatch counts only from main, because a branch can
+          # carry a copy that checks nothing. And the run's conclusion is not
+          # read alone: its legs are, and there are at least two, amd64 and
+          # arm64, each of which passed.
+          for workflow in container-acceptance.yml installation-acceptance.yml; do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+              --status success --limit 200 \
+              --json databaseId,displayTitle,workflowName,event,headBranch \
+              --jq '.[] | select(.displayTitle == .workflowName + " of " + env.TAG)
+                | select(.event == "workflow_run" or (.event == "workflow_dispatch" and .headBranch == "main"))
+                | .databaseId')
+            accepted=""
+            for run in $runs; do
+              passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs" \
+                --jq '[.jobs[].conclusion] | length >= 2 and all(. == "success")')
+              if [ "$passed" = true ]; then
+                accepted="$run"
+                break
+              fi
+            done
+            if [ -z "$accepted" ]; then
+              echo "no run of ${workflow} from main passed on every architecture for ${TAG}; dispatch it from main with tag ${TAG}, then re-run this" >&2
+              exit 1
+            fi
+            echo "${workflow}: ${TAG} accepted by run ${accepted}"
+          done
+
+      - name: Verify the published assets against the signed manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
           work=$(mktemp -d)
-          # THE MANIFEST IS THE AUTHORITY FOR WHAT WAS PUBLISHED, and the assets are
-          # re-downloaded and re-hashed against it. That does not prove who signed
-          # it — the node verifies the detached signature at install time, and the
-          # key is not in this workflow — it proves the files are still the ones the
-          # manifest describes, which is what a promotion is asserting.
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$work"
+          # THE SIGNATURE FIRST, with the public key every agent compiles in:
+          # verifying needs no private key, so its absence here is no reason to
+          # skip it. The public installer, whose default channel this promotion
+          # feeds, checks archives against the manifest alone, and an asset
+          # replaced together with its manifest line passes that.
+          go run ./deployment/cmd/verify-release \
+            -manifest "$work/SHA256SUMS.txt" -signature "$work/SHA256SUMS.txt.sig"
+          # THEN THE ASSETS ARE THE ONES THE SIGNED MANIFEST DESCRIBES,
+          # re-downloaded and re-hashed.
           (cd "$work" && sha256sum --check --status SHA256SUMS.txt) || {
             echo 'the published assets no longer match their manifest' >&2
             exit 1
           }
-          # AND THE EXACT IMAGE TAG EXISTS, with the digest the promotion will point
+
+      - name: Read the exact image's digest and bind it to the tag's commit
+        id: artifacts
+        shell: bash
+        env:
+          TAG: ${{ steps.identity.outputs.tag }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner_lc=$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')
+          repository="ghcr.io/${owner_lc}/passwall-node"
+          # THE EXACT IMAGE TAG EXISTS, with the digest the promotion will point
           # `latest` at. The digest is read, never supplied: moving a pointer to
           # something a caller named is how a promotion publishes an unverified image.
           token=$(curl -sS --max-time 20 "https://ghcr.io/token?scope=repository%3A${owner_lc}%2Fpasswall-node%3Apull&service=ghcr.io" | jq -r .token)
           digest=$(curl -sS --max-time 20 -D - -o /dev/null \
             -H "Authorization: Bearer ${token}" \
             -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
-            "https://ghcr.io/v2/${owner_lc}/passwall-node/manifests/${{ steps.identity.outputs.version }}" |
+            "https://ghcr.io/v2/${owner_lc}/passwall-node/manifests/${VERSION}" |
             awk 'tolower($1) == "docker-content-digest:" { gsub(/\r/, "", $2); print $2 }')
           case "$digest" in
             sha256:*) ;;
             *) echo "the exact image tag has no readable digest; the release was not published as an image" >&2; exit 1 ;;
           esac
+          # AND IT WAS BUILT FROM THE TAG'S COMMIT. An image tag is mutable in the
+          # registry, and only release.yml's own check keeps it from being pushed
+          # again; this reads what it names now. Every platform's revision label,
+          # which release.yml stamps from the commit it built, must name the
+          # commit the tag names.
+          git fetch --no-tags --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          want=$(git rev-parse --verify "refs/tags/${TAG}^{commit}")
+          revisions=$(docker buildx imagetools inspect "${repository}@${digest}" --format '{{json .Image}}' |
+            jq -r '[.. | objects | select(has("Labels")) | .Labels["org.opencontainers.image.revision"] // "none"] | unique | join(" ")')
+          if [ "$revisions" != "$want" ]; then
+            echo "the image at ${digest} was built from ${revisions:-no labelled commit}, not ${TAG}'s ${want}" >&2
+            exit 1
+          fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-        id: artifacts
 
       - name: Flip the release to stable
+        id: flip
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -135,11 +214,18 @@ jobs:
           ALREADY: ${{ steps.identity.outputs.prerelease }}
         run: |
           set -euo pipefail
+          # STABLE IS NOT THE SAME AS LATEST. /releases/latest is what the public
+          # installer's default channel resolves, and a release made stable by
+          # hand, or by a run that stopped, need not be the one it names. So the
+          # latest mark is stated on every run, beside the pointer the image step
+          # moves, and the prerelease flag only while it is still set.
+          fields=(-f make_latest=true)
           if [ "$ALREADY" = false ]; then
             echo 'already stable; the remaining steps still run, because a partial promotion is a state to finish rather than an error'
           else
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F prerelease=false >/dev/null
+            fields+=(-F prerelease=false)
           fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" "${fields[@]}" >/dev/null
 
       - name: Move the latest image pointer to the verified digest
         shell: bash
@@ -160,12 +246,64 @@ jobs:
           # publication already set and a promotion does not change.
           echo "promoted ${VERSION} (${DIGEST}) to latest"
 
+      - name: Confirm what the stable pointers now name
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+          TAG: ${{ steps.identity.outputs.tag }}
+          DIGEST: ${{ steps.artifacts.outputs.digest }}
+        run: |
+          set -euo pipefail
+          owner_lc=$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')
+          repository="ghcr.io/${owner_lc}/passwall-node"
+          # THE RESULT, NOT THE REQUESTS. Both steps above succeed when their call
+          # is accepted, which is not the state users read: /releases/latest is
+          # what the public installer's default channel installs, and `latest` is
+          # what a pull without a tag gets. A retag that rewrote the index instead
+          # of copying it would move `latest` to bytes nobody verified.
+          #
+          # /releases/latest CAN LAG THE PATCH BY A FEW SECONDS: the REST API may
+          # serve a cached answer, so a promotion that landed would read back as
+          # wrong on the first try. It gets five reads, three seconds apart,
+          # before the old answer is taken as the state. The registry is read
+          # once: imagetools create returns after the tag is written.
+          latest=""
+          for attempt in 1 2 3 4 5; do
+            latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name) || latest=""
+            if [ "$latest" = "$TAG" ] || [ "$attempt" = 5 ]; then break; fi
+            sleep 3
+          done
+          if [ "$latest" != "$TAG" ]; then
+            echo "/releases/latest names ${latest:-nothing}, not ${TAG}" >&2
+            exit 1
+          fi
+          moved=$(docker buildx imagetools inspect "${repository}:latest" --format '{{json .Manifest}}' | jq -r .digest)
+          if [ "$moved" != "$DIGEST" ]; then
+            echo "${repository}:latest is ${moved:-unreadable}, not the verified ${DIGEST}" >&2
+            exit 1
+          fi
+          echo "stable is ${TAG}; latest is ${DIGEST}"
+
       - name: Report a partial promotion
         if: failure()
         shell: bash
+        env:
+          FLIP: ${{ steps.flip.outcome }}
         run: |
           # NOT AN ATOMIC TRANSACTION, AND THIS SAYS SO. The release state, the image
           # pointer and any policy that points at this version are three systems; if
           # one moved and another did not, the run is promotion_pending rather than
           # complete, and re-running it finishes the rest.
-          echo "::error::promotion_pending: part of this promotion did not complete. Re-run this workflow — every step states the desired state, so a re-run finishes the remainder rather than repeating it."
+          #
+          # BUT A REFUSAL IS NOT A PARTIAL PROMOTION. The flip is the first step
+          # that changes anything, and every check above it refuses before it: a
+          # failure there leaves the flip `skipped`, and this run moved nothing.
+          # Calling that pending would send someone looking for half a promotion
+          # that never started.
+          case "$FLIP" in
+            success | failure)
+              echo "::error::promotion_pending: part of this promotion did not complete. Re-run this workflow — every step states the desired state, so a re-run finishes the remainder rather than repeating it." ;;
+            *)
+              echo "::error::nothing was promoted: a step failed before the first change, so this run moved neither the release nor any image pointer. The failed step says why; fix that, then run this again." ;;
+          esac

@@ -1,0 +1,202 @@
+name: Public installer
+
+# THE SCRIPT THE README PIPES INTO `sudo sh` IS LIVE THE MOMENT IT MERGES, and
+# nothing ran it past argument parsing. install.sh is served from main, with no
+# release in between, and public_install_test.go stops where root work begins:
+# `sh -n`, `--help`, a bad option, and the release resolution lifted out on its
+# own. The installation acceptance renders the PRIVATE template instead, and it is
+# dispatch-only. So this job lays out a release package the way the release lays
+# it out, and installs from it as root on a disposable runner.
+#
+# NOT REQUIRED, AND NOT IN test.yml. The release gate reads test.yml's whole run
+# conclusion, so a job there would hold every release to it; this one starts as
+# a signal and can be made required once it has proven itself. It also keeps
+# test.yml's PR runs from paying for it when nothing it exercises changed.
+#
+# PULL REQUESTS RUN IT WHEN SOMETHING IT EXERCISES CHANGES: the script, the
+# packaging step it borrows from release.yml, the binary's own install-time
+# commands (`--version`, `--enable-remote-upgrade` and the units it writes), and
+# the files the package carries. README.md and HANDOFF.md are packaged too but
+# change on most PRs, and only a deletion would break the step. Every push to
+# main runs it regardless, which covers those and anything else the list misses,
+# on the commit a release would be cut from.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - install.sh
+      - "deployment/**"
+      - "cmd/node/**"
+      - "internal/version/**"
+      - LICENSE
+      - NOTICE
+      - compose.example.yaml
+      - .github/workflows/release.yml
+      - .github/workflows/installer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+# test.yml's rule: a PR push supersedes the one before it, a main push does not.
+concurrency:
+  group: installer-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  public-installer:
+    # AMD64 ONLY. The installer's one architecture-specific line is the `uname -m`
+    # case, and the package layout is the same for both; an arm64 leg would double
+    # the minutes to exercise one case arm.
+    name: public installer from a release package (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # FOUR SEGMENTS, because every release since 4.0.1.1 has four, and the
+      # installer refused them for as long as nothing ran it. Far past any
+      # release, so the package is not mistaken for a published one.
+      VERSION: 4.0.99.1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Package a release with release.yml's own packaging step
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stamped the way the release's build legs stamp it.
+          short_sha="${GITHUB_SHA:0:7}"
+          ldflags="-s -w"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/v4/internal/version.Version=${VERSION}"
+          ldflags+=" -X github.com/KazuhaHub/passwall-node/v4/internal/version.Commit=${short_sha}"
+          mkdir -p artifacts/passwall-node-linux-amd64
+          CGO_ENABLED=0 go build -trimpath -ldflags="${ldflags}" \
+            -o artifacts/passwall-node-linux-amd64/passwall-node ./cmd/node
+          # The other five platforms are empty stand-ins: they are packaged and
+          # hashed, never run, and the two Windows ones take the loop's zip branch.
+          for platform in linux-arm64 darwin-amd64 darwin-arm64; do
+            mkdir -p "artifacts/passwall-node-${platform}"
+            : > "artifacts/passwall-node-${platform}/passwall-node"
+          done
+          for platform in windows-amd64 windows-arm64; do
+            mkdir -p "artifacts/passwall-node-${platform}"
+            : > "artifacts/passwall-node-${platform}/passwall-node.exe"
+          done
+          # THE RELEASE'S OWN STEP, READ OUT OF release.yml, NOT A COPY OF IT. A copy
+          # would test itself; this runs what the tag will run, so a member renamed
+          # or dropped there fails here first. The step's name is load-bearing, and
+          # deployment/installer_workflow_test.go keeps the two files agreeing on it.
+          yq -r '.jobs.release.steps[] | select(.name == "Package archives and checksums") | .run' \
+            .github/workflows/release.yml > "$RUNNER_TEMP/package-release.sh"
+          grep -q 'sha256sum' "$RUNNER_TEMP/package-release.sh"
+          bash "$RUNNER_TEMP/package-release.sh"
+      - name: Verify the assets and the linux archive's members
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$(printf '%s\n' \
+            "passwall-node_${VERSION}_darwin_amd64.tar.gz" \
+            "passwall-node_${VERSION}_darwin_arm64.tar.gz" \
+            "passwall-node_${VERSION}_linux_amd64.tar.gz" \
+            "passwall-node_${VERSION}_linux_arm64.tar.gz" \
+            "passwall-node_${VERSION}_windows_amd64.zip" \
+            "passwall-node_${VERSION}_windows_arm64.zip" \
+            core-catalog.json passwall-node-install-template.sh SHA256SUMS.txt | LC_ALL=C sort)
+          actual=$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
+          if [ "$actual" != "$expected" ]; then
+            printf 'dist/ holds:\n%s\nexpected:\n%s\n' "$actual" "$expected" >&2
+            exit 1
+          fi
+          # EVERY OTHER ASSET IS IN THE MANIFEST THE SIGNATURE COVERS, and matches it.
+          test "$(wc -l < dist/SHA256SUMS.txt)" = 8
+          (cd dist && sha256sum --check --strict --quiet SHA256SUMS.txt)
+          # THE MEMBERS THE READERS OF THIS ARCHIVE REQUIRE: the installer's network
+          # path extracts passwall-node, LICENSE and NOTICE by exact name, the upgrade
+          # path's extractRelease refuses anything outside the package directory or
+          # not a regular file, and the offline path runs install.sh from beside them.
+          package="passwall-node_${VERSION}_linux_amd64"
+          listing=$(tar -tvzf "dist/${package}.tar.gz")
+          members=$(tar -tzf "dist/${package}.tar.gz")
+          if printf '%s\n' "$members" | grep -Ev "^${package}(/|$)"; then
+            echo 'the archive has members outside its package directory' >&2
+            exit 1
+          fi
+          if printf '%s\n' "$listing" | grep -Ev '^[-d]'; then
+            echo 'the archive has members that are neither regular files nor directories' >&2
+            exit 1
+          fi
+          for member in passwall-node LICENSE NOTICE install.sh; do
+            if [ "$(printf '%s\n' "$members" | grep -cFx "${package}/${member}")" != 1 ]; then
+              printf '%s/%s is missing or duplicated; the archive holds:\n%s\n' "$package" "$member" "$members" >&2
+              exit 1
+            fi
+          done
+      - name: Install from the extracted archive as root
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="passwall-node_${VERSION}_linux_amd64"
+          offline="$RUNNER_TEMP/offline"
+          mkdir "$offline"
+          tar -C "$offline" -xzf "dist/${package}.tar.gz"
+          sudo "$offline/$package/install.sh" --offline --install-only | tee "$RUNNER_TEMP/install.log"
+          test "$(grep -c '^Passwall Node \[[1-6]/6\] ' "$RUNNER_TEMP/install.log")" = 6
+          grep -q '^Passwall Node is installed but not configured or started\.$' "$RUNNER_TEMP/install.log"
+      - name: Verify what the installer left on the host
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/opt/passwall-node
+          # The program, its version, and the pn command that reaches it.
+          sudo test -x "$root/bin/passwall-node"
+          sudo cmp "$root/bin/passwall-node" artifacts/passwall-node-linux-amd64/passwall-node
+          test "$(sudo cat "$root/config/version")" = "$VERSION"
+          test "$(readlink /usr/local/bin/pn)" = "$root/bin/passwall-node"
+          test "$(/usr/local/bin/pn --version)" = "$VERSION (${GITHUB_SHA:0:7})"
+          cmp "$root/licenses/LICENSE" LICENSE
+          cmp "$root/licenses/NOTICE" NOTICE
+          # A dedicated, non-root, non-login service account that owns the state.
+          IFS=: read -r account _ uid _ _ home shell < <(getent passwd passwall-node)
+          test "$account" = passwall-node
+          test "$uid" -ne 0
+          test "$home" = "$root"
+          test "$shell" = /usr/sbin/nologin
+          test "$(sudo stat -c '%U %a' "$root/config")" = "passwall-node 700"
+          test "$(sudo stat -c '%U %a' "$root/data")" = "passwall-node 700"
+          # The service is defined and reloaded, and NOT started: --install-only
+          # leaves the PSP identity to `pn connect`, without which it cannot run.
+          cmp /etc/systemd/system/passwall-node.service "$root/passwall-node.service"
+          systemctl cat passwall-node.service > /dev/null
+          if systemctl is-active --quiet passwall-node.service; then
+            echo 'the service is running after an --install-only installation' >&2
+            exit 1
+          fi
+          # The remote-upgrade helper: its units exactly as the binary embeds them,
+          # the watcher enabled and running, and the marker the agent reads.
+          cmp /etc/systemd/system/passwall-node-upgrade.path deployment/passwall-node-upgrade.path
+          cmp /etc/systemd/system/passwall-node-upgrade.service deployment/passwall-node-upgrade.service
+          test "$(systemctl is-enabled passwall-node-upgrade.path)" = enabled
+          test "$(systemctl is-active passwall-node-upgrade.path)" = active
+          test "$(sudo cat "$root/upgrades/enabled")" = agent.upgrade.v1
+      - name: Refuse a second installation over the first
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="passwall-node_${VERSION}_linux_amd64"
+          if sudo "$RUNNER_TEMP/offline/$package/install.sh" --offline --install-only 2>&1 | tee "$RUNNER_TEMP/again.log" > /dev/null; then
+            cat "$RUNNER_TEMP/again.log" >&2
+            echo 'a second installation over the first was accepted' >&2
+            exit 1
+          fi
+          grep -q 'Passwall Node is already installed; use pn to manage it' "$RUNNER_TEMP/again.log"

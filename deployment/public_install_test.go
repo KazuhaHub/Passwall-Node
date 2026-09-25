@@ -1,6 +1,7 @@
 package deployment
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -66,5 +67,94 @@ func TestPublicInstallerArgumentsBeforePrivilegedPreflight(t *testing.T) {
 	output, err = invalid.CombinedOutput()
 	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 || !strings.Contains(string(output), "Invalid channel: nightly") {
 		t.Fatalf("invalid channel was not rejected before preflight: %v\n%s", err, output)
+	}
+}
+
+// THE PUBLIC INSTALLER ACCEPTS EVERY VERSION A RELEASE IS PUBLISHED UNDER, and
+// refuses what the release identity refuses.
+//
+// Its own shape check is an awk program over the version it read, and it stopped
+// at three segments while the allocator had moved incremental fixes onto a fourth:
+// every release from 4.0.1.1 on was refused as "non-canonical" by `--channel beta`
+// and `--offline`, and no test ran that line — the resolution tests stop at the
+// asset name, and everything after it needs root. So the program is lifted out and
+// run against the vectors releaseid itself is held to, rather than a list written
+// here that could agree with the installer and disagree with the release.
+func TestPublicInstallerAcceptsEveryPublishedVersionShape(t *testing.T) {
+	script, err := os.ReadFile("../install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const opening, closing = `printf '%s\n' "$version" | awk '`, `END { exit !ok }'`
+	text := string(script)
+	start := strings.Index(text, opening)
+	if start < 0 {
+		t.Fatal("the installer no longer checks the version's shape with awk; this guard is describing a script that changed")
+	}
+	end := strings.Index(text[start:], closing)
+	if end < 0 {
+		t.Fatal("the installer's version check has no end this guard can find")
+	}
+	program := text[start+len(opening) : start+end+len(closing)-1]
+
+	raw, err := os.ReadFile("../releaseid/testdata/vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors struct {
+		Versions []struct {
+			In string `json:"in"`
+			OK bool   `json:"ok"`
+		} `json:"versions"`
+		Derive []struct {
+			In string `json:"in"`
+		} `json:"derive"`
+		Reject []struct {
+			In  string `json:"in"`
+			Why string `json:"why"`
+		} `json:"reject"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	accepts := func(version string) bool {
+		t.Helper()
+		cmd := exec.Command("awk", program)
+		cmd.Stdin = strings.NewReader(version + "\n")
+		err := cmd.Run()
+		if _, refused := err.(*exec.ExitError); err != nil && !refused {
+			t.Fatalf("running the installer's version check: %v", err)
+		}
+		return err == nil
+	}
+
+	// A legacy release keeps its own shape; the four published under it are still
+	// offered by the panel.
+	published := []string{"v0.0.1-beta12"}
+	for _, vector := range vectors.Versions {
+		if vector.OK {
+			published = append(published, vector.In)
+		}
+	}
+	for _, vector := range vectors.Derive {
+		published = append(published, vector.In)
+	}
+	if len(published) < 3 {
+		t.Fatal("the shared vectors name no accepted version; this guard reads nothing")
+	}
+	for _, version := range published {
+		if !accepts(version) {
+			t.Errorf("the public installer refuses %q, a version a release is published under", version)
+		}
+	}
+	for _, vector := range vectors.Reject {
+		// A v-prefixed version is refused as a PRODUCT version, and it is the
+		// legacy scheme's own shape, which the installer accepts under that name.
+		if strings.HasPrefix(vector.In, "v") {
+			continue
+		}
+		if accepts(vector.In) {
+			t.Errorf("the public installer accepts %q, which the release identity refuses: %s", vector.In, vector.Why)
+		}
 	}
 }
