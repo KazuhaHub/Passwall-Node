@@ -25,8 +25,32 @@ type Client struct {
 	PollInterval     time.Duration
 	WaitTimeout      time.Duration
 	ConfirmConverged func(context.Context) error
-	Available        func() error
-	bootClock        func() (string, int64, error)
+	// Available is the helper readiness check. It is applied before every
+	// Execute and, through TaskAvailable, before every report the agent builds,
+	// so the same answer decides whether an upgrade is offered and whether one
+	// may start. Nil means no check: the kind is always advertised.
+	Available func() error
+	bootClock func() (string, int64, error)
+}
+
+// The agent's registry keeps this kind registered for the process lifetime and
+// asks TaskAvailable for each report whether to advertise it.
+var _ agent.TaskAvailability = (*Client)(nil)
+
+// TaskAvailable reports whether the helper this client hands its work to is
+// ready right now.
+//
+// IT IS THE SAME CHECK EXECUTE APPLIES, not a second opinion. The helper is a
+// separate unit or container whose state changes while the agent runs, so the
+// agent asks again for every report instead of deciding at startup; using one
+// function for both questions means the node can never advertise an upgrade
+// that Execute would refuse on the same evidence, or refuse one it just
+// advertised because the two checks disagreed.
+func (c *Client) TaskAvailable() error {
+	if c.Available == nil {
+		return nil
+	}
+	return c.Available()
 }
 
 func (c *Client) Execute(ctx context.Context, task protocol.Task) ([]byte, error) {
