@@ -177,17 +177,17 @@ printf '%s\n' "$response"
 // signed release and never beside it. Needing only the builds, it pushed `beta`
 // 11h46m before v4.0.1.3's approval, and a rejected approval would have left it
 // there.
-func TestTheImagePublishesAfterTheApprovedRelease(t *testing.T) {
+func TestTheImagePublishesAfterTheSignedRelease(t *testing.T) {
 	raw, err := os.ReadFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(raw)
 	if !strings.Contains(workflowJob(t, text, "release"), "    environment: release-signing\n") {
-		t.Fatal("the release job is no longer the one behind the approval")
+		t.Fatal("the release job is no longer the one holding the signing environment")
 	}
 	if !jobNeeds(t, text, "docker")["release"] {
-		t.Fatal("the image publishes without waiting for the approved release")
+		t.Fatal("the image publishes without waiting for the signed release")
 	}
 }
 

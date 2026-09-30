@@ -201,8 +201,10 @@ durable task foundation 已完成。新增 `agent.upgrade.v1` 由受管 Linux �
 不再只在启动时判断一次。`RealityProbe` 仍未实现。输入只允许精确目标/预期旧版本，必须有截止时间，禁止降级、
 任意 URL/命令与浮动 latest。非 root daemon 经原任务通道接收；独立 helper 校验官方发行档、同 schema/
 upgrade contract 后保留旧程序并切换，失败回退。发行 `SHA256SUMS.txt` 另有 Ed25519 分离签名，helper
-使用内置公钥在下载/解包/执行归档前验证；同源替换归档与 checksum 不再能通过。签名私钥只进入受保护的
-`release-signing` GitHub Environment，批准发布前必须检查精确 tag、签名代码与 workflow diff。旧 agent
+使用内置公钥在下载/解包/执行归档前验证；同源替换归档与 checksum 不再能通过。签名私钥只进入
+`release-signing` GitHub Environment（只接受 v*、release/* 标签）。自 2026-09-30 起按所有者决定，
+预发布版不再需要人工批准，由「提交在 main 且其 Test 运行成功」的 gate 把关；转正式版（promote.yml）
+改在有审批人的 `release-promotion` 环境里，且不接触签名私钥。旧 agent
 不能追溯验证第一个签名版本，须经人工核验的维护路径完成这次过渡。新进程须重新认证同步、
 严格 core 收敛，并给出新 activation
 nonce/PID；helper 核实际非 root MainPID/运行映像 digest 后提交不可变终态，Recover 不重新执行。
