@@ -145,8 +145,17 @@ func ageFile(t *testing.T, path string, by time.Duration) {
 }
 
 // Every rule the check enforced when it ran once at startup, it still enforces
-// per report: the layout is accepted as the helper writes it and refused after
-// any one deviation.
+// per report: the layout is accepted as the helper writes it, and each case
+// below breaks exactly one rule and names the one that must refuse it — the
+// existence, type, symbolic-link and mode of each path; its owner, which is
+// root for the helper's files and the agent itself for requests; its group,
+// which is always the agent's; the marker's content; the heartbeat's age in
+// both directions; and the refusal of a root agent.
+//
+// THE OWNERSHIP CASES MOVE THE IDENTITY, NOT THE FILES. The fixture has the
+// test user own everything and stand in for root, so the agent and "root" are
+// the same UID and group until a case separates them; without that, a check
+// that compared the wrong owner, or no group at all, would pass every case.
 func TestDockerUpgradeControlAcceptsOnlyTheUpdaterLayout(t *testing.T) {
 	requireNonRootIdentity(t)
 	cases := []struct {
@@ -194,6 +203,15 @@ func TestDockerUpgradeControlAcceptsOnlyTheUpdaterLayout(t *testing.T) {
 		{"root agent", func(_ *testing.T, c *dockerUpgradeControl) {
 			c.Identity = func() (uint32, uint32) { return 0, uint32(os.Getegid()) }
 		}, "dedicated non-root identity"},
+		// requests is the one path the agent owns and writes; the helper's
+		// files stay root's. Only the agent's UID moves here, so the helper's
+		// files still match and requests alone is wrong.
+		{"requests not owned by the agent", func(_ *testing.T, c *dockerUpgradeControl) {
+			c.Identity = func() (uint32, uint32) { return uint32(os.Geteuid()) + 1, uint32(os.Getegid()) }
+		}, "ownership is invalid"},
+		{"helper files not in the agent's group", func(_ *testing.T, c *dockerUpgradeControl) {
+			c.Identity = func() (uint32, uint32) { return uint32(os.Geteuid()), uint32(os.Getegid()) + 1 }
+		}, "ownership is invalid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -384,7 +402,11 @@ func TestSystemdUpgradeControlAcceptsOnlyTheEnabledLayout(t *testing.T) {
 		{"marker content", func(t *testing.T, c *systemdUpgradeControl) {
 			mustWrite(t, filepath.Join(c.Root, "upgrades", "enabled"), "agent.upgrade.v1", 0640)
 		}, "marker is invalid"},
-		{"installation not owned by root", func(_ *testing.T, c *systemdUpgradeControl) { c.RootUID++ }, "not root-owned"},
+		// Moving RootUID makes every path foreign at once, and the marker is
+		// checked first, so this pins the marker's own ownership rule. The
+		// installation paths' rule needs a path owned by someone else, which
+		// only root can create: see the root-only test below.
+		{"installation not owned by root", func(_ *testing.T, c *systemdUpgradeControl) { c.RootUID++ }, "marker is not root-owned"},
 		{"bin writable by others", func(t *testing.T, c *systemdUpgradeControl) { mustMkdir(t, filepath.Join(c.Root, "bin"), 0757) }, "writable by the daemon"},
 		{"root writable by the group", func(t *testing.T, c *systemdUpgradeControl) { mustMkdir(t, c.Root, 0775) }, "writable by the daemon"},
 		{"upgrades writable by the group", func(t *testing.T, c *systemdUpgradeControl) {
@@ -415,6 +437,27 @@ func TestSystemdUpgradeControlAcceptsOnlyTheEnabledLayout(t *testing.T) {
 				t.Fatalf("validateSystemdUpgradeControl = %v, want an error containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// The installation paths must be root-owned as well as the marker. Pinning that
+// needs one of them owned by another user while the marker stays root's, and
+// only root can hand a file to someone else, so this runs only as root (as it
+// does in a VM or container); an unprivileged run skips it.
+func TestSystemdUpgradeControlRefusesAForeignOwnedInstallationPath(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("only root can create a path owned by another user")
+	}
+	control := systemdFixtureControl(t)
+	enableSystemdMarker(t, control)
+	if err := validateSystemdUpgradeControl(control); err != nil {
+		t.Fatalf("the enabled layout was refused: %v", err)
+	}
+	if err := os.Chown(filepath.Join(control.Root, "bin"), 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSystemdUpgradeControl(control); err == nil || !strings.Contains(err.Error(), "installation paths are not root-owned") {
+		t.Fatalf("validateSystemdUpgradeControl = %v, want the installation paths refused as not root-owned", err)
 	}
 }
 
