@@ -77,6 +77,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # NO NETWORK. The updater reaches the Docker Engine through its unix socket and
+    # the agent through ./upgrades; the daemon, not the updater, fetches images. It
+    # holds the socket, so nothing should be able to reach it.
+    network_mode: none
     environment:
       PSP_NODE_UPGRADE_TARGET_CONTAINER: passwall-node-agent
       PSP_NODE_UPGRADE_TARGET_AGENT_ID: ${PSP_NODE_AGENT_ID:?set the PSP agent id}
@@ -92,6 +96,20 @@ services:
       - /tmp:size=4m,mode=1777
     cap_drop:
       - ALL
+    # THE UPDATER RUNS AS ROOT BUT WITHOUT DAC_OVERRIDE, so the ordinary permission
+    # bits apply to it, and it crosses three of them before its first heartbeat.
+    # Without these its first write is refused, it exits, and the agent never
+    # offers remote upgrade.
+    cap_add:
+      # Every file it writes is handed to PGID so the agent can read it, and root
+      # is not a member of that group.
+      - CHOWN
+      # It reads the agent's request from ./upgrades/requests, which belongs to
+      # PUID with mode 0700. Read and search only: it never writes there.
+      - DAC_READ_SEARCH
+      # It re-asserts that directory's 0700 on every start, a chmod on a path it
+      # does not own.
+      - FOWNER
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 15s

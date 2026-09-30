@@ -2,6 +2,7 @@ package deployment
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -25,7 +26,10 @@ func TestTheExampleComposeGrantsWhatItsEntrypointNeeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script, compose := string(entrypoint), string(example)
+	// THE AGENT'S OWN BLOCK, NOT THE FILE. The updater grants CHOWN and FOWNER back
+	// too, for its own reasons, so a scan of the whole file would be satisfied by the
+	// updater's list after either were dropped from the agent's.
+	script, compose := string(entrypoint), composeService(t, string(example), "passwall-node")
 
 	// THE NEEDS ARE READ FROM THE SCRIPT RATHER THAN LISTED HERE, so this stays a
 	// claim about the pair rather than a second copy of the entrypoint's behaviour.
@@ -58,31 +62,102 @@ func TestTheExampleComposeGrantsWhatItsEntrypointNeeds(t *testing.T) {
 	}
 	// AND THE DROP ITSELF STILL HAPPENS: an example that granted everything and ran
 	// as root would satisfy the loop above and be the opposite of the point.
-	if !strings.Contains(compose, "cap_drop:") || !strings.Contains(compose, "- ALL") {
+	if !slices.Contains(composeList(compose, "cap_drop"), "ALL") {
 		t.Error("the example compose no longer drops every capability first")
 	}
 }
 
-// grantsCapability reports whether a compose file grants exactly this capability
-// under cap_add. Written as a scan rather than a YAML decode because the file is
-// read as text everywhere else here, and the failure this guards is a list that
-// drifted rather than a document that malformed.
+// THE UPDATER IS ROOT WITHOUT ROOT'S PERMISSION BYPASS, AND IT STILL HAS TO DO ITS JOB.
+//
+// Its service drops every capability, like the agent's, and until now granted none
+// back — a list nothing had checked, because CI starts the example's agent alone
+// (`up -d --no-deps passwall-node`). Without CAP_DAC_OVERRIDE, uid 0 is held to the
+// ordinary permission bits, and the helper crosses three of them on its way to
+// writing its first heartbeat:
+//
+//   - every file it writes is chowned to PGID so the agent can read it
+//     (atomicHelperFile's fchown), and root is not a member of that group, which
+//     needs CAP_CHOWN;
+//   - it re-asserts mode 0700 on requests/, which belongs to PUID, on every start
+//     (prepareControl), and a chmod by a process that does not own the path needs
+//     CAP_FOWNER;
+//   - it reads the agent's request.json out of that same 0700 directory, which
+//     needs CAP_DAC_READ_SEARCH — search and read, and nothing that writes, since
+//     the helper never writes there.
+//
+// EXACTLY THESE, AND NOTHING ELSE. This container holds the Docker socket, so a
+// capability added here to make something start is one given to the most
+// privileged process on the host. A change to the list is a change to this test.
+//
+// AND NO NETWORK. It talks to the Engine over a unix socket and to the agent through
+// a directory; the daemon, not the updater, is what fetches an image. The README
+// already calls it network-disabled, and the service is what makes that true.
+func TestTheExampleUpdaterGrantsWhatTheHelperNeeds(t *testing.T) {
+	example, err := os.ReadFile("../compose.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updater := composeService(t, string(example), "passwall-node-updater")
+
+	if drop := composeList(updater, "cap_drop"); !slices.Equal(drop, []string{"ALL"}) {
+		t.Errorf("the example updater drops %q, want every capability dropped first", drop)
+	}
+	add := composeList(updater, "cap_add")
+	slices.Sort(add)
+	if want := []string{"CHOWN", "DAC_READ_SEARCH", "FOWNER"}; !slices.Equal(add, want) {
+		t.Errorf("the example updater grants %q back, want exactly %q", add, want)
+	}
+	if !slices.Contains(composeList(updater, "security_opt"), "no-new-privileges:true") {
+		t.Error("the example updater no longer runs under no-new-privileges")
+	}
+	if !slices.Contains(strings.Split(updater, "\n"), "    network_mode: none") {
+		t.Error("the example updater is not network-disabled: it needs no network, and holds the Docker socket")
+	}
+}
+
+// composeService returns one service's block of a compose text: its own line and
+// every line indented under it, blank lines included. The file is read as text
+// everywhere else here, so the service boundary is read the same way.
+func composeService(t *testing.T, compose, name string) string {
+	t.Helper()
+	lines := strings.Split(compose, "\n")
+	start := slices.Index(lines, "  "+name+":")
+	if start < 0 {
+		t.Fatalf("the compose has no service %q", name)
+	}
+	end := start + 1
+	for end < len(lines) && (strings.TrimSpace(lines[end]) == "" || strings.HasPrefix(lines[end], "    ")) {
+		end++
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+// grantsCapability reports whether a compose text grants exactly this capability
+// under cap_add.
 func grantsCapability(compose, capability string) bool {
-	inAdd := false
+	return slices.Contains(composeList(compose, "cap_add"), capability)
+}
+
+// composeList returns the items of every block-style `key:` list in a compose
+// text, in order. Written as a scan rather than a YAML decode because the file is
+// read as text everywhere else here, and the failure this guards is a list that
+// drifted rather than a document that malformed. A comment line inside a list does
+// not end it; an item carrying a trailing comment is read with the comment.
+func composeList(compose, key string) []string {
+	var items []string
+	in := false
 	for _, line := range strings.Split(compose, "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
-		case strings.HasPrefix(trimmed, "cap_add:"):
-			inAdd = true
-		case inAdd && strings.HasPrefix(trimmed, "- "):
-			if strings.TrimPrefix(trimmed, "- ") == capability {
-				return true
-			}
-		case inAdd && trimmed != "" && !strings.HasPrefix(trimmed, "#"):
-			inAdd = false
+		case strings.HasPrefix(trimmed, key+":"):
+			in = true
+		case in && strings.HasPrefix(trimmed, "- "):
+			items = append(items, strings.TrimPrefix(trimmed, "- "))
+		case in && trimmed != "" && !strings.HasPrefix(trimmed, "#"):
+			in = false
 		}
 	}
-	return false
+	return items
 }
 
 // AND THE ORDER MATTERS AS MUCH AS THE LIST.
