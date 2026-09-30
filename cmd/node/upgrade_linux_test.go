@@ -448,9 +448,11 @@ func TestSystemdUpgradeClientPicksUpAMarkerWrittenAfterStartup(t *testing.T) {
 	})
 }
 
-// reportAdvertisesUpgrade wires the client exactly as run() does — registry,
-// worker, report builder with a per-report capability source — and returns a
-// function that builds one report and says whether it advertises the upgrade.
+// reportAdvertisesUpgrade wires the client into a registry and worker and
+// builds reports through nodeReportBuilder, the helper run() uses, and returns
+// a function that builds one report and says whether it advertises the
+// upgrade. Sharing the helper is the point: if it went back to taking the
+// task capabilities once, at construction, every late-helper test here fails.
 func reportAdvertisesUpgrade(t *testing.T, client *upgrade.Client) func() bool {
 	t.Helper()
 	store, err := statesqlite.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
@@ -466,7 +468,7 @@ func reportAdvertisesUpgrade(t *testing.T, client *upgrade.Client) func() bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	builder := agent.ReportBuilder{AgentID: "agent-1", Store: store, CapabilitySource: worker.Capabilities}
+	builder := nodeReportBuilder("agent-1", store, nil, nil, nil, worker)
 	return func() bool {
 		t.Helper()
 		built, err := builder.Build(t.Context(), true, nil)

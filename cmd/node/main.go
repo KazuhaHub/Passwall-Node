@@ -330,12 +330,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}
 	synchronizer := agent.Synchronizer{
-		Reports: agent.ReportBuilder{
-			AgentID: parsed.AgentID, AgentVersion: buildversion.String(),
-			Store: store, CoreStatus: supervisor.Status, Now: now,
-			Capabilities: capabilities, CapabilitySource: taskWorker.Capabilities,
-		},
-		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
+		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker),
+		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
 		Host:           hostReporter,
@@ -373,6 +369,26 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		logger.Infof("stopped")
 	}
 	return err
+}
+
+// nodeReportBuilder is the report builder run() gives the synchronizer. static
+// is what this process decided at startup and keeps for its lifetime, such as
+// host telemetry; the task capabilities are NOT among them.
+//
+// THE WORKER'S METHOD IS PASSED, NOT ITS RESULT. worker.Capabilities is asked
+// again for every report because remote upgrade is advertised only while a
+// helper outside this process is ready, and that changes under a running
+// agent. Passing worker.Capabilities() here would take the answer once, at
+// startup — the defect this replaced, where an agent that came up before its
+// updater never advertised remote upgrade until it was restarted. It is a
+// function of its own so the tests build their reports through exactly this
+// wiring rather than a copy of it.
+func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker) agent.ReportBuilder {
+	return agent.ReportBuilder{
+		AgentID: agentID, AgentVersion: buildversion.String(),
+		Store: store, CoreStatus: status, Now: now,
+		Capabilities: static, CapabilitySource: worker.Capabilities,
+	}
 }
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {
