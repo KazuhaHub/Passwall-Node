@@ -24,11 +24,25 @@ type ReportBuilder struct {
 	CoreVersion  string
 	CoreState    string
 	CoreStatus   func() agentcore.Status
+	// Capabilities are fixed for the process lifetime: what this build and the
+	// components it constructed at startup support, such as host telemetry.
 	Capabilities []string
-	Store        state.Store
-	OutboxLimit  int
-	Now          func() time.Time
-	maxBodyBytes int64
+	// CapabilitySource, when set, is asked again for EVERY report and its answer
+	// is merged with Capabilities. It exists for capabilities whose truth can
+	// change while the process runs — a task kind that depends on a helper
+	// outside the process — and it is a function rather than a slice because a
+	// slice is an answer taken once, which is exactly the defect: an agent that
+	// started a few seconds before its updater never advertised remote upgrade
+	// until it was restarted, and one whose updater died kept advertising it.
+	//
+	// It runs on the sync goroutine while the task worker may be evaluating the
+	// same readiness, so it must be safe for concurrent use; it must also be
+	// cheap, because it is on the path of every report.
+	CapabilitySource func() []string
+	Store            state.Store
+	OutboxLimit      int
+	Now              func() time.Time
+	maxBodyBytes     int64
 }
 
 // BuiltReport retains the outbox ids that may be acknowledged only after the
@@ -53,12 +67,16 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.H
 	if _, err := b.Store.ApplyScheduledQuotas(ctx, now); err != nil {
 		return BuiltReport{}, fmt.Errorf("advance scheduled quotas: %w", err)
 	}
+	capabilities := append([]string{protocol.CapabilityTaskExecutionV1}, b.Capabilities...)
+	if b.CapabilitySource != nil {
+		capabilities = append(capabilities, b.CapabilitySource()...)
+	}
 	report := protocol.NodeReport{
 		AgentID: b.AgentID, ProtocolVersion: protocol.ProtocolVersion1,
 		ReportedAtMS: now.UnixMilli(), AgentVersion: b.AgentVersion,
 		CoreEngine: b.CoreEngine, CoreVersion: b.CoreVersion, CoreState: b.CoreState,
 		Partial: partial, Have: make(map[string]protocol.StreamState, 3),
-		Capabilities: sortedUniqueStrings(append([]string{protocol.CapabilityTaskExecutionV1}, b.Capabilities...)),
+		Capabilities: sortedUniqueStrings(capabilities),
 	}
 	if b.CoreStatus != nil {
 		status := b.CoreStatus()

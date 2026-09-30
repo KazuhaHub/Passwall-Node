@@ -41,6 +41,27 @@ type TaskRecoverer interface {
 	Recover(context.Context, state.TaskExecution) ([]byte, error)
 }
 
+// TaskAvailability is implemented by a handler whose kind is registered for the
+// process lifetime but can be served only while something outside the process
+// is ready — the remote-upgrade handler, whose helper is a separate unit or
+// container that can start after the agent, be repaired later, or die while the
+// agent keeps running.
+//
+// REGISTRATION IS NOT ADVERTISEMENT. The kind stays in the dispatch table
+// whatever TaskAvailable says, so a task PSP sent while the kind was advertised
+// still reaches its handler and is refused there with the handler's own stable
+// error code, and a task left running by a crash can still be recovered. What
+// TaskAvailable decides is only whether the capability goes into the NEXT
+// report, and it is asked again for every report: a kind advertised on a
+// once-at-startup answer stays wrong until someone restarts the agent, in
+// whichever direction the answer changed.
+//
+// It must be cheap — it runs once per report — and safe to call concurrently
+// with Execute, which usually applies the same check.
+type TaskAvailability interface {
+	TaskAvailable() error
+}
+
 type TaskHandlerFunc func(context.Context, protocol.Task) ([]byte, error)
 
 func (f TaskHandlerFunc) Execute(ctx context.Context, task protocol.Task) ([]byte, error) {
@@ -70,8 +91,11 @@ func (e *TaskError) Unwrap() error {
 	return e.Err
 }
 
-// TaskRegistry is immutable after construction, making its capabilities and
-// dispatch table one coherent snapshot for the process lifetime.
+// TaskRegistry's dispatch table is immutable after construction: which kinds
+// this process can execute or recover is fixed for its lifetime. Its
+// capabilities are that table filtered, at each call, by the handlers that
+// implement TaskAvailability — so the set a report advertises can shrink and
+// grow while the set the worker dispatches cannot.
 type TaskRegistry struct {
 	handlers map[string]TaskHandler
 }
@@ -103,12 +127,19 @@ func (r *TaskRegistry) Handler(kind string) (TaskHandler, bool) {
 	return handler, ok
 }
 
+// Capabilities is what a report built NOW may advertise: every registered kind
+// except those whose handler says it is unavailable at this moment. It is
+// evaluated on every call and never cached, because its caller builds one
+// report per call and the point is that the answer can change between them.
 func (r *TaskRegistry) Capabilities() []string {
 	capabilities := []string{protocol.CapabilityTaskExecutionV1}
 	if r == nil {
 		return capabilities
 	}
-	for kind := range r.handlers {
+	for kind, handler := range r.handlers {
+		if gated, ok := handler.(TaskAvailability); ok && gated.TaskAvailable() != nil {
+			continue
+		}
 		capabilities = append(capabilities, protocol.TaskCapability(kind))
 	}
 	sort.Strings(capabilities)
@@ -157,6 +188,14 @@ func NewTaskWorker(options TaskWorkerOptions) (*TaskWorker, error) {
 // Capabilities advertises expiry only when this worker has an elapsed-backed
 // authorization clock. Lack of a fresh anchor still holds received tasks;
 // capability is implementation support, not a claim that time is fresh now.
+//
+// THE TWO KINDS OF "NOT NOW" ARE TREATED DIFFERENTLY ON PURPOSE. A stale clock
+// anchor HOLDS a task until the next heartbeat freshens it, so advertising
+// expiry through that gap costs nothing. An unavailable handler would FAIL the
+// task outright, so its kind is left out of the report instead (see
+// TaskAvailability) and PSP keeps describing the node truthfully until it can
+// actually serve the kind. It is therefore evaluated per call as well: pass
+// this method, not its result, to whatever builds reports.
 func (w *TaskWorker) Capabilities() []string {
 	capabilities := w.registry.Capabilities()
 	if w.clock != nil {
