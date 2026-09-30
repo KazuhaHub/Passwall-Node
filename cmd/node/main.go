@@ -259,9 +259,15 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		parsed, store, supervisor, eventRing, func() host.Collector { return hostCollector }, now,
 	)
 	if startClock != nil {
-		upgradeClient = remoteUpgradeClient(parsed, buildversion.Version, startClock, coreRuntime.Converge)
+		upgradeClient = remoteUpgradeClient(parsed, buildversion.Version, startClock, coreRuntime.Converge, logger)
 	}
 	if upgradeClient != nil {
+		// REGISTERED HERE, ADVERTISED PER REPORT. The client exists whenever
+		// this process is a supported managed installation; whether its helper is
+		// ready is asked again for every report through the client's
+		// TaskAvailable, so a helper that starts after the agent — or stops
+		// while it runs — shows up in the next report instead of at the next
+		// restart. See remoteUpgradeClient.
 		handlers[upgrade.TaskKind] = upgradeClient
 	}
 	taskRegistry, err := agent.NewTaskRegistry(handlers)
@@ -295,7 +301,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	observer := &agent.ObservationService{
 		Telemetry: telemetry, Store: store, Issues: issues, Status: supervisor.Status, Now: now,
 	}
-	capabilities := taskWorker.Capabilities()
+	// Capabilities fixed for the process lifetime. The task capabilities are
+	// NOT among them: they come from taskWorker.Capabilities, which the report
+	// builder calls for every report, because one of them — remote upgrade —
+	// depends on a helper outside this process.
+	var capabilities []string
 	// THE CAPABILITY IS DECLARED FROM THE RESULT, NOT FROM THE PLATFORM. A build
 	// whose collector could not be constructed must not advertise
 	// host.telemetry.v1: the panel would then expect telemetry from a node that
@@ -323,7 +333,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Reports: agent.ReportBuilder{
 			AgentID: parsed.AgentID, AgentVersion: buildversion.String(),
 			Store: store, CoreStatus: supervisor.Status, Now: now,
-			Capabilities: capabilities,
+			Capabilities: capabilities, CapabilitySource: taskWorker.Capabilities,
 		},
 		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
