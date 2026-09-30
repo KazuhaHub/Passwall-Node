@@ -259,9 +259,15 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		parsed, store, supervisor, eventRing, func() host.Collector { return hostCollector }, now,
 	)
 	if startClock != nil {
-		upgradeClient = remoteUpgradeClient(parsed, buildversion.Version, startClock, coreRuntime.Converge)
+		upgradeClient = remoteUpgradeClient(parsed, buildversion.Version, startClock, coreRuntime.Converge, logger)
 	}
 	if upgradeClient != nil {
+		// REGISTERED HERE, ADVERTISED PER REPORT. The client exists whenever
+		// this process is a supported managed installation; whether its helper is
+		// ready is asked again for every report through the client's
+		// TaskAvailable, so a helper that starts after the agent — or stops
+		// while it runs — shows up in the next report instead of at the next
+		// restart. See remoteUpgradeClient.
 		handlers[upgrade.TaskKind] = upgradeClient
 	}
 	taskRegistry, err := agent.NewTaskRegistry(handlers)
@@ -295,7 +301,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	observer := &agent.ObservationService{
 		Telemetry: telemetry, Store: store, Issues: issues, Status: supervisor.Status, Now: now,
 	}
-	capabilities := taskWorker.Capabilities()
+	// Capabilities fixed for the process lifetime. The task capabilities are
+	// NOT among them: they come from taskWorker.Capabilities, which the report
+	// builder calls for every report, because one of them — remote upgrade —
+	// depends on a helper outside this process.
+	var capabilities []string
 	// THE CAPABILITY IS DECLARED FROM THE RESULT, NOT FROM THE PLATFORM. A build
 	// whose collector could not be constructed must not advertise
 	// host.telemetry.v1: the panel would then expect telemetry from a node that
@@ -320,12 +330,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}
 	synchronizer := agent.Synchronizer{
-		Reports: agent.ReportBuilder{
-			AgentID: parsed.AgentID, AgentVersion: buildversion.String(),
-			Store: store, CoreStatus: supervisor.Status, Now: now,
-			Capabilities: capabilities,
-		},
-		Syncer: syncer, Store: store, Processor: processor, Observer: observer,
+		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker),
+		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
 		Host:           hostReporter,
@@ -363,6 +369,26 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		logger.Infof("stopped")
 	}
 	return err
+}
+
+// nodeReportBuilder is the report builder run() gives the synchronizer. static
+// is what this process decided at startup and keeps for its lifetime, such as
+// host telemetry; the task capabilities are NOT among them.
+//
+// THE WORKER'S METHOD IS PASSED, NOT ITS RESULT. worker.Capabilities is asked
+// again for every report because remote upgrade is advertised only while a
+// helper outside this process is ready, and that changes under a running
+// agent. Passing worker.Capabilities() here would take the answer once, at
+// startup — the defect this replaced, where an agent that came up before its
+// updater never advertised remote upgrade until it was restarted. It is a
+// function of its own so the tests build their reports through exactly this
+// wiring rather than a copy of it.
+func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker) agent.ReportBuilder {
+	return agent.ReportBuilder{
+		AgentID: agentID, AgentVersion: buildversion.String(),
+		Store: store, CoreStatus: status, Now: now,
+		Capabilities: static, CapabilitySource: worker.Capabilities,
+	}
 }
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {

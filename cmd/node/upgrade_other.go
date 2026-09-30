@@ -10,8 +10,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/v4/internal/upgrade"
 )
 
-func remoteUpgradeEnabled(options, string) bool { return false }
-func remoteUpgradeClient(options, string, state.TaskStartClock, func(context.Context) error) *upgrade.Client {
+func remoteUpgradeClient(options, string, state.TaskStartClock, func(context.Context) error, *nodeLogger) *upgrade.Client {
 	return nil
 }
 func enableRemoteUpgrade() error {

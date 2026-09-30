@@ -11,76 +11,250 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/v4/deployment"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-node/v4/internal/upgrade"
 	"github.com/KazuhaHub/passwall-node/v4/releaseid"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
-func remoteUpgradeClient(parsed options, version string, clock state.TaskStartClock, converge func(context.Context) error) *upgrade.Client {
-	if remoteUpgradeEnabled(parsed, version) {
-		return &upgrade.Client{RootDir: upgrade.InstallRoot, Version: version, Clock: clock, ConfirmConverged: converge}
-	}
-	if dockerRemoteUpgradeEnabled(parsed, version) {
-		return &upgrade.Client{
-			RequestDir: filepath.Join(upgrade.DockerControlDir, "requests"),
-			ReceiptDir: filepath.Join(upgrade.DockerControlDir, "receipts"),
-			ReadyDir:   filepath.Join(upgrade.DockerControlDir, "requests"),
-			BinaryPath: upgrade.DockerBinaryPath,
-			Version:    version, Clock: clock, ConfirmConverged: converge,
-			Available: validateDockerUpgradeControl,
+// remoteUpgradeClient returns the agent-upgrade handler when this process is one
+// of the two managed installations that support it, and nil otherwise.
+//
+// IDENTITY IS DECIDED ONCE; READINESS ON EVERY REPORT. Which installation this
+// is — its executable path, data directory, credential path, release version,
+// effective user and container markers — is fixed by how the process was
+// started and cannot change without a restart, so it is read here, once. Whether
+// the root helper or the Docker updater is ready to take a request is a fact
+// about ANOTHER unit or container, and that changes under a running agent:
+// after a host or NAS reboot the Docker daemon restarts the agent and its
+// updater itself, under their restart policy, where Compose's depends_on plays
+// no part and nothing orders the two; and an operator may enable or repair the
+// helper long after the agent started.
+//
+// This used to decide both at once, at startup. An agent that came up a few
+// seconds before its updater never constructed the handler, never advertised
+// task.agent.upgrade.v1, and logged nothing — PSP kept showing "manual upgrade"
+// for a node whose updater was running fine, until someone restarted the agent.
+// The reverse was wrong too: a helper that died later stayed advertised.
+//
+// So the handler is now constructed and registered from identity alone, and
+// the readiness check becomes its Available function, behind a ReadinessGate:
+// the registry asks it before every report and Execute asks it before every
+// start. REGISTRATION NO LONGER IMPLIES ADVERTISEMENT. Keeping the handler
+// registered is also what lets OnSynced record activation evidence and lets a
+// task left running by a crash be recovered, whatever the helper looked like at
+// the moment this process started.
+func remoteUpgradeClient(parsed options, version string, clock state.TaskStartClock, converge func(context.Context) error, logger *nodeLogger) *upgrade.Client {
+	return remoteUpgradeClientFor(parsed, version, currentUpgradeProcess(), productionUpgradeControls(), clock, converge, logger)
+}
+
+// upgradeControls is where each installation's helper keeps the state its
+// readiness check inspects. Production uses productionUpgradeControls; tests
+// point it at a temporary directory.
+type upgradeControls struct {
+	// SystemdRoot is the installation root; the zero SystemdRootUID is root.
+	SystemdRoot    string
+	SystemdRootUID uint32
+	Docker         dockerUpgradeControl
+}
+
+func productionUpgradeControls() upgradeControls {
+	return upgradeControls{SystemdRoot: upgrade.InstallRoot, Docker: dockerUpgradeControl{Dir: upgrade.DockerControlDir}}
+}
+
+// remoteUpgradeClientFor is remoteUpgradeClient with the process and the
+// control roots passed in, which is the whole reason it exists: it is the
+// selection run() depends on, and a test that constructs the Docker or systemd
+// client directly would stay green if this went back to asking the helper
+// before building a client — the original defect, in its original place.
+//
+// The systemd executable the readiness check inspects is spelled from the
+// root. In production that is the same string as process.Executable, because
+// remoteUpgradeInstall has just required process.Executable to be exactly
+// InstallRoot/bin/passwall-node; spelling it from the root is what lets a test
+// relocate the whole installation.
+func remoteUpgradeClientFor(parsed options, version string, process upgradeProcess, controls upgradeControls, clock state.TaskStartClock, converge func(context.Context) error, logger *nodeLogger) *upgrade.Client {
+	switch remoteUpgradeInstall(parsed, version, process) {
+	case upgradeInstallSystemd:
+		control := systemdUpgradeControl{
+			Root:       controls.SystemdRoot,
+			Executable: filepath.Join(controls.SystemdRoot, "bin", "passwall-node"),
+			RootUID:    controls.SystemdRootUID,
 		}
+		return newSystemdUpgradeClient(control, version, clock, converge, upgradeReadinessReporter(logger, "systemd helper"))
+	case upgradeInstallDocker:
+		return newDockerUpgradeClient(controls.Docker, version, clock, converge, upgradeReadinessReporter(logger, "Docker updater"))
 	}
 	return nil
 }
 
-func remoteUpgradeEnabled(parsed options, version string) bool {
-	if parsed.DataDir != filepath.Join(upgrade.InstallRoot, "data") || parsed.CredentialFile != filepath.Join(upgrade.InstallRoot, "config", "credential") || !releaseid.ValidVersion(version) {
-		return false
-	}
+// upgradeInstall is which managed installation the static prerequisites
+// recognised.
+type upgradeInstall int
+
+const (
+	upgradeInstallNone upgradeInstall = iota
+	upgradeInstallSystemd
+	upgradeInstallDocker
+)
+
+// upgradeProcess is everything the static prerequisites read about this
+// process. It is gathered once, by currentUpgradeProcess, so the decision itself
+// is a pure function of it and of the command line.
+type upgradeProcess struct {
+	// Executable is os.Executable(), or empty when that fails, which then
+	// matches neither installation.
+	Executable string
+	EUID       int
+	// DockerEnv is whether /.dockerenv exists.
+	DockerEnv bool
+	// DockerRemoteUpgrade is PSP_NODE_DOCKER_REMOTE_UPGRADE, which only a
+	// Compose file that also runs the updater sets.
+	DockerRemoteUpgrade string
+}
+
+func currentUpgradeProcess() upgradeProcess {
 	executable, err := os.Executable()
-	if err != nil || executable != filepath.Join(upgrade.InstallRoot, "bin", "passwall-node") {
-		return false
+	if err != nil {
+		executable = ""
 	}
-	info, err := os.Lstat(filepath.Join(upgrade.InstallRoot, "upgrades", "enabled"))
+	_, dockerEnvErr := os.Lstat("/.dockerenv")
+	return upgradeProcess{
+		Executable: executable, EUID: os.Geteuid(), DockerEnv: dockerEnvErr == nil,
+		DockerRemoteUpgrade: os.Getenv("PSP_NODE_DOCKER_REMOTE_UPGRADE"),
+	}
+}
+
+// remoteUpgradeInstall applies the static prerequisites. They are the identity
+// half of what used to be remoteUpgradeEnabled and dockerRemoteUpgradeEnabled,
+// with the same conditions; nothing here looks at the helper.
+func remoteUpgradeInstall(parsed options, version string, process upgradeProcess) upgradeInstall {
+	if !releaseid.ValidVersion(version) {
+		return upgradeInstallNone
+	}
+	if parsed.DataDir == filepath.Join(upgrade.InstallRoot, "data") &&
+		parsed.CredentialFile == filepath.Join(upgrade.InstallRoot, "config", "credential") &&
+		process.Executable == filepath.Join(upgrade.InstallRoot, "bin", "passwall-node") {
+		return upgradeInstallSystemd
+	}
+	if process.DockerRemoteUpgrade == "true" && process.EUID != 0 &&
+		parsed.DataDir == upgrade.DockerDataDir && parsed.CredentialFile == "/run/passwall-node/credential" &&
+		process.Executable == upgrade.DockerBinaryPath && process.DockerEnv {
+		return upgradeInstallDocker
+	}
+	return upgradeInstallNone
+}
+
+func newSystemdUpgradeClient(control systemdUpgradeControl, version string, clock state.TaskStartClock, converge func(context.Context) error, onChange func(error)) *upgrade.Client {
+	gate := agent.NewReadinessGate(func() error { return validateSystemdUpgradeControl(control) }, onChange)
+	return &upgrade.Client{
+		RootDir: control.Root, Version: version, Clock: clock, ConfirmConverged: converge,
+		// THE SYSTEMD CLIENT HAS A CHECK NOW TOO. It used to have none, because
+		// the marker had already been verified before the client existed; with
+		// the check moved out of construction, Execute has to apply it itself or
+		// it would start an upgrade no helper will ever pick up.
+		Available: gate.Check,
+	}
+}
+
+func newDockerUpgradeClient(control dockerUpgradeControl, version string, clock state.TaskStartClock, converge func(context.Context) error, onChange func(error)) *upgrade.Client {
+	gate := agent.NewReadinessGate(func() error { return validateDockerUpgradeControl(control) }, onChange)
+	return &upgrade.Client{
+		RequestDir: filepath.Join(control.Dir, "requests"),
+		ReceiptDir: filepath.Join(control.Dir, "receipts"),
+		ReadyDir:   filepath.Join(control.Dir, "requests"),
+		BinaryPath: upgrade.DockerBinaryPath,
+		Version:    version, Clock: clock, ConfirmConverged: converge,
+		Available: gate.Check,
+	}
+}
+
+// upgradeReadinessReporter turns readiness changes into log lines. The gate
+// calls it for the first evaluation and for each change only, so a steady state
+// is one line, not one per report.
+//
+// UNAVAILABLE IS A WARNING WITH THE CHECK'S OWN REASON. The reasons are fixed
+// strings naming which rule failed — never a path's contents, a credential or an
+// endpoint — and without them "PSP says manual upgrade" has no local answer.
+func upgradeReadinessReporter(logger *nodeLogger, installation string) func(error) {
+	capability := protocol.TaskCapability(upgrade.TaskKind)
+	return func(err error) {
+		if err == nil {
+			logger.Infof("remote agent upgrade is ready (%s); advertising %s", installation, capability)
+			return
+		}
+		logger.Warnf("remote agent upgrade is unavailable (%s); %s is withheld until the check passes: %v", installation, capability, err)
+	}
+}
+
+// systemdUpgradeControl is what the systemd readiness check inspects. The zero
+// RootUID is root, which is what production requires; tests substitute their
+// own UID so the rules can be exercised in a temporary directory.
+type systemdUpgradeControl struct {
+	Root       string
+	Executable string
+	RootUID    uint32
+}
+
+// validateSystemdUpgradeControl is the dynamic half of the systemd check: the
+// root-owned, daemon-unwritable installation paths and the exact marker that
+// --enable-remote-upgrade writes. The rules and their order are the ones the
+// startup check applied; only when they run changed. The distinct messages are
+// for the log line — every path that used to be refused is still refused.
+func validateSystemdUpgradeControl(control systemdUpgradeControl) error {
+	marker := filepath.Join(control.Root, "upgrades", "enabled")
+	info, err := os.Lstat(marker)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("remote upgrade is not enabled on this installation; run the installed binary as root with --enable-remote-upgrade")
+	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0022 != 0 {
-		return false
+		return errors.New("the systemd upgrade helper marker is not a regular file or is writable by the daemon")
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != 0 {
-		return false
+	if !ok || st.Uid != control.RootUID {
+		return errors.New("the systemd upgrade helper marker is not root-owned")
 	}
-	for _, name := range []string{upgrade.InstallRoot, filepath.Join(upgrade.InstallRoot, "bin"), executable, filepath.Join(upgrade.InstallRoot, "upgrades")} {
+	for _, name := range []string{control.Root, filepath.Join(control.Root, "bin"), control.Executable, filepath.Join(control.Root, "upgrades")} {
 		info, err := os.Lstat(name)
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
-			return false
+			return errors.New("installation paths are missing, symbolic links or writable by the daemon")
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || st.Uid != 0 {
-			return false
+		if !ok || st.Uid != control.RootUID {
+			return errors.New("installation paths are not root-owned")
 		}
 	}
-	marker, err := os.ReadFile(filepath.Join(upgrade.InstallRoot, "upgrades", "enabled"))
-	return err == nil && string(marker) == "agent.upgrade.v1\n"
+	content, err := os.ReadFile(marker)
+	if err != nil || string(content) != "agent.upgrade.v1\n" {
+		return errors.New("the systemd upgrade helper marker is invalid")
+	}
+	return nil
 }
 
-func dockerRemoteUpgradeEnabled(parsed options, version string) bool {
-	if os.Getenv("PSP_NODE_DOCKER_REMOTE_UPGRADE") != "true" || os.Geteuid() == 0 ||
-		parsed.DataDir != upgrade.DockerDataDir || parsed.CredentialFile != "/run/passwall-node/credential" ||
-		!releaseid.ValidVersion(version) {
-		return false
-	}
-	executable, err := os.Executable()
-	if err != nil || executable != upgrade.DockerBinaryPath {
-		return false
-	}
-	if _, err := os.Lstat("/.dockerenv"); err != nil {
-		return false
-	}
-	return validateDockerUpgradeControl() == nil
+// dockerUpgradeControl is what the Docker readiness check inspects. As for
+// systemd, the zero RootUID is root; Identity and Now default to the process's
+// effective IDs and the wall clock, read at every check exactly as before.
+type dockerUpgradeControl struct {
+	Dir      string
+	RootUID  uint32
+	Identity func() (uid, gid uint32)
+	Now      func() time.Time
 }
 
-func validateDockerUpgradeControl() error {
-	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
+// validateDockerUpgradeControl is the dynamic half of the Docker check: the
+// updater's control directory, its ownership and modes, the exact marker and a
+// heartbeat younger than thirty seconds (the updater rewrites it every five).
+// The rules are the ones the startup check applied, in the same order.
+func validateDockerUpgradeControl(control dockerUpgradeControl) error {
+	identity, now := control.Identity, control.Now
+	if identity == nil {
+		identity = func() (uint32, uint32) { return uint32(os.Geteuid()), uint32(os.Getegid()) }
+	}
+	if now == nil {
+		now = time.Now
+	}
+	uid, gid := identity()
 	if uid == 0 || gid == 0 {
 		return errors.New("Docker upgrade agent must run as its dedicated non-root identity")
 	}
@@ -90,11 +264,11 @@ func validateDockerUpgradeControl() error {
 		permission os.FileMode
 		directory  bool
 	}{
-		{upgrade.DockerControlDir, 0, gid, 0750, true},
-		{filepath.Join(upgrade.DockerControlDir, "requests"), uid, gid, 0700, true},
-		{filepath.Join(upgrade.DockerControlDir, "receipts"), 0, gid, 0750, true},
-		{filepath.Join(upgrade.DockerControlDir, "enabled"), 0, gid, 0640, false},
-		{filepath.Join(upgrade.DockerControlDir, "heartbeat"), 0, gid, 0640, false},
+		{control.Dir, control.RootUID, gid, 0750, true},
+		{filepath.Join(control.Dir, "requests"), uid, gid, 0700, true},
+		{filepath.Join(control.Dir, "receipts"), control.RootUID, gid, 0750, true},
+		{filepath.Join(control.Dir, "enabled"), control.RootUID, gid, 0640, false},
+		{filepath.Join(control.Dir, "heartbeat"), control.RootUID, gid, 0640, false},
 	}
 	for _, check := range checks {
 		info, err := os.Lstat(check.path)
@@ -106,12 +280,15 @@ func validateDockerUpgradeControl() error {
 			return errors.New("Docker upgrade control ownership is invalid")
 		}
 	}
-	marker, err := os.ReadFile(filepath.Join(upgrade.DockerControlDir, "enabled"))
+	marker, err := os.ReadFile(filepath.Join(control.Dir, "enabled"))
 	if err != nil || string(marker) != upgrade.DockerMarker {
 		return errors.New("Docker upgrade helper marker is invalid")
 	}
-	heartbeat, err := os.Stat(filepath.Join(upgrade.DockerControlDir, "heartbeat"))
-	if err != nil || time.Since(heartbeat.ModTime()) < 0 || time.Since(heartbeat.ModTime()) > 30*time.Second {
+	heartbeat, err := os.Stat(filepath.Join(control.Dir, "heartbeat"))
+	if err != nil {
+		return errors.New("Docker upgrade helper heartbeat is stale")
+	}
+	if age := now().Sub(heartbeat.ModTime()); age < 0 || age > 30*time.Second {
 		return errors.New("Docker upgrade helper heartbeat is stale")
 	}
 	return nil

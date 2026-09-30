@@ -153,3 +153,40 @@ func TestUpgradePauseBetweenSamplesCannotRenewAuthorization(t *testing.T) {
 		t.Fatal("pause was incorrectly added back to upgrade authorization")
 	}
 }
+
+// The client's helper check decides both whether Execute starts and whether the
+// agent advertises the kind at all, so a node whose helper is not running tells
+// PSP so on its next report instead of accepting an upgrade it can only refuse.
+// With no check configured the kind is always advertised, as before.
+func TestClientAdvertisesUpgradeOnlyWhileItsHelperIsAvailable(t *testing.T) {
+	helperErr := errors.New("helper heartbeat is stale")
+	client := &Client{RootDir: t.TempDir(), Available: func() error { return helperErr }}
+	registry, err := agent.NewTaskRegistry(map[string]agent.TaskHandler{TaskKind: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability := protocol.TaskCapability(TaskKind)
+	advertised := func() bool {
+		for _, got := range registry.Capabilities() {
+			if got == capability {
+				return true
+			}
+		}
+		return false
+	}
+	if advertised() {
+		t.Fatal("upgrade was advertised while its helper check failed")
+	}
+	var taskErr *agent.TaskError
+	if _, err := client.Execute(t.Context(), protocol.Task{}); !errors.As(err, &taskErr) || taskErr.Code != "agent_upgrade_helper_unavailable" {
+		t.Fatalf("Execute with the helper unavailable = %v", err)
+	}
+	helperErr = nil
+	if !advertised() {
+		t.Fatal("upgrade was not advertised once its helper check passed")
+	}
+	client.Available = nil
+	if !advertised() {
+		t.Fatal("a client without a helper check stopped advertising upgrade")
+	}
+}

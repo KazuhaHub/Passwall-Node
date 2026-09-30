@@ -171,6 +171,16 @@ When that is the previous container still running under its
 `passwall-node-agent` before the next `docker compose up`. Otherwise Compose
 starts a second Agent with the same identity beside it.
 
+The Agent offers remote upgrade to PSP only while the updater is ready: its
+control directory and marker are intact and its heartbeat is less than 30
+seconds old. That is re-checked for every sync report, not once at startup, so
+an updater that starts after the Agent — which can happen when the Docker daemon
+restarts both containers after a host or NAS reboot — or that is repaired later
+is picked up at the next sync without restarting the Agent, and one that stops
+is withdrawn the same way. The Agent logs the first result and each change, not
+every sync; search its log for `remote agent upgrade` to see why PSP offers only
+a manual upgrade.
+
 On Linux hosts where unprivileged processes cannot bind ports below 1024, use
 listener ports at or above 1024 or deliberately configure the host's
 `net.ipv4.ip_unprivileged_port_start`. The container does not retain root merely
@@ -343,9 +353,11 @@ transport/state/apply/report stack without downloading or launching Xray.
 The durable task/result protocol is implemented, but the harness advertises no
 kind-specific task capability and therefore receives no tasks from a conforming
 control plane. Reality probing remains unimplemented. The production daemon
-registers `agent.upgrade.v1` only for a managed Linux/systemd installation with
-its separate root-owned upgrade helper explicitly enabled. The contract harness
-does not perform upgrades.
+registers `agent.upgrade.v1` on a managed Linux installation (systemd or
+Docker), recognised from its own process identity, and advertises
+`task.agent.upgrade.v1` only while that installation's root-owned upgrade
+helper or Docker updater passes its readiness check, which is re-evaluated for
+every sync report. The contract harness does not perform upgrades.
 
 Deadline-aware infrastructure additionally requires `task.expiry.v1` alongside
 execution and kind capabilities. `not_after_ms` is an immutable latest-start
@@ -380,6 +392,12 @@ expected current release and an idempotency key. The existing authenticated
 sync/task channel delivers it only to agents advertising execution, expiry and
 `task.agent.upgrade.v1`. There is no SSH requirement, floating `latest`, arbitrary
 download URL, shell command or additional public node endpoint.
+
+An agent advertises `task.agent.upgrade.v1` only while the helper is enabled
+and the installation paths are root-owned and not writable by the daemon. It
+re-checks this for every sync report and logs the first result and each change
+(search its log for `remote agent upgrade`), so enabling or repairing the helper
+under a running agent takes effect at its next sync without a restart.
 
 The daemon stays non-root with its original filesystem sandbox. A separate
 root-owned systemd path/oneshot controller downloads the official archive,
