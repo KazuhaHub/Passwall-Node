@@ -196,8 +196,9 @@ engine/version/binary/命令参数是一个原子部署身份，启动失败会�
 遥测重连能对已知活跃连接去重和查缺，但上述 1000 条历史边界是未解决的运营风险；在上游提供单调 cursor，
 或我们加入可独立核对的全局累计边界前，长时间 telemetry 中断后的计数必须视为有条件，不能视为数学上完整。
 
-durable task foundation 已完成。新增 `agent.upgrade.v1` 仅由已显式启用 root-owned systemd 升级助手的
-Linux daemon 注册；`RealityProbe` 仍未实现。输入只允许精确目标/预期旧版本，必须有截止时间，禁止降级、
+durable task foundation 已完成。新增 `agent.upgrade.v1` 由受管 Linux 安装（systemd 或 Docker）按进程身份
+注册，但只在 root-owned 升级助手 / Docker updater 就绪时通告；就绪状态每次同步上报都重新检查，变化写入日志，
+不再只在启动时判断一次。`RealityProbe` 仍未实现。输入只允许精确目标/预期旧版本，必须有截止时间，禁止降级、
 任意 URL/命令与浮动 latest。非 root daemon 经原任务通道接收；独立 helper 校验官方发行档、同 schema/
 upgrade contract 后保留旧程序并切换，失败回退。发行 `SHA256SUMS.txt` 另有 Ed25519 分离签名，helper
 使用内置公钥在下载/解包/执行归档前验证；同源替换归档与 checksum 不再能通过。签名私钥只进入受保护的
