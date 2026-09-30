@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -28,15 +29,20 @@ func (upgradeTestClock) TaskTimeBounds() (state.TaskTimeBounds, error) {
 	return state.TaskTimeBounds{LowerMS: 1, UpperMS: 2}, nil
 }
 
+// The process identities of the two managed installations, exactly as the
+// Compose file and install.sh start them.
+var (
+	dockerProcess  = upgradeProcess{Executable: upgrade.DockerBinaryPath, EUID: 10001, DockerEnv: true, DockerRemoteUpgrade: "true"}
+	dockerOptions  = options{DataDir: upgrade.DockerDataDir, CredentialFile: "/run/passwall-node/credential"}
+	systemdProcess = upgradeProcess{Executable: filepath.Join(upgrade.InstallRoot, "bin", "passwall-node"), EUID: 998}
+	systemdOptions = options{DataDir: filepath.Join(upgrade.InstallRoot, "data"), CredentialFile: filepath.Join(upgrade.InstallRoot, "config", "credential")}
+)
+
 // The static prerequisites describe WHICH managed installation this process is,
 // and nothing in them reads the helper's state. That is the property the fix
 // rests on: the upgrade handler is constructed and registered from identity
 // alone, and readiness is left to the per-report check.
 func TestRemoteUpgradeInstallIsDecidedByProcessIdentityAlone(t *testing.T) {
-	dockerProcess := upgradeProcess{Executable: upgrade.DockerBinaryPath, EUID: 10001, DockerEnv: true, DockerRemoteUpgrade: "true"}
-	dockerOptions := options{DataDir: upgrade.DockerDataDir, CredentialFile: "/run/passwall-node/credential"}
-	systemdProcess := upgradeProcess{Executable: filepath.Join(upgrade.InstallRoot, "bin", "passwall-node"), EUID: 998}
-	systemdOptions := options{DataDir: filepath.Join(upgrade.InstallRoot, "data"), CredentialFile: filepath.Join(upgrade.InstallRoot, "config", "credential")}
 
 	with := func(process upgradeProcess, change func(*upgradeProcess)) upgradeProcess {
 		change(&process)
@@ -253,6 +259,81 @@ func TestDockerUpgradeClientFollowsAnUpdaterThatStartsLateAndStops(t *testing.T)
 		"[Info] passwall-node: remote agent upgrade is ready (Docker updater); advertising task.agent.upgrade.v1",
 		"[Warning] passwall-node: remote agent upgrade is unavailable (Docker updater); task.agent.upgrade.v1 is withheld until the check passes: Docker upgrade helper heartbeat is stale",
 	})
+}
+
+// THE SELECTION run() ACTUALLY CALLS. The tests above construct the Docker and
+// systemd clients directly, so they would stay green if the selection went back
+// to refusing to build a client while the updater is absent — which is the
+// original defect in its original place. These go through remoteUpgradeClientFor,
+// the body of remoteUpgradeClient with only the process and the control roots
+// substituted: a Docker agent whose updater has not started yet gets a client,
+// the client withholds the capability, and the capability appears once the
+// updater is up.
+func TestRemoteUpgradeClientIsBuiltBeforeTheDockerUpdaterStarts(t *testing.T) {
+	requireNonRootIdentity(t)
+	control := dockerFixtureControl(t)
+	var logs bytes.Buffer
+	client := remoteUpgradeClientFor(dockerOptions, upgradeTestVersion, dockerProcess, upgradeControls{Docker: control},
+		upgradeTestClock{}, func(context.Context) error { return nil }, newNodeLogger(&logs))
+	if client == nil {
+		t.Fatal("a Docker agent whose updater had not started yet got no upgrade client")
+	}
+	if client.RequestDir != filepath.Join(control.Dir, "requests") || client.ReceiptDir != filepath.Join(control.Dir, "receipts") ||
+		client.BinaryPath != upgrade.DockerBinaryPath || client.RootDir != "" {
+		t.Fatalf("client = %+v, want the Docker client for %s", client, control.Dir)
+	}
+	advertised := reportAdvertisesUpgrade(t, client)
+	if advertised() {
+		t.Fatal("remote upgrade was advertised before the updater started")
+	}
+	writeDockerHelperLayout(t, control)
+	if !advertised() {
+		t.Fatal("remote upgrade was not advertised once the updater was running")
+	}
+	assertReadinessLog(t, logs.String(), []string{
+		"[Warning] passwall-node: remote agent upgrade is unavailable (Docker updater); task.agent.upgrade.v1 is withheld until the check passes: Docker upgrade control paths are unavailable or unsafe",
+		"[Info] passwall-node: remote agent upgrade is ready (Docker updater); advertising task.agent.upgrade.v1",
+	})
+}
+
+func TestRemoteUpgradeClientIsBuiltBeforeTheSystemdHelperIsEnabled(t *testing.T) {
+	control := systemdFixtureControl(t)
+	var logs bytes.Buffer
+	client := remoteUpgradeClientFor(systemdOptions, upgradeTestVersion, systemdProcess,
+		upgradeControls{SystemdRoot: control.Root, SystemdRootUID: control.RootUID},
+		upgradeTestClock{}, func(context.Context) error { return nil }, newNodeLogger(&logs))
+	if client == nil {
+		t.Fatal("a systemd agent whose helper was not enabled yet got no upgrade client")
+	}
+	if client.RootDir != control.Root || client.RequestDir != "" {
+		t.Fatalf("client = %+v, want the systemd client for %s", client, control.Root)
+	}
+	advertised := reportAdvertisesUpgrade(t, client)
+	if advertised() {
+		t.Fatal("remote upgrade was advertised before the marker existed")
+	}
+	enableSystemdMarker(t, control)
+	if !advertised() {
+		t.Fatal("remote upgrade was not advertised once the marker was written")
+	}
+	assertReadinessLog(t, logs.String(), []string{
+		"[Warning] passwall-node: remote agent upgrade is unavailable (systemd helper); task.agent.upgrade.v1 is withheld until the check passes: remote upgrade is not enabled on this installation; run the installed binary as root with --enable-remote-upgrade",
+		"[Info] passwall-node: remote agent upgrade is ready (systemd helper); advertising task.agent.upgrade.v1",
+	})
+}
+
+// Identity still decides whether there is a client at all: a process that is
+// neither installation gets none, whatever its control directories look like.
+func TestRemoteUpgradeClientIsNotBuiltOutsideAManagedInstallation(t *testing.T) {
+	requireNonRootIdentity(t)
+	control := dockerFixtureControl(t)
+	writeDockerHelperLayout(t, control)
+	process := dockerProcess
+	process.DockerRemoteUpgrade = ""
+	if client := remoteUpgradeClientFor(dockerOptions, upgradeTestVersion, process, upgradeControls{Docker: control},
+		upgradeTestClock{}, func(context.Context) error { return nil }, newNodeLogger(io.Discard)); client != nil {
+		t.Fatalf("a process without the Docker opt-in got an upgrade client: %+v", client)
+	}
 }
 
 // systemdFixtureControl is an installation root laid out the way install.sh

@@ -46,14 +46,45 @@ import (
 // task left running by a crash be recovered, whatever the helper looked like at
 // the moment this process started.
 func remoteUpgradeClient(parsed options, version string, clock state.TaskStartClock, converge func(context.Context) error, logger *nodeLogger) *upgrade.Client {
-	process := currentUpgradeProcess()
+	return remoteUpgradeClientFor(parsed, version, currentUpgradeProcess(), productionUpgradeControls(), clock, converge, logger)
+}
+
+// upgradeControls is where each installation's helper keeps the state its
+// readiness check inspects. Production uses productionUpgradeControls; tests
+// point it at a temporary directory.
+type upgradeControls struct {
+	// SystemdRoot is the installation root; the zero SystemdRootUID is root.
+	SystemdRoot    string
+	SystemdRootUID uint32
+	Docker         dockerUpgradeControl
+}
+
+func productionUpgradeControls() upgradeControls {
+	return upgradeControls{SystemdRoot: upgrade.InstallRoot, Docker: dockerUpgradeControl{Dir: upgrade.DockerControlDir}}
+}
+
+// remoteUpgradeClientFor is remoteUpgradeClient with the process and the
+// control roots passed in, which is the whole reason it exists: it is the
+// selection run() depends on, and a test that constructs the Docker or systemd
+// client directly would stay green if this went back to asking the helper
+// before building a client — the original defect, in its original place.
+//
+// The systemd executable the readiness check inspects is spelled from the
+// root. In production that is the same string as process.Executable, because
+// remoteUpgradeInstall has just required process.Executable to be exactly
+// InstallRoot/bin/passwall-node; spelling it from the root is what lets a test
+// relocate the whole installation.
+func remoteUpgradeClientFor(parsed options, version string, process upgradeProcess, controls upgradeControls, clock state.TaskStartClock, converge func(context.Context) error, logger *nodeLogger) *upgrade.Client {
 	switch remoteUpgradeInstall(parsed, version, process) {
 	case upgradeInstallSystemd:
-		control := systemdUpgradeControl{Root: upgrade.InstallRoot, Executable: process.Executable}
+		control := systemdUpgradeControl{
+			Root:       controls.SystemdRoot,
+			Executable: filepath.Join(controls.SystemdRoot, "bin", "passwall-node"),
+			RootUID:    controls.SystemdRootUID,
+		}
 		return newSystemdUpgradeClient(control, version, clock, converge, upgradeReadinessReporter(logger, "systemd helper"))
 	case upgradeInstallDocker:
-		control := dockerUpgradeControl{Dir: upgrade.DockerControlDir}
-		return newDockerUpgradeClient(control, version, clock, converge, upgradeReadinessReporter(logger, "Docker updater"))
+		return newDockerUpgradeClient(controls.Docker, version, clock, converge, upgradeReadinessReporter(logger, "Docker updater"))
 	}
 	return nil
 }
