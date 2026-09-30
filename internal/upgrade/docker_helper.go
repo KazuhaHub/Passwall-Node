@@ -152,16 +152,26 @@ func (c *dockerHelperController) run(ctx context.Context) error {
 	// It used to share one select with processCurrent, which is synchronous. A
 	// Docker upgrade inside processCurrent pulls the target image, swaps the
 	// containers and then waits up to ReadyWait for the new agent to prove itself
-	// — and the new agent, when it starts, checks this very file and refuses to
-	// construct its upgrade client if it is older than 30 seconds
-	// (cmd/node/upgrade_linux.go validateDockerUpgradeControl, called from
-	// dockerRemoteUpgradeEnabled at startup). Without the client it never wires
-	// OnSynced, so it never writes the Ready document the helper is waiting for.
+	// — and the agent reads this very file through validateDockerUpgradeControl
+	// (cmd/node/upgrade_linux.go). An agent from before readiness became dynamic
+	// ran that check once, at startup: if the heartbeat was older than 30
+	// seconds it never constructed its upgrade client, so it never wired
+	// OnSynced and never wrote the Ready document the helper was waiting for.
 	//
 	// So an image pull that took longer than about half a minute turned every
 	// upgrade into a rollback, and a rollback into a manual_attention result,
 	// because the restored agent started with the heartbeat just as stale. The
 	// helper was starving the one signal its own transaction needed.
+	//
+	// THE HEARTBEAT STILL MATTERS TO A CURRENT AGENT, just differently. It builds
+	// its client and wires OnSynced to RecordReady from process identity alone
+	// (remoteUpgradeClient in cmd/node/upgrade_linux.go), so a stale heartbeat
+	// no longer withholds the Ready document; but it re-runs the check before
+	// every report and every Execute, and a stale heartbeat withdraws
+	// task.agent.upgrade.v1 and makes Execute refuse with
+	// agent_upgrade_helper_unavailable. The agent a rollback restores may also be
+	// one from before that change. Either way the heartbeat has to keep moving
+	// while an upgrade holds the main loop.
 	//
 	// A failed write still stops the helper, as it always did: an updater that
 	// cannot prove it is alive must not keep accepting upgrades. The error only
