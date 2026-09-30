@@ -43,10 +43,15 @@ jobs:
     name: Promote to stable
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # THE SAME ENVIRONMENT AS PUBLICATION, because this moves a pointer consumers
-    # follow and it is the same class of decision: a human reviews which release is
-    # being promoted before the pointer moves.
-    environment: release-signing
+    # A REVIEWED ENVIRONMENT OF ITS OWN. This moves `latest` and
+    # /releases/latest, pointers consumers follow and no later edit takes back, so
+    # a human reviews which release is being promoted before they move. It used
+    # to share release-signing with publication; since 2026-09-30 publishing a
+    # pre-release no longer waits for anyone (the owner's decision) and that
+    # environment has no reviewers, so staying in it would have made promotion
+    # unreviewed as well. Promotion signs nothing, so it never needed the key
+    # release-signing scopes.
+    environment: release-promotion
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6

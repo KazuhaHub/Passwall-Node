@@ -337,8 +337,9 @@ either stability class.
 The tagged commit must be on `main`, and its Test run there must have
 succeeded; the release waits for that run and refuses any other conclusion, so
 a cancelled or failed run is re-run first.
-The image, and with it `:beta`, is pushed only after the approved, signed
-release is published. If the image job fails, the release stays published
+The image, and with it `:beta`, is pushed only after the signed release is
+published. Publication needs no human approval; promotion to stable does
+(`promote.yml`, in the reviewed `release-promotion` environment). If the image job fails, the release stays published
 without an image, and `:beta` stays where it was, until that failed job is
 re-run.
 The container and installation acceptances run by themselves on amd64 and

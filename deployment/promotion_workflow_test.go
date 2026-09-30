@@ -68,11 +68,20 @@ func TestPromotionIsOnlyEverDispatchedByHand(t *testing.T) {
 	if !strings.Contains(text, "workflow_dispatch:") {
 		t.Fatal("the promotion has no manual trigger")
 	}
-	// AND IT IS GATED LIKE PUBLICATION. Moving a pointer consumers follow is the
-	// same class of decision as publishing, so it uses the same protected
-	// environment rather than a second, weaker path to the same place.
-	if !strings.Contains(text, "environment: release-signing") {
-		t.Fatal("the promotion is not behind the same protected environment as publication")
+	// AND A PERSON STILL DECIDES IT. Promotion moves `latest` and
+	// /releases/latest, the pointers no later edit takes back, so it waits for a
+	// reviewer in its own environment. It used to share release-signing with
+	// publication; since 2026-09-30 publishing a pre-release no longer waits for
+	// anyone (the owner's decision), and that environment lost its reviewers.
+	// Staying there would have made promotion unreviewed too.
+	if !strings.Contains(text, "    environment: release-promotion\n") {
+		t.Fatal("the promotion is not behind the reviewed release-promotion environment")
+	}
+	// AND IT NEVER HOLDS THE SIGNING KEY. Promotion reuses bytes that were signed
+	// when they were published; it signs nothing, so the environment that scopes
+	// the key has no reason to be entered here.
+	if strings.Contains(text, "environment: release-signing") || strings.Contains(text, "PN_RELEASE_SIGNING_PRIVATE_KEY") {
+		t.Fatal("the promotion reaches the release-signing environment or its key")
 	}
 }
 
