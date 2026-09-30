@@ -353,9 +353,11 @@ transport/state/apply/report stack without downloading or launching Xray.
 The durable task/result protocol is implemented, but the harness advertises no
 kind-specific task capability and therefore receives no tasks from a conforming
 control plane. Reality probing remains unimplemented. The production daemon
-registers `agent.upgrade.v1` only for a managed Linux/systemd installation with
-its separate root-owned upgrade helper explicitly enabled. The contract harness
-does not perform upgrades.
+registers `agent.upgrade.v1` on a managed Linux installation (systemd or
+Docker), recognised from its own process identity, and advertises
+`task.agent.upgrade.v1` only while that installation's root-owned upgrade
+helper or Docker updater passes its readiness check, which is re-evaluated for
+every sync report. The contract harness does not perform upgrades.
 
 Deadline-aware infrastructure additionally requires `task.expiry.v1` alongside
 execution and kind capabilities. `not_after_ms` is an immutable latest-start
