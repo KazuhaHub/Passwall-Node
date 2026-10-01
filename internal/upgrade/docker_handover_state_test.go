@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -32,7 +34,7 @@ func handoverStateFixture(t *testing.T) *dockerHelperController {
 	t.Helper()
 	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
 	controller := &dockerHelperController{options: dockerHelperOptions{
-		ControlDir: t.TempDir(), TargetName: "node-agent", AgentID: "agt_docker_upgrade_test",
+		ControlDir: controlDirFixture(t), TargetName: "node-agent", AgentID: "agt_docker_upgrade_test",
 		NodeUID: uid, NodeGID: gid, RootUID: uid, RootGID: gid, Schema: 9,
 		Now: func() time.Time { return handoverFixtureNow }, Logger: log.New(io.Discard, "", 0),
 	}}
@@ -639,6 +641,29 @@ func TestUpdaterDirIsTouchedOnlyInARootOnlyControlDir(t *testing.T) {
 			t.Fatalf("the updater directory was created: %v", err)
 		}
 	})
+}
+
+// THE FIXTURES' CONTROL DIRECTORY IS ROOT'S ALONE WHATEVER THE UMASK. t.TempDir
+// makes a directory 0777 less the umask: 0755 under a 022 umask, but 0775 under
+// the 002 that many Linux distributions give a login user. The updater rightly
+// refuses to make its directory in a control directory its group can write, so
+// under 002 nearly every handover test failed inside its fixture, before it
+// reached what it tests. Every handover fixture's control directory comes from
+// one of these two; they run here under 002, so a run under 022, which hides the
+// problem, still sees it come back.
+func TestControlDirFixturesDoNotDependOnTheUmask(t *testing.T) {
+	defer unix.Umask(unix.Umask(0002))
+	state := handoverStateFixture(t)
+	follow, _ := followFixture(t)
+	for _, c := range []*dockerHelperController{state, follow} {
+		info, err := os.Lstat(c.options.ControlDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0750 {
+			t.Errorf("the fixture's control directory is %04o, not the 0750 prepareControl leaves", info.Mode().Perm())
+		}
+	}
 }
 
 // THE AGENT SWAP'S TRANSACTION IS FROZEN, as its receipt already is. The handover

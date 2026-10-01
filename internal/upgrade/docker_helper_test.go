@@ -116,9 +116,22 @@ func TestDockerUpgradeRecoveryKeepsOriginalContainerBeforeRename(t *testing.T) {
 	}
 }
 
-func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDockerEngine, Request) {
+// controlDirFixture is a control directory as prepareControl leaves one: 0750,
+// so that its group and others cannot write it. t.TempDir alone is not that: it
+// is 0777 less the umask, which a 002 umask leaves group-writable, and the
+// updater refuses to make its own directory in a control directory like that.
+func controlDirFixture(t *testing.T) string {
 	t.Helper()
 	control := t.TempDir()
+	if err := os.Chmod(control, 0750); err != nil {
+		t.Fatal(err)
+	}
+	return control
+}
+
+func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDockerEngine, Request) {
+	t.Helper()
+	control := controlDirFixture(t)
 	for _, name := range []string{"requests", "receipts"} {
 		if err := os.Mkdir(filepath.Join(control, name), 0700); err != nil {
 			t.Fatal(err)
