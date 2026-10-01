@@ -448,6 +448,41 @@ func TestHandoverPreemptedByRequestIsNotAnAttempt(t *testing.T) {
 	}
 }
 
+// THE REQUEST IS LOOKED AT AGAIN RIGHT BEFORE THE COMMIT. A request the agent
+// writes while the predecessor is reading the successor's state in the very
+// pass that would commit still pre-empts the handover; it is not left for the
+// successor to find after the commit.
+func TestHandoverPreemptedRightBeforeTheCommit(t *testing.T) {
+	c, e, _ := predecessorFixture(t)
+	c.options.StabilityWindow = time.Nanosecond
+	standIn(t, c, e, honestProof)
+	args, _ := json.Marshal(protocol.AgentUpgradeArgs{Version: "4.1.4", ExpectedVersion: "4.1.3"})
+	task := protocol.Task{ID: "tsk_docker_upgrade_002", Kind: TaskKind, Args: args, NotAfterMS: 2000}
+	task.InputSHA256 = protocol.ComputeTaskInputSHA256(task.Kind, task.Args)
+	request := Request{Task: task, Args: protocol.AgentUpgradeArgs{Version: "4.1.4", ExpectedVersion: "4.1.3"},
+		BootID: "another-boot", AuthorizedUntilBoottimeNS: int64(time.Minute)}
+	written := false
+	e.onInspect = func(target string) (dockerContainer, bool) {
+		// The predecessor reads the agent last in each pass; the request lands
+		// while it does, on the first pass that would otherwise commit.
+		if target == c.options.TargetName && !written {
+			if _, err := c.readStandbyProof(); err == nil {
+				written = true
+				if err := AtomicDocument(c.requestsDir(), "request.json", request, 0600); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		return dockerContainer{}, false
+	}
+	if err := startHandover(t, c); err != nil {
+		t.Fatalf("handOver = %v, want the pre-emption", err)
+	}
+	if h := readJournal(t, c); h.Phase != handoverAborted || h.Reason != handoverPreemptedReason {
+		t.Fatalf("journal %s %q, want a pre-emption", h.Phase, h.Reason)
+	}
+}
+
 // THE ABORT IS RECORDED EVEN WHEN THE SUCCESSOR CANNOT BE REMOVED. A successor
 // that survives reads aborted and retires itself, and the next handover waits —
 // on the journal's rule that everything it named is gone — until tidying has

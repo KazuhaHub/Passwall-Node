@@ -219,6 +219,12 @@ func sameMounts(a, b []dockerMount) bool {
 // that is no longer the container and image the handover is about. The agent
 // does not have to be running — a transient agent restart is not a reason — but
 // it has to be the same agent.
+//
+// THE REQUEST IS READ FIRST AND LAST IN EVERY PASS. Read only at the start, a
+// request the agent wrote while this pass read the successor, the agent and the
+// proof would be missed by the very pass that commits, and found after the
+// commit by the successor instead. It would still be processed exactly once,
+// but the handover would have gone ahead over a slot that was no longer idle.
 func (c *dockerHelperController) waitStandby(ctx context.Context, h dockerHandover) string {
 	deadline := time.NewTimer(durationOr(c.options.StandbyWait, dockerStandbyWait))
 	defer deadline.Stop()
@@ -227,8 +233,12 @@ func (c *dockerHelperController) waitStandby(ctx context.Context, h dockerHandov
 	stability := durationOr(c.options.StabilityWindow, dockerStabilityWindow)
 	var firstRunning, startedAt time.Time
 	proven := false
+	requestChanged := func() bool {
+		digest, err := c.requestDigest()
+		return err != nil || digest != h.RequestSHA256
+	}
 	for {
-		if digest, err := c.requestDigest(); err != nil || digest != h.RequestSHA256 {
+		if requestChanged() {
 			return handoverPreemptedReason
 		}
 		up := false
@@ -261,6 +271,9 @@ func (c *dockerHelperController) waitStandby(ctx context.Context, h dockerHandov
 		if proof, err := c.readStandbyProof(); err == nil && proof.HandoverID == h.ID && proof.SuccessorID == h.SuccessorID &&
 			proof.Version == h.Version && proof.BinarySHA256 == h.AgentBinarySHA256 {
 			proven = true
+		}
+		if requestChanged() {
+			return handoverPreemptedReason
 		}
 		if proven && up && agentSame && time.Since(firstRunning) >= stability {
 			return ""

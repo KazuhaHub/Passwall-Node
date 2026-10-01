@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -15,7 +16,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
 
 const dockerSocket = "/var/run/docker.sock"
@@ -126,6 +130,9 @@ type dockerHelperController struct {
 	// started is when this process started, which bounds how soon a retired
 	// predecessor may reclaim.
 	started time.Time
+	// primaryNow is true while this process runs as the primary. It is read
+	// from outside the process's goroutine, by tests that count primaries.
+	primaryNow atomic.Bool
 }
 
 type dockerTransaction struct {
@@ -137,10 +144,16 @@ type dockerTransaction struct {
 	NewImage       string `json:"new_image"`
 }
 
+// DockerFollowOptOutEnv, set to false on the updater service, keeps that
+// updater from ever following the agent onto a newer image. It can only switch
+// the handover off; a successor inherits it with the rest of the environment.
+const DockerFollowOptOutEnv = "PSP_NODE_UPDATER_FOLLOW_AGENT"
+
 // RunDockerHelper is the only process that receives the Docker Engine socket.
 // The network-facing agent stays non-root and has access only to a private
-// request directory plus group-readable receipts.
-func RunDockerHelper(ctx context.Context, schema int, stderr io.Writer) error {
+// request directory plus group-readable receipts. version is this build's
+// own, the one the updater compares the agent's against before following it.
+func RunDockerHelper(ctx context.Context, version string, schema int, stderr io.Writer) error {
 	if runtime.GOOS != "linux" {
 		return errors.New("Docker remote upgrade helper requires Linux")
 	}
@@ -166,12 +179,193 @@ func RunDockerHelper(ctx context.Context, schema int, stderr io.Writer) error {
 		ControlDir: DockerControlDir, TargetName: target, AgentID: agentID,
 		NodeUID: uid, NodeGID: gid, Schema: schema, Engine: engine, Clock: BootClock,
 		Poll: 250 * time.Millisecond, ReadyWait: 120 * time.Second, Logger: logger,
+		Version: version, FollowOptOut: followOptOut(os.Getenv(DockerFollowOptOutEnv)),
 	}}
-	if err := controller.prepareControl(); err != nil {
+	return controller.serve(ctx)
+}
+
+// followOptOut reads DockerFollowOptOutEnv. Unset or empty follows; a value
+// that is not plainly true is read as the opt-out it was most likely meant to
+// be, since the variable exists only to switch following off.
+func followOptOut(value string) bool {
+	if value == "" {
+		return false
+	}
+	follow, err := strconv.ParseBool(value)
+	return err != nil || !follow
+}
+
+// serve is the updater process, from finding out what it is until its exit.
+//
+// EVERY ROLE IS DERIVED FROM THE JOURNAL AND THIS PROCESS'S OWN IDENTITY, never
+// from memory, so a process restarted at any step lands in the role that step
+// left it. It resolves its own container, makes sure of the root-only updater
+// directory and opens the lock in it, and then loops: a candidate competes for
+// the lock and, once it holds it, reads the journal again under it before it
+// becomes the primary; a successor waits in standby; a retired predecessor
+// waits for its stop, watching for the one case in which it takes the role
+// back. Only the primary acts, and only the primary runs prepareControl — every
+// write the agent can see.
+//
+// WITHOUT A USABLE LOCK there is nothing to elect with, and nothing to hand over
+// to: the process is the primary at once, unlocked, with the handover off,
+// which is the updater as it was before the handover existed. That is a
+// filesystem without flock, an updater directory that is not root's alone, or a
+// lock file that cannot be opened. A process that cannot prove its own
+// container still competes for the lock — two updaters must never both act —
+// but never touches the journal, which it cannot know is about it.
+func (c *dockerHelperController) serve(ctx context.Context) error {
+	if c.started.IsZero() {
+		c.started = c.now()
+	}
+	defer c.unlock()
+	disabled := ""
+	if self, err := c.resolveSelf(ctx); err != nil {
+		disabled = "self unresolved: " + err.Error()
+	} else {
+		c.selfID = self.ID
+	}
+	lockable := true
+	if err := c.ensureUpdaterDir(); err != nil {
+		lockable, disabled = false, firstReason(disabled, "updater directory unusable: "+err.Error())
+	} else if err := c.openLock(); err != nil {
+		lockable, disabled = false, firstReason(disabled, "updater lock unusable: "+err.Error())
+	}
+	if !releaseid.ValidVersion(c.options.Version) {
+		disabled = firstReason(disabled, fmt.Sprintf("compiled version %q is not a release", c.options.Version))
+	}
+	if c.options.FollowOptOut {
+		disabled = firstReason(disabled, "opt-out")
+	}
+	if disabled == "" {
+		c.logf("handover: enabled self=%s lock=ok", shortID(c.selfID))
+	} else {
+		c.logf("handover: disabled (%s)", disabled)
+	}
+	if !lockable {
+		return c.unlocked(ctx)
+	}
+	for ctx.Err() == nil {
+		journal, err := c.readHandover(false)
+		if err != nil {
+			c.logf("handover: the journal cannot be read: %v", err)
+		}
+		role, _ := classifyRole(journal, c.selfID)
+		switch role {
+		case roleRetired:
+			// Returning would only let the restart policy start this container
+			// again into the same role; it waits for its stop instead.
+			c.logf("handover %s: retired (%s); waiting to be stopped", journal.ID[:8], journal.Phase)
+			<-ctx.Done()
+			return nil
+		case roleRetiredWatch:
+			c.logf("handover %s: retired; watching until the successor has taken over", journal.ID[:8])
+			if !c.retiredWatch(ctx, *journal) {
+				continue
+			}
+		case roleStandby:
+			if !c.standby(ctx, *journal) {
+				continue
+			}
+		default:
+			held, err := c.compete(ctx)
+			if errors.Is(err, errFlockUnsupported) {
+				c.logf("handover: disabled (%v)", err)
+				return c.unlocked(ctx)
+			}
+			if !held {
+				continue
+			}
+			if role, _, err := c.fence(); err != nil || role != roleCandidate {
+				continue
+			}
+		}
+		err = c.primary(ctx)
+		if !errors.Is(err, errHandoverCommitted) {
+			return err
+		}
+		// The role is the successor's now. The heartbeat has been joined, so
+		// letting the lock go here is the last thing this process does as the
+		// primary; the journal makes it a retired predecessor.
+		c.unlock()
+	}
+	return nil
+}
+
+func firstReason(current, next string) string {
+	if current != "" {
+		return current
+	}
+	return next
+}
+
+// openLock opens this process's descriptor of the updater lock, without taking
+// it.
+func (c *dockerHelperController) openLock() error {
+	open := c.options.LockOpener
+	if open == nil {
+		open = func(dir string) (*updaterLock, error) {
+			return openUpdaterLock(dir, c.options.RootUID, c.options.RootGID)
+		}
+	}
+	lock, err := open(c.updaterDir())
+	if err != nil {
 		return err
 	}
-	logger.Printf("watching target=%s contract=%d", target, UpgradeContract)
-	return controller.run(ctx)
+	c.lock = lock
+	return nil
+}
+
+// compete is a candidate trying for the lock every Poll. It reports true once
+// it holds it; false when the journal no longer makes it a candidate or the
+// process is stopping; and errFlockUnsupported when the filesystem cannot elect
+// anyone at all.
+func (c *dockerHelperController) compete(ctx context.Context) (bool, error) {
+	poll := time.NewTicker(c.options.Poll)
+	defer poll.Stop()
+	said := ""
+	for {
+		held, err := c.tryLock()
+		switch {
+		case errors.Is(err, errFlockUnsupported):
+			return false, err
+		case err != nil:
+			if err.Error() != said {
+				said = err.Error()
+				c.logf("handover: the updater lock cannot be taken yet: %v", err)
+			}
+		case held:
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case <-poll.C:
+		}
+		if journal, _ := c.readHandover(false); journal != nil {
+			if role, _ := classifyRole(journal, c.selfID); role != roleCandidate {
+				return false, nil
+			}
+		}
+	}
+}
+
+// unlocked is the updater without a lock: the primary at once, with nothing to
+// elect against and the handover off.
+func (c *dockerHelperController) unlocked(ctx context.Context) error {
+	c.unlock()
+	c.selfID = ""
+	return c.primary(ctx)
+}
+
+// primary is this process as the one updater allowed to act: it writes the
+// control directory the agent checks, and runs the ordinary loop.
+func (c *dockerHelperController) primary(ctx context.Context) error {
+	if err := c.prepareControl(); err != nil {
+		return err
+	}
+	c.logf("watching target=%s contract=%d", c.options.TargetName, UpgradeContract)
+	return c.run(ctx)
 }
 
 func parseDockerIdentity(value string) (uint32, error) {
@@ -182,17 +376,22 @@ func parseDockerIdentity(value string) (uint32, error) {
 	return uint32(n), nil
 }
 
+// prepareControl writes everything in the control directory the agent checks:
+// the directories' owners and modes, the marker and a first heartbeat. Only the
+// primary runs it, because only the primary may be seen by the agent; a
+// successor that runs it after taking over writes the same bytes, modes and
+// owners its predecessor did.
 func (c *dockerHelperController) prepareControl() error {
-	if c.options.ControlDir != DockerControlDir || c.options.Schema <= 0 || c.options.Engine == nil || c.options.Clock == nil {
+	if !filepath.IsAbs(c.options.ControlDir) || c.options.Schema <= 0 || c.options.Engine == nil || c.options.Clock == nil {
 		return errors.New("Docker upgrade helper configuration is incomplete")
 	}
-	if err := ensureDockerDirectory(c.options.ControlDir, 0, c.options.NodeGID, 0750); err != nil {
+	if err := ensureDockerDirectory(c.options.ControlDir, c.options.RootUID, c.options.NodeGID, 0750); err != nil {
 		return err
 	}
 	if err := ensureDockerDirectory(c.requestsDir(), c.options.NodeUID, c.options.NodeGID, 0700); err != nil {
 		return err
 	}
-	if err := ensureDockerDirectory(c.receiptsDir(), 0, c.options.NodeGID, 0750); err != nil {
+	if err := ensureDockerDirectory(c.receiptsDir(), c.options.RootUID, c.options.NodeGID, 0750); err != nil {
 		return err
 	}
 	if err := atomicHelperFile(c.options.ControlDir, "enabled", strings.NewReader(DockerMarker), 0640, c.options.NodeGID); err != nil {
@@ -259,14 +458,29 @@ func (c *dockerHelperController) run(ctx context.Context) error {
 	// cannot prove it is alive must not keep accepting upgrades. The error only
 	// reaches the loop once processCurrent returns, which is the same moment it
 	// could have been acted on before.
+	//
+	// THE HEARTBEAT IS JOINED BEFORE run RETURNS, whatever it returns. After a
+	// handover commits, the successor takes the lock and writes these same
+	// files; a heartbeat of this process landing after that would be two
+	// writers. run returns only once the goroutine has stopped, and the lock is
+	// let go only after run has returned.
+	//
+	// THE HANDOVER RUNS IN THIS LOOP, after processCurrent, in the same
+	// goroutine: an agent swap and a handover can never both be in progress in
+	// one process, and across processes only the lock holder runs either.
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	heartbeatDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-heartbeatDone
+	}()
 	interval := c.options.HeartbeatInterval
 	if interval <= 0 {
 		interval = dockerHeartbeatInterval
 	}
 	heartbeatFailed := make(chan error, 1)
 	go func() {
+		defer close(heartbeatDone)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -281,6 +495,10 @@ func (c *dockerHelperController) run(ctx context.Context) error {
 			}
 		}
 	}()
+	c.primaryNow.Store(true)
+	defer c.primaryNow.Store(false)
+	c.reconcile(ctx)
+	c.follow.begin(c.now(), c.slotKey())
 	poll := time.NewTicker(c.options.Poll)
 	defer poll.Stop()
 	for {
@@ -292,6 +510,12 @@ func (c *dockerHelperController) run(ctx context.Context) error {
 		case <-poll.C:
 			if err := c.processCurrent(ctx); err != nil && !errors.Is(err, os.ErrNotExist) {
 				c.options.Logger.Printf("upgrade request held: %v", err)
+			}
+			if err := c.followAgent(ctx); err != nil {
+				if errors.Is(err, errHandoverCommitted) {
+					return err
+				}
+				c.logf("handover: %v", err)
 			}
 		}
 	}

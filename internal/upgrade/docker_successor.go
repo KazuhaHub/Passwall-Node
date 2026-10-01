@@ -215,7 +215,7 @@ func (c *dockerHelperController) fence() (handoverRole, *dockerHandover, error) 
 // Then whatever a finished handover left behind is tidied away. A process that
 // cannot resolve itself does none of it: it cannot know which side it is on.
 func (c *dockerHelperController) reconcile(ctx context.Context) {
-	if c.selfID == "" {
+	if c.selfID == "" || !c.locked {
 		return
 	}
 	c.finishAt = time.Time{}
@@ -310,7 +310,7 @@ func (c *dockerHelperController) supersede(h dockerHandover) error {
 // the handover did not name is never moved, and this updater keeps its
 // temporary name until the next try.
 func (c *dockerHelperController) tidy(ctx context.Context) {
-	if c.selfID == "" {
+	if c.selfID == "" || !c.locked {
 		return
 	}
 	journal, err := c.readHandover(true)

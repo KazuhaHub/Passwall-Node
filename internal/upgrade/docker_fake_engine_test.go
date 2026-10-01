@@ -386,6 +386,7 @@ func (f *fakeDockerEngine) CreateReplacement(ctx context.Context, name string, o
 	created.Config = encoded
 	created.HostConfig = bytes.Clone(body["HostConfig"])
 	created.Mounts = slices.Clone(old.Mounts)
+	created.RestartCount = 0
 	created.State = dockerContainer{}.State
 	f.containers[name] = created
 	f.creates = append(f.creates, fakeCreate{name: name, body: body})
