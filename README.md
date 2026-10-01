@@ -186,6 +186,92 @@ listener ports at or above 1024 or deliberately configure the host's
 `net.ipv4.ip_unprivileged_port_start`. The container does not retain root merely
 to make port 443 convenient.
 
+### The updater follows the Agent
+
+After a remote Agent upgrade from PSP has succeeded, the updater moves itself
+onto the image the Agent now runs, so a fix to the updater reaches the node with
+an ordinary Agent upgrade. Nothing is pulled and no registry is contacted: it is
+the image the updater itself pulled, checked and proved as the Agent. The
+updater starts a copy of its own container on that image under a temporary name,
+`<name>-next-<8 hex>`. The copy proves that it runs the very binary the Agent
+proved readiness with, that it would accept the Agent as its target and that it
+can do the updater's job, all without writing anything the Agent can see. Only
+then does the old updater hand over; the new one stops and removes it and takes
+its container name. Any failure before the hand-over removes the copy and leaves
+the old updater exactly as it was. Stopping the old updater in the meantime
+leaves the copy for whichever updater runs next: the old one, started again,
+removes it; if the old one is removed instead, the copy, once it has proven
+itself, takes over. The Agent is only ever inspected, and keeps serving
+throughout. For about fifteen seconds two updater containers exist; only the one
+holding the lock in `./upgrades/updater/` acts.
+
+It follows only:
+
+- an Agent image that an updater's own successful upgrade installed, so an image
+  changed through Compose is never followed — update the updater the same way;
+- a strictly newer release, never an older one;
+- an image built for this host's architecture whose
+  `io.kazuhahub.passwall-node.updater-handover` label lists the handover protocol
+  the running updater speaks;
+- an updater container that is safe to copy: not privileged, not on the host
+  network, and sharing no mount with the Agent except `./upgrades`. The copy
+  keeps the updater's Compose profile exactly as it is.
+
+The updater looks about 30 seconds after it starts, after every successful Agent
+upgrade and every 10 minutes, so one restarted between the Agent's upgrade and
+its own move catches up. A failed attempt is retried after 10 minutes and then
+after an hour, at most three times for one updater and image; giving way to an
+Agent upgrade request does not count. To switch following off, set
+`PSP_NODE_UPDATER_FOLLOW_AGENT: "false"` in the updater service's environment and
+recreate it.
+
+This widens what the Agent upgrade's trust reaches, not the trust itself. The
+updater holds the Docker socket, and it now also runs any release that PSP — or
+whoever can make an Agent upgrade succeed — installed as the Agent, provided it
+is an official exact release, newer, labelled for the handover and already
+proven on this host as the Agent, with the Agent's binary digest. Images are not
+pinned by digest or verified by signature, here or in the Agent upgrade.
+
+**An updater from 4.0.1.6 or earlier has to be recreated once.** It has no
+handover code, and nothing remote can reach code that is not there. Recreate it
+onto a release whose image carries the label above; after that it keeps up by
+itself. With a `:beta` or `:latest` tag, use the NAS project's update or rebuild,
+or:
+
+```bash
+docker compose -f compose.yaml pull passwall-node-updater
+docker compose -f compose.yaml up -d --no-deps --force-recreate passwall-node-updater
+```
+
+A Compose file pinned to an exact version needs its tag changed first. A plain
+`docker compose up -d` afterwards leaves an updater that has moved alone, since
+the copy carries the original's Compose labels unchanged; `pull` and `up -d`
+after the tag moved recreate both services on one new image.
+
+PSP does not show the updater's version; its log does. Search it for `handover`:
+
+```
+handover: enabled self=<12 hex> lock=ok
+handover <id>: following agent <version> (image <12 hex>); successor <name>-next-<id> created
+handover <id>: successor proven; committed
+handover <id>: took over from <12 hex> (<version>); predecessor stopped
+handover <id>: predecessor removed; renamed to <name>
+handover <id>: aborted (<reason>), attempt <n>/3
+handover: not following the agent (<reason>)
+```
+
+The last of these is logged once per reason. The first, or
+`handover: disabled (<reason>)` in its place, is logged once at start, as soon as
+the updater's lock has answered, so `lock=ok` means `flock` works under
+`./upgrades`. `disabled` means following is off on this host: `opt-out`, or the
+updater could not identify its own container or lock its directory — another
+container runtime, a filesystem under `./upgrades` without `flock`, or an
+`./upgrades` that someone other than root can write. It then works exactly as it
+did before following existed, as long as no other updater can be running: one
+that cannot use the lock while a handover it took part in is still recorded, or
+while a container that handover named still exists, waits for the lock instead
+of acting beside the updater that may hold it.
+
 ## Linux systemd installation
 
 For a credential-free GitHub installation, run the public bootstrap on the
@@ -345,6 +431,13 @@ re-run.
 The container and installation acceptances run by themselves on amd64 and
 arm64 after every release. A release becomes Stable, and `:latest` moves to
 its image, only through `promote.yml`, once both have passed on it.
+The Docker updater's own behaviour against a real daemon — the Docker facts the
+updater's self-upgrade relies on, and that hand-over end to end — is
+`docker-updater.yml`, on both architectures, for changes to the updater, the
+images or the example compose, and weekly. It is not part of the Test workflow
+and does not hold a release by itself: a release that changes the updater is
+tagged only once it is green on the release commit (see
+`internal/upgrade/ACCEPTANCE.md`).
 
 ## Contract harness
 

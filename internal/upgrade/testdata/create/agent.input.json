@@ -1,0 +1,116 @@
+{
+  "config": {
+    "Hostname": "nas-ugos",
+    "Domainname": "",
+    "User": "",
+    "AttachStdin": false,
+    "AttachStdout": true,
+    "AttachStderr": true,
+    "Tty": false,
+    "OpenStdin": false,
+    "StdinOnce": false,
+    "Env": [
+      "PSP_NODE_ENDPOINT=https://panel.example.com/sync",
+      "PSP_NODE_AGENT_ID=agt_7f3a9c2e5b1d",
+      "PSP_NODE_ALLOW_INSECURE_HTTP=false",
+      "PSP_NODE_DOCKER_REMOTE_UPGRADE=true",
+      "PSP_NODE_CREDENTIAL_FILE=/run/secrets/passwall-node/node-credential.txt",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "TZ=UTC",
+      "PSP_NODE_DATA_DIR=/var/lib/passwall-node",
+      "PSP_NODE_XRAY_API_LISTEN=127.0.0.1:10085",
+      "PSP_NODE_SING_BOX_API_LISTEN=127.0.0.1:10086",
+      "PUID=10001",
+      "PGID=10001"
+    ],
+    "Cmd": null,
+    "Image": "ghcr.io/kazuhahub/passwall-node:beta",
+    "Volumes": null,
+    "WorkingDir": "/var/lib/passwall-node",
+    "Entrypoint": [
+      "/usr/local/bin/docker-entrypoint.sh"
+    ],
+    "OnBuild": null,
+    "Labels": {
+      "com.docker.compose.config-hash": "1b7e4d0a3c6f9e2b5d8a1c4f7e0b3d6a9c2f5e8b1d4a7c0f3e6b9d2a5c8f1e4b",
+      "com.docker.compose.container-number": "1",
+      "com.docker.compose.depends_on": "passwall-node-updater:service_started:false",
+      "com.docker.compose.image": "sha256:7a1c3e5b9d2f4a6c8e0b1d3f5a7c9e2b4d6f8a0c1e3b5d7f9a2c4e6b8d0f1a3c",
+      "com.docker.compose.oneoff": "False",
+      "com.docker.compose.project": "passwall-node-server-7",
+      "com.docker.compose.project.config_files": "/volume1/docker/passwall-node/compose.yaml",
+      "com.docker.compose.project.working_dir": "/volume1/docker/passwall-node",
+      "com.docker.compose.service": "passwall-node",
+      "com.docker.compose.version": "2.39.4",
+      "io.kazuhahub.passwall-node.agent-id": "agt_7f3a9c2e5b1d",
+      "io.kazuhahub.passwall-node.managed": "true",
+      "io.kazuhahub.passwall-node.role": "agent",
+      "io.kazuhahub.passwall-node.state-schema": "9",
+      "io.kazuhahub.passwall-node.upgrade-contract": "1",
+      "org.opencontainers.image.licenses": "Apache-2.0",
+      "org.opencontainers.image.revision": "8daf62b1c4e7a0d3f6b9c2e5a8d1f4b7c0e3a6d9",
+      "org.opencontainers.image.version": "4.0.1.7"
+    },
+    "StopTimeout": 30
+  },
+  "host_config": {
+    "Binds": [
+      "/volume1/docker/passwall-node/config:/run/secrets/passwall-node:ro",
+      "/volume1/docker/passwall-node/data:/var/lib/passwall-node:rw",
+      "/volume1/docker/passwall-node/upgrades:/run/passwall-node-upgrades:rw"
+    ],
+    "ContainerIDFile": "",
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-file": "3",
+        "max-size": "10m"
+      }
+    },
+    "NetworkMode": "host",
+    "PortBindings": {},
+    "RestartPolicy": {
+      "Name": "unless-stopped",
+      "MaximumRetryCount": 0
+    },
+    "AutoRemove": false,
+    "CapAdd": [
+      "CHOWN",
+      "DAC_OVERRIDE",
+      "FOWNER",
+      "SETGID",
+      "SETUID"
+    ],
+    "CapDrop": [
+      "ALL"
+    ],
+    "CgroupnsMode": "private",
+    "IpcMode": "private",
+    "PidMode": "",
+    "Privileged": false,
+    "ReadonlyRootfs": true,
+    "SecurityOpt": [
+      "no-new-privileges:true"
+    ],
+    "Tmpfs": {
+      "/run/passwall-node": "size=64k,mode=0700",
+      "/tmp": "size=16m,mode=1777"
+    },
+    "UTSMode": "",
+    "UsernsMode": "",
+    "ShmSize": 67108864,
+    "Runtime": "runc",
+    "Devices": null,
+    "DeviceRequests": null,
+    "GroupAdd": null
+  },
+  "image_labels": {
+    "org.opencontainers.image.licenses": "Apache-2.0",
+    "org.opencontainers.image.version": "4.0.1.8",
+    "org.opencontainers.image.revision": "0c3f6a9d2e5b8c1f4a7d0e3b6c9f2a5d8e1b4c7f",
+    "io.kazuhahub.passwall-node.state-schema": "9",
+    "io.kazuhahub.passwall-node.upgrade-contract": "1",
+    "io.kazuhahub.passwall-node.updater-handover": "1"
+  },
+  "reference": "ghcr.io/kazuhahub/passwall-node:4.0.1.8"
+}

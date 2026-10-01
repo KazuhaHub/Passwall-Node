@@ -1,0 +1,6 @@
+22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw,errors=remount-ro
+23 22 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
+24 22 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc rw
+25 22 0:5 / /dev rw,nosuid,relatime shared:2 - devtmpfs udev rw,size=4004748k,nr_inodes=1001187,mode=755,inode64
+26 22 0:25 / /run rw,nosuid,nodev,noexec,relatime shared:5 - tmpfs tmpfs rw,size=807616k,mode=755,inode64
+27 22 259:1 / /boot/efi rw,relatime shared:31 - vfat /dev/nvme0n1p1 rw,fmask=0077,dmask=0077

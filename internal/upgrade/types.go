@@ -30,7 +30,28 @@ const (
 	DockerLabelAgentID         = "io.kazuhahub.passwall-node.agent-id"
 	DockerLabelStateSchema     = "io.kazuhahub.passwall-node.state-schema"
 	DockerLabelUpgradeContract = "io.kazuhahub.passwall-node.upgrade-contract"
+	// DockerLabelUpdaterHandover lists, comma-separated, the updater handover
+	// protocols an image's updater speaks. It is a label rather than a field of
+	// BuildInfo so that no strictly decoded document changes shape.
+	DockerLabelUpdaterHandover = "io.kazuhahub.passwall-node.updater-handover"
+	// UpdaterHandoverProtocol is the handover protocol this build speaks: the
+	// value its image lists under DockerLabelUpdaterHandover, and the format of
+	// the journal and proof it reads and writes.
+	UpdaterHandoverProtocol = 1
 )
+
+// UpdaterHandoverProtocols lists, in ascending order, every updater handover
+// protocol this build's updater speaks: exactly what its image declares under
+// DockerLabelUpdaterHandover. Today that is the one it writes; a release bridging
+// to a new protocol, which still reads the old journal, lists both.
+//
+// THE IMAGES ARE HELD TO THIS LIST, NOT TO A SECOND COPY OF IT. The two
+// Dockerfiles and the release workflow write the label by hand, and a deployment
+// test compares each with this value, so a protocol change that missed one fails a
+// test instead of publishing an image whose label promises code its binary lacks.
+func UpdaterHandoverProtocols() []int {
+	return []int{UpdaterHandoverProtocol}
+}
 
 type Args = protocol.AgentUpgradeArgs
 

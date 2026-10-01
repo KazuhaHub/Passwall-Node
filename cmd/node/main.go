@@ -121,7 +121,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		case "--run-docker-upgrade-helper":
 			ctx, stop := signalContext(context.Background())
 			defer stop()
-			return upgrade.RunDockerHelper(ctx, statesqlite.SupportedSchema, stderr)
+			return upgrade.RunDockerHelper(ctx, buildversion.Version, statesqlite.SupportedSchema, stderr)
 		case "--enable-remote-upgrade":
 			return enableRemoteUpgrade()
 		}

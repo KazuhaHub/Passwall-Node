@@ -137,3 +137,19 @@ jobs:
           printf '%s (%s)\n' "$version" "${RELEASE_SHA:0:7}" | cmp - "$version_file"
           printf '%s\n' "$digest"
           cat "$version_file"
+      # THE IMAGE DECLARES THE UPDATER HANDOVER PROTOCOLS ITS OWN RELEASE RECIPE
+      # DOES. This is main's copy of the workflow, run against any published tag, and
+      # the releases from before the label carry none, so the label cannot simply be
+      # required. The workspace is the tag's tree by now, so the image is held to
+      # that tree's Dockerfile.release: nothing for an older release, and never a
+      # protocol its recipe did not promise — an image claiming one would let an
+      # updater move onto a binary without the handover code. The answer is
+      # assigned before it is compared, so a failed inspect stops the step under
+      # `set -e`; `with` prints nothing for an absent label.
+      - name: The image declares the updater handover protocols its release recipe does
+        shell: bash
+        run: |
+          set -euo pipefail
+          declared=$(sed -n 's/^[[:space:]]*io\.kazuhahub\.passwall-node\.updater-handover="\([^"]*\)".*$/\1/p' Dockerfile.release)
+          published=$(docker image inspect --format '{{ with index .Config.Labels "io.kazuhahub.passwall-node.updater-handover" }}{{ . }}{{ end }}' "${IMAGE_REPOSITORY}:${version}")
+          test "$published" = "$declared"

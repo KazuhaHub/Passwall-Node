@@ -1,0 +1,252 @@
+{
+    "Id": "6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5",
+    "Created": "2026-09-28T19:02:11.873512409Z",
+    "Path": "/usr/local/bin/docker-entrypoint.sh",
+    "Args": [
+        "--run-docker-upgrade-helper"
+    ],
+    "State": {
+        "Status": "created",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "0001-01-01T00:00:00Z",
+        "FinishedAt": "0001-01-01T00:00:00Z"
+    },
+    "Image": "sha256:4c9e1f0b7a2d5e8c3f6a9b0d1e4f7a2c5b8e1d4f7a0c3b6e9d2f5a8c1b4e7d0a",
+    "ResolvConfPath": "/var/lib/docker/containers/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5/resolv.conf",
+    "HostnamePath": "/var/lib/docker/containers/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5/hostname",
+    "HostsPath": "/var/lib/docker/containers/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5/hosts",
+    "LogPath": "/var/lib/docker/containers/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5-json.log",
+    "Name": "/passwall-node-server-7-updater-next-1a2b3c4d",
+    "RestartCount": 0,
+    "Driver": "overlay2",
+    "Platform": "linux",
+    "MountLabel": "",
+    "ProcessLabel": "",
+    "AppArmorProfile": "docker-default",
+    "ExecIDs": null,
+    "HostConfig": {
+        "Binds": [
+            "/var/run/docker.sock:/var/run/docker.sock:rw",
+            "/opt/passwall-node/upgrades:/run/passwall-node-upgrades:rw"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+            "Type": "json-file",
+            "Config": {
+                "max-file": "3",
+                "max-size": "10m"
+            }
+        },
+        "NetworkMode": "none",
+        "PortBindings": {},
+        "RestartPolicy": {
+            "Name": "unless-stopped",
+            "MaximumRetryCount": 0
+        },
+        "AutoRemove": false,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+            0,
+            0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "private",
+        "Dns": null,
+        "DnsOptions": null,
+        "DnsSearch": null,
+        "ExtraHosts": [],
+        "GroupAdd": null,
+        "IpcMode": "private",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": false,
+        "SecurityOpt": null,
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 67108864,
+        "Runtime": "runc",
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": null,
+        "BlkioDeviceReadBps": null,
+        "BlkioDeviceWriteBps": null,
+        "BlkioDeviceReadIOps": null,
+        "BlkioDeviceWriteIOps": null,
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": null,
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": null,
+        "OomKillDisable": null,
+        "PidsLimit": null,
+        "Ulimits": null,
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "MaskedPaths": [
+            "/proc/asound",
+            "/proc/acpi",
+            "/proc/interrupts",
+            "/proc/kcore",
+            "/proc/keys",
+            "/proc/latency_stats",
+            "/proc/timer_list",
+            "/proc/timer_stats",
+            "/proc/sched_debug",
+            "/proc/scsi",
+            "/sys/firmware",
+            "/sys/devices/virtual/powercap"
+        ],
+        "ReadonlyPaths": [
+            "/proc/bus",
+            "/proc/fs",
+            "/proc/irq",
+            "/proc/sys",
+            "/proc/sysrq-trigger"
+        ]
+    },
+    "GraphDriver": {
+        "Data": {
+            "LowerDir": "/var/lib/docker/overlay2/9a0e5c3d1f7b2e8a4c6d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e9a2c4d6f8b0e1a-init/diff:/var/lib/docker/overlay2/2d4f6b8e0a1c3e5f7b9d2a4c6e8f0b1d3f5a7c9e1b3d5f7a9c0e2b4d6f8a1c3e/diff",
+            "MergedDir": "/var/lib/docker/overlay2/9a0e5c3d1f7b2e8a4c6d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e9a2c4d6f8b0e1a/merged",
+            "UpperDir": "/var/lib/docker/overlay2/9a0e5c3d1f7b2e8a4c6d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e9a2c4d6f8b0e1a/diff",
+            "WorkDir": "/var/lib/docker/overlay2/9a0e5c3d1f7b2e8a4c6d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e9a2c4d6f8b0e1a/work"
+        },
+        "Name": "overlay2"
+    },
+    "Mounts": [
+        {
+            "Type": "bind",
+            "Source": "/var/run/docker.sock",
+            "Destination": "/var/run/docker.sock",
+            "Mode": "rw",
+            "RW": true,
+            "Propagation": "rprivate"
+        },
+        {
+            "Type": "bind",
+            "Source": "/opt/passwall-node/upgrades",
+            "Destination": "/run/passwall-node-upgrades",
+            "Mode": "rw",
+            "RW": true,
+            "Propagation": "rprivate"
+        }
+    ],
+    "Config": {
+        "Hostname": "6b1f4e0c9d2a",
+        "Domainname": "",
+        "User": "",
+        "AttachStdin": false,
+        "AttachStdout": true,
+        "AttachStderr": true,
+        "Tty": false,
+        "OpenStdin": false,
+        "StdinOnce": false,
+        "Env": [
+            "PSP_NODE_UPGRADE_TARGET_CONTAINER=passwall-node-server-7-agent",
+            "PSP_NODE_UPGRADE_TARGET_AGENT_ID=agt_7f3a9c2e5b1d",
+            "PUID=10001",
+            "PGID=10001",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "TZ=UTC",
+            "PSP_NODE_DATA_DIR=/var/lib/passwall-node",
+            "PSP_NODE_CREDENTIAL_FILE=/run/secrets/node_credential",
+            "PSP_NODE_XRAY_API_LISTEN=127.0.0.1:10085",
+            "PSP_NODE_SING_BOX_API_LISTEN=127.0.0.1:10086"
+        ],
+        "Cmd": [
+            "--run-docker-upgrade-helper"
+        ],
+        "Image": "ghcr.io/kazuhahub/passwall-node:4.0.1.6",
+        "Volumes": null,
+        "WorkingDir": "/var/lib/passwall-node",
+        "Entrypoint": [
+            "/usr/local/bin/docker-entrypoint.sh"
+        ],
+        "OnBuild": null,
+        "Labels": {
+            "com.docker.compose.config-hash": "8c1f5e2a9b7d4c0e3f6a1b8d5e2c9f7a4b1e8d5c2f9a6b3e0d7c4a1f8e5b2c9d",
+            "com.docker.compose.container-number": "1",
+            "com.docker.compose.depends_on": "",
+            "com.docker.compose.image": "sha256:4c9e1f0b7a2d5e8c3f6a9b0d1e4f7a2c5b8e1d4f7a0c3b6e9d2f5a8c1b4e7d0a",
+            "com.docker.compose.oneoff": "False",
+            "com.docker.compose.project": "passwall-node-server-7",
+            "com.docker.compose.project.config_files": "/opt/passwall-node/compose.yaml",
+            "com.docker.compose.project.working_dir": "/opt/passwall-node",
+            "com.docker.compose.service": "passwall-node-updater",
+            "com.docker.compose.version": "2.39.4",
+            "io.kazuhahub.passwall-node.state-schema": "9",
+            "io.kazuhahub.passwall-node.upgrade-contract": "1",
+            "org.opencontainers.image.created": "2026-09-27T11:40:03.000Z",
+            "org.opencontainers.image.description": "Passwall Node agent",
+            "org.opencontainers.image.licenses": "Apache-2.0",
+            "org.opencontainers.image.revision": "d792385c0f3a6e1b9d4c7a2e5f8b1d3c6a9e0f2b",
+            "org.opencontainers.image.source": "https://github.com/KazuhaHub/passwall-node",
+            "org.opencontainers.image.title": "passwall-node",
+            "org.opencontainers.image.url": "https://github.com/KazuhaHub/passwall-node",
+            "org.opencontainers.image.version": "4.0.1.6"
+        }
+    },
+    "NetworkSettings": {
+        "Bridge": "",
+        "SandboxID": "",
+        "SandboxKey": "",
+        "Ports": {},
+        "HairpinMode": false,
+        "LinkLocalIPv6Address": "",
+        "LinkLocalIPv6PrefixLen": 0,
+        "SecondaryIPAddresses": null,
+        "SecondaryIPv6Addresses": null,
+        "EndpointID": "",
+        "Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "IPAddress": "",
+        "IPPrefixLen": 0,
+        "IPv6Gateway": "",
+        "MacAddress": "",
+        "Networks": {
+            "none": {
+                "IPAMConfig": null,
+                "Links": null,
+                "Aliases": null,
+                "MacAddress": "",
+                "DriverOpts": null,
+                "NetworkID": "3e8b1d4f7a0c2e5b8d1f4a7c0e3b6d9f2a5c8e1b4d7f0a3c6e9b2d5f8a1c4e7b",
+                "EndpointID": "",
+                "Gateway": "",
+                "IPAddress": "",
+                "IPPrefixLen": 0,
+                "IPv6Gateway": "",
+                "GlobalIPv6Address": "",
+                "GlobalIPv6PrefixLen": 0,
+                "DNSNames": null
+            }
+        }
+    }
+}

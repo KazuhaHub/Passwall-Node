@@ -67,6 +67,13 @@ services:
       - no-new-privileges:true
     stop_grace_period: 30s
 
+  # THE UPDATER FOLLOWS THE AGENT. After a remote upgrade from PSP has succeeded,
+  # it moves itself onto the image the agent now runs, so it can end up on a newer
+  # release than NODE_VERSION. For about fifteen seconds a second container,
+  # passwall-node-updater-next-<8 hex>, runs beside it; the new one then takes
+  # this name. `docker compose up -d` leaves the result alone. See "The updater
+  # follows the Agent" in the README, including the one recreate an updater from
+  # 4.0.1.6 or earlier needs.
   passwall-node-updater:
     container_name: passwall-node-updater
     image: ghcr.io/kazuhahub/passwall-node:${NODE_VERSION:?set an explicit published release version such as v1.0.0}
@@ -77,11 +84,17 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # NO NETWORK. The updater reaches the Docker Engine through its unix socket and
+    # the agent through ./upgrades; the daemon, not the updater, fetches images. It
+    # holds the socket, so nothing should be able to reach it.
+    network_mode: none
     environment:
       PSP_NODE_UPGRADE_TARGET_CONTAINER: passwall-node-agent
       PSP_NODE_UPGRADE_TARGET_AGENT_ID: ${PSP_NODE_AGENT_ID:?set the PSP agent id}
       PUID: ${PUID:-10001}
       PGID: ${PGID:-10001}
+      # Uncomment to stop the updater following the agent; it can only switch that off.
+      # PSP_NODE_UPDATER_FOLLOW_AGENT: "false"
     volumes:
       # The updater is intentionally isolated from the network-facing agent.
       # Docker socket access is root-equivalent; never add it to passwall-node.
@@ -92,6 +105,20 @@ services:
       - /tmp:size=4m,mode=1777
     cap_drop:
       - ALL
+    # THE UPDATER RUNS AS ROOT BUT WITHOUT DAC_OVERRIDE, so the ordinary permission
+    # bits apply to it, and it crosses three of them before its first heartbeat.
+    # Without these its first write is refused, it exits, and the agent never
+    # offers remote upgrade.
+    cap_add:
+      # Every file it writes is handed to PGID so the agent can read it, and root
+      # is not a member of that group.
+      - CHOWN
+      # It reads the agent's request from ./upgrades/requests, which belongs to
+      # PUID with mode 0700. Read and search only: it never writes there.
+      - DAC_READ_SEARCH
+      # It re-asserts that directory's 0700 on every start, a chmod on a path it
+      # does not own.
+      - FOWNER
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 15s

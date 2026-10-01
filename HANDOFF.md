@@ -213,6 +213,18 @@ helper 下载前拒绝 systemd drop-in 覆写并核验旧进程；备份 fsync �
 这不新增数据库/VM 快照恢复、通用终态 GC 或无损流量停机保证；详见 README 的 Remote agent upgrades。
 core 选择仍是 declarative `ConfigBody.Core`，TLS material 仍随配置内联，不能重新伪装成 task。
 
+**Docker updater 跟随 Agent（2026-09-30）**：远程升级 Agent
+成功后，updater 以 Agent 正在运行的镜像克隆自身（临时名 `<N>-next-<8hex>`），候补不写任何 Agent 可见路径、
+先自证（同镜像与版本、二进制 digest 等于就绪证明、能接受该 Agent、能读请求槽），再经 root-only
+`upgrades/updater/handover.v1.json` 提交并交出 `updater/lock` 的 flock；新 updater 停止并删除旧的、改回原名。
+不拉取镜像、不改动 Agent，也不改协议、能力、任务或 PSP（所有者决定：属于 PN 内部的助手维护）。只跟随
+updater 自己成功升级装上的、更高版本、本机架构、带 `io.kazuhahub.passwall-node.updater-handover` 标签的镜像；
+`PSP_NODE_UPDATER_FOLLOW_AGENT=false` 可关闭。4.0.1.6 及更早的 updater 没有这段代码，须手动重建一次。
+信任基础不变（官方仓库、精确标签与标签、已作为 Agent 证明、只升不降、二进制 digest 绑定）；签名 digest
+校验是后续项。真实 Docker 验证在独立的 `docker-updater.yml`（A1–A9 探针、E1–E10 端到端），不在 test.yml、
+不自动阻塞发布：含此改动的版本须等它在发布提交上两架构全绿后再打 tag。详见 README「The updater follows
+the Agent」与 `internal/upgrade/ACCEPTANCE.md`。
+
 这里的 crash window 必须精确描述，不能笼统宣传“exactly once”：claim 提交前崩溃不会执行；claim
 提交后、terminal 提交前崩溃会留下 `running`。实现 `TaskRecoverer` 的 kind 在重启后查询/恢复真实结果；
 没有 recovery contract 的 kind 终结为显式 `indeterminate`，绝不盲目再执行。只有下游支持 task ID

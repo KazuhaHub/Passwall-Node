@@ -1,0 +1,18 @@
+812 677 0:62 / / rw,relatime master:269 - overlay overlay rw,lowerdir=/home/runner/.local/share/docker/overlay2/l/7KQ3XWZ2BJ4N5M6P7Q8R9S0T1U:/home/runner/.local/share/docker/overlay2/l/A1B2C3D4E5F6G7H8I9J0K1L2M3,upperdir=/home/runner/.local/share/docker/overlay2/9a0e5c3d1f7b2e8a4c6d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e9a2c4d6f8b0e1a/diff,workdir=/home/runner/.local/share/docker/overlay2/9a0e5c3d1f7b2e8a4c6d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e9a2c4d6f8b0e1a/work,nouserxattr
+813 812 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+814 812 0:66 / /dev rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755,inode64
+815 814 0:67 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,gid=5,mode=620,ptmxmode=666
+816 812 0:68 / /sys ro,nosuid,nodev,noexec,relatime - sysfs sysfs ro
+817 816 0:30 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw,nsdelegate,memory_recursiveprot
+818 814 0:64 / /dev/mqueue rw,nosuid,nodev,noexec,relatime - mqueue mqueue rw
+819 814 0:69 / /dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=65536k,inode64
+820 812 8:1 /home/runner/.local/share/docker/containers/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/sda1 rw
+821 812 8:1 /home/runner/.local/share/docker/containers/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5/hostname /etc/hostname rw,relatime - ext4 /dev/sda1 rw
+822 812 8:1 /home/runner/.local/share/docker/containers/6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5/hosts /etc/hosts rw,relatime - ext4 /dev/sda1 rw
+823 812 0:26 /docker.sock /var/run/docker.sock rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=401816k,mode=755,inode64
+824 812 8:1 /opt/passwall-node/upgrades /run/passwall-node-upgrades rw,relatime - ext4 /dev/sda1 rw,discard,errors=remount-ro
+678 814 0:67 /0 /dev/console rw,nosuid,noexec,relatime - devpts devpts rw,gid=5,mode=620,ptmxmode=666
+679 813 0:65 /bus /proc/bus ro,nosuid,nodev,noexec,relatime - proc proc rw
+680 813 0:65 /sys /proc/sys ro,nosuid,nodev,noexec,relatime - proc proc rw
+681 813 0:70 / /proc/acpi ro,relatime - tmpfs tmpfs ro,inode64
+682 813 0:66 /null /proc/kcore rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755,inode64

@@ -1,0 +1,20 @@
+# THE PANEL'S COMPOSE, RUN WITHOUT A PANEL OR A REGISTRY. psp-compose.yaml is
+# exactly what the panel generates, so this file is the whole of what the
+# end-to-end changes about it, and a deployment test holds it to that:
+#
+#   - each service runs a test image built on the runner, by a reference the test
+#     passes in, and may never pull one — a pull could replace a test build with a
+#     published release of the same name;
+#   - the agent only sleeps. The updater checks the agent's profile, labels,
+#     environment and mounts, never what it runs, and a sleeping agent needs no
+#     panel to sync with. sleep as PID 1 ignores SIGTERM, so its stop grace is
+#     short rather than the panel's thirty seconds on every scenario.
+services:
+  passwall-node:
+    image: ${AGENT_IMAGE:?set the agent's local test image}
+    pull_policy: never
+    entrypoint: ["/bin/sleep", "infinity"]
+    stop_grace_period: 2s
+  passwall-node-updater:
+    image: ${UPDATER_IMAGE:?set the updater's local test image}
+    pull_policy: never

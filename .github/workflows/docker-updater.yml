@@ -1,0 +1,209 @@
+name: Docker updater
+
+# THE DOCKER UPDATER'S OWN BEHAVIOUR AGAINST A REAL DAEMON. The updater is the one
+# process holding the Docker socket, and what it relies on about Docker -- that a
+# container can find its own ID, that two containers' binds of one directory share
+# a lock, that the Engine API creates without pulling, how a restart policy treats
+# a crash and an API stop, what Compose leaves alone -- is the daemon's behaviour,
+# which no unit test sees. The assumptions job probes it on both architectures the
+# release ships.
+#
+# IT IS NOT PART OF test.yml, ON PURPOSE. release.yml publishes only a commit on
+# which the whole Test workflow succeeded, and these jobs answer a question about
+# runner images and Docker releases rather than about the commit, so they must not
+# be able to hold a release. Docker moves under them too, which is what the weekly
+# run is for. No job here carries a job-level if:, because a skipped job also skips
+# every job that needs it.
+on:
+  pull_request:
+    paths:
+      - "internal/upgrade/**"
+      - "cmd/node/**"
+      - "Dockerfile*"
+      - docker-entrypoint.sh
+      - compose.example.yaml
+      - .github/workflows/docker-updater.yml
+  push:
+    branches: [main]
+    paths:
+      - "internal/upgrade/**"
+      - "cmd/node/**"
+      - "Dockerfile*"
+      - docker-entrypoint.sh
+      - compose.example.yaml
+      - .github/workflows/docker-updater.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "41 5 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+
+# A PR push supersedes the run before it; any other run is its own verdict and
+# cancels nothing, as in test.yml.
+concurrency:
+  group: docker-updater-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  assumptions:
+    name: Docker engine assumptions (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      # FIRST, AND LOUD. Nothing in this repository has run Compose on the arm64
+      # image before, and a probe that cannot find it should say so here rather
+      # than as a failed command minutes in.
+      - name: Docker Engine and Compose are present
+        run: |
+          set -eu
+          docker version
+          docker compose version
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact preferred compiler
+        run: |
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      - name: Verify native runner architecture
+        run: test "$(go env GOHOSTARCH)" = "${{ matrix.arch }}"
+      # The test re-executes itself as root through sudo: it restarts the daemon
+      # and SIGKILLs host processes. Every probe container runs this same test
+      # binary FROM scratch, so it is built static. The log must show the test
+      # passing, and a SKIP anywhere in it is a probe that did not run. That check
+      # is inverted with `!`, which exempts a command from `set -e`, so it only
+      # fails the step as the script's last command.
+      - name: Probe the Docker behaviour the updater handover relies on (A1-A9)
+        env:
+          PN_DOCKER_UPDATER_E2E: "1"
+          CGO_ENABLED: "0"
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./internal/upgrade -run '^TestDockerEngineAssumptions$' -count=1 -timeout=15m | tee "$RUNNER_TEMP/docker-assumptions.log"
+          grep -q '^--- PASS: TestDockerEngineAssumptions ' "$RUNNER_TEMP/docker-assumptions.log"
+          ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/docker-assumptions.log"
+
+  # THE HANDOVER ITSELF, END TO END, on the daemon the probes above vouched for:
+  # it needs them, so a handover is never run on a Docker whose behaviour they
+  # refused. TestDockerUpdaterFollowsAgentE2E starts the panel's own compose, lets
+  # the updater move itself onto the agent's image, and breaks the move at each
+  # step that can break.
+  handover:
+    name: Updater follows the agent (${{ matrix.arch }})
+    needs: assumptions
+    runs-on: ${{ matrix.runner }}
+    # The scenarios run on the updater's production timers — a thirty-second
+    # settle, a sixty-second standby wait — about twenty-five minutes in all,
+    # after two image builds.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - name: Docker Engine and Compose are present
+        run: |
+          set -eu
+          docker version
+          docker compose version
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact preferred compiler
+        run: |
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      - name: Verify native runner architecture
+        run: test "$(go env GOHOSTARCH)" = "${{ matrix.arch }}"
+      # THE RECIPE'S BASE COMES FROM DOCKER HUB. Dockerfile.release starts FROM an
+      # alpine image and installs packages from the Alpine CDN, so building it
+      # depends on both. The base is pulled here first, read from the recipe so
+      # the two cannot disagree, with a few retries, so that a Docker Hub outage
+      # fails a step that says so rather than the build.
+      - name: Pull the release recipe's base image
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(awk '$1 == "FROM" { print $2; exit }' Dockerfile.release)
+          test -n "$base"
+          for attempt in 1 2 3; do
+            if docker pull "$base"; then
+              exit 0
+            fi
+            sleep $((attempt * 15))
+          done
+          exit 1
+      # TWO LOCAL IMAGES, NOTHING PUSHED. The release recipe, built twice the way
+      # release.yml builds it — the binary under bin/linux-<arch>/, the version,
+      # schema and contract as build arguments — at two versions no release will
+      # ever use, so no published image can stand in for either. The build itself
+      # fetches the recipe's base and its Alpine packages, as above; nothing else
+      # here touches a registry. The binary is rebuilt between them, since the
+      # recipe copies whatever is at that path. Tagged under the official
+      # repository, because that is the only one the updater accepts; the
+      # end-to-end never pulls, and fails if anything does.
+      - name: Build the updater's and the agent's test images
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          arch=$(go env GOARCH)
+          mkdir -p "bin/linux-$arch"
+          for version in 4.0.99.1 4.0.99.2; do
+            go build -trimpath -ldflags="-s -w -X github.com/KazuhaHub/passwall-node/v4/internal/version.Version=$version" \
+              -o "bin/linux-$arch/passwall-node" ./cmd/node
+            test "$("bin/linux-$arch/passwall-node" --version)" = "$version"
+            upgrade_info=$("bin/linux-$arch/passwall-node" --upgrade-info)
+            docker build --file Dockerfile.release \
+              --build-arg VERSION="$version" \
+              --build-arg STATE_SCHEMA="$(printf '%s' "$upgrade_info" | jq -er .state_schema)" \
+              --build-arg UPGRADE_CONTRACT="$(printf '%s' "$upgrade_info" | jq -er .upgrade_contract)" \
+              --tag "ghcr.io/kazuhahub/passwall-node:$version" .
+          done
+      # The test re-executes itself as root through sudo: it SIGKILLs host
+      # processes and restarts the daemon. The log must show the test passing, and
+      # a SKIP anywhere in it is a scenario that did not run. That check is
+      # inverted with `!`, which exempts a command from `set -e`, so it only fails
+      # the step as the script's last command.
+      - name: The updater follows the agent onto its image (E1-E10)
+        env:
+          PN_DOCKER_UPDATER_E2E: "1"
+          PN_E2E_UPDATER_VERSION: 4.0.99.1
+          PN_E2E_AGENT_VERSION: 4.0.99.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./internal/upgrade -run '^TestDockerUpdaterFollowsAgentE2E$' -count=1 -timeout=40m | tee "$RUNNER_TEMP/docker-handover.log"
+          grep -q '^--- PASS: TestDockerUpdaterFollowsAgentE2E ' "$RUNNER_TEMP/docker-handover.log"
+          ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/docker-handover.log"

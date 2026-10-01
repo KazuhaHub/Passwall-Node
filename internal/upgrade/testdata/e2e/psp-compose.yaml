@@ -1,0 +1,95 @@
+services:
+  passwall-node:
+    container_name: passwall-node-server-7-agent
+    image: ghcr.io/kazuhahub/passwall-node:beta
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      - passwall-node-updater
+    network_mode: host
+    environment:
+      PSP_NODE_ENDPOINT: "https://panel.example/v1/node/sync"
+      PSP_NODE_AGENT_ID: "agt_atFiCPk1qbb1e5UgLl9rNzWfyXy35HbtEbZSivwUKDM"
+      PSP_NODE_ALLOW_INSECURE_HTTP: "false"
+      PSP_NODE_DOCKER_REMOTE_UPGRADE: "true"
+      PSP_NODE_CREDENTIAL_FILE: /run/secrets/passwall-node/node-credential.txt
+    volumes:
+      - ./config:/run/secrets/passwall-node:ro
+      - ./data:/var/lib/passwall-node
+      - ./upgrades:/run/passwall-node-upgrades
+    # THE SECURITY PROFILE IS NOT OPTIONAL, AND NOT ONLY FOR SECURITY. The Node
+    # project's Docker updater refuses to replace a container whose profile differs
+    # from the supported one — it checks that the container is not privileged, has a
+    # read-only root filesystem and uses host networking, and it does that BEFORE it
+    # pulls anything. A generated file without this line produces a node that can be
+    # upgraded in the panel and refused on the host, with a message about the profile
+    # that says nothing about the compose it came from.
+    read_only: true
+    tmpfs:
+      - /run/passwall-node:size=64k,mode=0700
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    # Entrypoint-only capabilities: read the mounted credential, copy/chown the
+    # secret and state volume, protect the runtime directory, then switch to the
+    # configured unprivileged UID/GID before exec.
+    #
+    # DAC_OVERRIDE IS FOR READING THE CREDENTIAL, AND THE INSTRUCTIONS FURTHER DOWN
+    # ARE WHY. They tell the operator to chmod 0600 the credential file, and on a NAS
+    # that file belongs to the account that ran the install rather than to uid 0 — so
+    # the container's root is neither its owner nor permitted by "other", and without
+    # this capability the copy fails with
+    #
+    #     cp: can't open '/run/secrets/passwall-node/node-credential.txt': Permission denied
+    #
+    # and the agent restarts forever. The alternative, making the credential
+    # world-readable on the host, is worse on a shared machine, and this capability is
+    # exercised for about a second by the entrypoint, which then drops to PUID
+    # permanently.
+    #
+    # FOWNER IS NOT DECORATION EITHER. The runtime directory is a tmpfs mount, so it is
+    # root-owned; the entrypoint chmods it, and a root process that is NOT the owner
+    # needs CAP_FOWNER for that chmod. With every capability dropped it does not have
+    # one: the container starts, prints "chmod: /run/passwall-node: Operation not
+    # permitted", reports that it cannot protect its runtime directory, and restarts
+    # forever. CHOWN is for the chown, and SETGID/SETUID are for the privilege drop.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    labels:
+      io.kazuhahub.passwall-node.managed: "true"
+      io.kazuhahub.passwall-node.role: agent
+      io.kazuhahub.passwall-node.agent-id: "agt_atFiCPk1qbb1e5UgLl9rNzWfyXy35HbtEbZSivwUKDM"
+
+  passwall-node-updater:
+    container_name: passwall-node-server-7-updater
+    image: ghcr.io/kazuhahub/passwall-node:beta
+    command: ["--run-docker-upgrade-helper"]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    network_mode: none
+    environment:
+      PSP_NODE_UPGRADE_TARGET_CONTAINER: passwall-node-server-7-agent
+      PSP_NODE_UPGRADE_TARGET_AGENT_ID: "agt_atFiCPk1qbb1e5UgLl9rNzWfyXy35HbtEbZSivwUKDM"
+      PUID: "10001"
+      PGID: "10001"
+    volumes:
+      # Docker socket access is root-equivalent. It belongs only to this
+      # isolated updater; never mount it into the network-facing Agent.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./upgrades:/run/passwall-node-upgrades
+    stop_grace_period: 15s

@@ -30,10 +30,16 @@ FROM alpine:3.24.1
 ARG VERSION=dev
 ARG STATE_SCHEMA=9
 ARG UPGRADE_CONTRACT=1
+# THE UPDATER HANDOVER LABEL IS A LITERAL, NOT A BUILD ARGUMENT. It lists the
+# handover protocols this source's updater speaks, and an updater moves itself
+# onto the agent's image only if that image lists its own; an argument could make
+# an image promise code its binary does not have. A deployment test holds it to
+# upgrade.UpdaterHandoverProtocols.
 LABEL org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
       io.kazuhahub.passwall-node.state-schema="${STATE_SCHEMA}" \
-      io.kazuhahub.passwall-node.upgrade-contract="${UPGRADE_CONTRACT}"
+      io.kazuhahub.passwall-node.upgrade-contract="${UPGRADE_CONTRACT}" \
+      io.kazuhahub.passwall-node.updater-handover="1"
 RUN apk add --no-cache ca-certificates tzdata su-exec \
  && addgroup -g 10001 passwall-node \
  && adduser -D -H -u 10001 -G passwall-node passwall-node

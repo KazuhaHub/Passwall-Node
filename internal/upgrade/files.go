@@ -15,45 +15,56 @@ import (
 // symlinks are refused; os.Root provides containment even across path races,
 // not a claim that Lstat alone prevents every in-root symlink race.
 func ReadDocument(root, name string, target any) error {
-	info, err := os.Lstat(root)
+	data, err := readDocumentBytes(root, name)
 	if err != nil {
 		return err
 	}
+	return DecodeStrict(data, target)
+}
+
+// readDocumentBytes is ReadDocument without the decode: the same containment,
+// the same refusal of links and the same bound, for a caller that needs the
+// exact bytes — the Docker updater digests the request it is about to decode.
+func readDocumentBytes(root, name string) ([]byte, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return nil, err
+	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("upgrade root must be a real directory")
+		return nil, errors.New("upgrade root must be a real directory")
 	}
 	r, err := os.OpenRoot(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer r.Close()
 	parts := strings.Split(filepath.Clean(name), string(filepath.Separator))
 	for i := range parts {
 		info, err := r.Lstat(filepath.Join(parts[:i+1]...))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("upgrade paths must not be symlinks")
+			return nil, errors.New("upgrade paths must not be symlinks")
 		}
 	}
 	f, err := r.OpenFile(name, os.O_RDONLY, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	info, err = f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > 32<<10 {
-		return errors.New("upgrade document must be a bounded regular file")
+		return nil, errors.New("upgrade document must be a bounded regular file")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, (32<<10)+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return DecodeStrict(data, target)
+	return data, nil
 }
 
 // AtomicDocument is only called with owned, checked private directories and a

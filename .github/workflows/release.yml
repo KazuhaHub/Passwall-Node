@@ -589,6 +589,12 @@ jobs:
             # resolved. `latest` is not here: every release is published as a
             # pre-release, and promote.yml moves `latest` to a digest it verified.
             type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}
+          # THESE LABELS ARE WHAT THE PUBLISHED IMAGE CARRIES; build-push-action
+          # applies them over the Dockerfile's. The updater handover label is a
+          # literal for the Dockerfile's reason: it lists the handover protocols
+          # this source's updater speaks, and an updater moves itself onto an image
+          # only if the image lists its own. deployment/updater_handover_label_test.go
+          # holds this line, and both Dockerfiles, to upgrade.UpdaterHandoverProtocols.
           labels: |
             org.opencontainers.image.title=passwall-node
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -597,6 +603,7 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
             io.kazuhahub.passwall-node.state-schema=${{ needs.setup.outputs.state_schema }}
             io.kazuhahub.passwall-node.upgrade-contract=${{ needs.setup.outputs.upgrade_contract }}
+            io.kazuhahub.passwall-node.updater-handover=1
       - name: Refuse an already published exact image tag
         env:
           IMAGE_REPOSITORY: ${{ needs.setup.outputs.owner_lc }}/passwall-node

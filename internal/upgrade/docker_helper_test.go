@@ -19,187 +19,6 @@ import (
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
-type fakeDockerEngine struct {
-	containers map[string]dockerContainer
-	images     map[string]dockerImage
-	pulled     string
-	onStart    func(string)
-	// onPull runs inside PullImage. A real pull takes as long as the network does,
-	// and it happens while processCurrent holds the helper's main loop — which is
-	// the window the heartbeat has to survive.
-	onPull func()
-	// fail injects an engine failure for one operation, keyed "op" or "op:name".
-	// The rollback path's failure branches are otherwise unreachable from a test,
-	// which is why they had no coverage at all.
-	fail map[string]error
-	// failOnce is fail for a single call: the first matching operation consumes
-	// it. It models an engine that misses one request and answers the next.
-	failOnce map[string]error
-	// onRemove runs at the start of RemoveContainer, before the fake looks the
-	// container up — so a test can make one vanish between the stop and the
-	// removal, which is what a concurrent `docker rm` or `compose down` does.
-	onRemove func(string)
-	// slowStop names containers whose stop takes effect but whose answer arrives
-	// only after the caller has given up: the call blocks until its context is
-	// done. That is how one hung engine call spends a whole rollback budget.
-	slowStop map[string]bool
-	// delay makes an operation, keyed "op:name", take this long. Like a real
-	// client it gives up when its context is done, and then the operation never
-	// happens — so a few slow calls can spend a budget without any one failing.
-	delay map[string]time.Duration
-	// removals records every removal and whether it was forced. A forced removal
-	// is a destructive capability, so tests need to see exactly when it is used.
-	removals []fakeRemoval
-}
-
-type fakeRemoval struct {
-	name  string
-	force bool
-}
-
-func (f *fakeDockerEngine) maybeFail(ctx context.Context, op, name string) error {
-	// A REAL CLIENT FAILS ON A DONE CONTEXT without reaching the engine, so the
-	// fake does too — otherwise an exhausted budget would be invisible here.
-	if err := ctx.Err(); err != nil {
-		return errDockerUnavailable
-	}
-	if d := f.delay[op+":"+name]; d > 0 {
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			return errDockerUnavailable
-		}
-	}
-	for _, key := range []string{op + ":" + name, op} {
-		if err, ok := f.failOnce[key]; ok {
-			delete(f.failOnce, key)
-			return err
-		}
-	}
-	if err, ok := f.fail[op+":"+name]; ok {
-		return err
-	}
-	return f.fail[op]
-}
-
-func (f *fakeDockerEngine) Ping(context.Context) error { return nil }
-func (f *fakeDockerEngine) InspectContainer(ctx context.Context, name string) (dockerContainer, error) {
-	if err := f.maybeFail(ctx, "inspect", name); err != nil {
-		return dockerContainer{}, err
-	}
-	container, ok := f.containers[name]
-	if !ok {
-		return dockerContainer{}, errDockerNotFound
-	}
-	return container, nil
-}
-func (f *fakeDockerEngine) PullImage(_ context.Context, reference string) error {
-	if f.onPull != nil {
-		f.onPull()
-	}
-	if _, ok := f.images[reference]; !ok {
-		return errDockerNotFound
-	}
-	f.pulled = reference
-	return nil
-}
-func (f *fakeDockerEngine) InspectImage(_ context.Context, reference string) (dockerImage, error) {
-	image, ok := f.images[reference]
-	if !ok {
-		return dockerImage{}, errDockerNotFound
-	}
-	return image, nil
-}
-func (f *fakeDockerEngine) StopContainer(ctx context.Context, name string) error {
-	if err := f.maybeFail(ctx, "stop", name); err != nil {
-		return err
-	}
-	container, ok := f.containers[name]
-	if !ok {
-		return errDockerNotFound
-	}
-	container.State.Running = false
-	f.containers[name] = container
-	if f.slowStop[name] {
-		<-ctx.Done()
-		return errDockerUnavailable
-	}
-	return nil
-}
-func (f *fakeDockerEngine) StartContainer(ctx context.Context, name string) error {
-	if err := f.maybeFail(ctx, "start", name); err != nil {
-		return err
-	}
-	container, ok := f.containers[name]
-	if !ok {
-		return errDockerNotFound
-	}
-	container.State.Running = true
-	f.containers[name] = container
-	if f.onStart != nil {
-		f.onStart(name)
-	}
-	return nil
-}
-func (f *fakeDockerEngine) RenameContainer(ctx context.Context, name, replacement string) error {
-	if err := f.maybeFail(ctx, "rename", name); err != nil {
-		return err
-	}
-	container, ok := f.containers[name]
-	if !ok {
-		return errDockerNotFound
-	}
-	if _, exists := f.containers[replacement]; exists {
-		return &dockerStatusError{Code: http.StatusConflict}
-	}
-	delete(f.containers, name)
-	container.Name = "/" + replacement
-	f.containers[replacement] = container
-	return nil
-}
-func (f *fakeDockerEngine) CreateReplacement(_ context.Context, name string, old dockerContainer, image dockerImage, reference string) (string, error) {
-	if _, exists := f.containers[name]; exists {
-		return "", errors.New("name exists")
-	}
-	var config dockerConfig
-	_ = json.Unmarshal(old.Config, &config)
-	config.Image = reference
-	config.Labels["org.opencontainers.image.version"] = image.Config.Labels["org.opencontainers.image.version"]
-	encoded, _ := json.Marshal(config)
-	created := old
-	created.ID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	created.Image = image.ID
-	created.Name = "/" + name
-	created.Config = encoded
-	created.State.Running = false
-	f.containers[name] = created
-	return created.ID, nil
-}
-func (f *fakeDockerEngine) RemoveContainer(ctx context.Context, name string, force bool) error {
-	f.removals = append(f.removals, fakeRemoval{name: name, force: force})
-	if f.onRemove != nil {
-		f.onRemove(name)
-	}
-	if err := f.maybeFail(ctx, "remove", name); err != nil {
-		return err
-	}
-	container, ok := f.containers[name]
-	if !ok {
-		return errDockerNotFound
-	}
-	// THE REAL ENGINE REFUSES TO REMOVE A RUNNING CONTAINER without force. This
-	// fake used to delete it silently, which made the whole 409 family invisible:
-	// a rollback whose stop had failed looked, to the test suite, exactly like one
-	// whose stop had succeeded.
-	if container.State.Running && !force {
-		return &dockerStatusError{Code: http.StatusConflict}
-	}
-	delete(f.containers, name)
-	return nil
-}
-
 func TestDockerUpgradeRequiresReadinessBeforeCommitting(t *testing.T) {
 	controller, engine, request := dockerControllerFixture(t)
 	engine.onStart = func(name string) {
@@ -297,9 +116,22 @@ func TestDockerUpgradeRecoveryKeepsOriginalContainerBeforeRename(t *testing.T) {
 	}
 }
 
-func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDockerEngine, Request) {
+// controlDirFixture is a control directory as prepareControl leaves one: 0750,
+// so that its group and others cannot write it. t.TempDir alone is not that: it
+// is 0777 less the umask, which a 002 umask leaves group-writable, and the
+// updater refuses to make its own directory in a control directory like that.
+func controlDirFixture(t *testing.T) string {
 	t.Helper()
 	control := t.TempDir()
+	if err := os.Chmod(control, 0750); err != nil {
+		t.Fatal(err)
+	}
+	return control
+}
+
+func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDockerEngine, Request) {
+	t.Helper()
+	control := controlDirFixture(t)
 	for _, name := range []string{"requests", "receipts"} {
 		if err := os.Mkdir(filepath.Join(control, name), 0700); err != nil {
 			t.Fatal(err)
@@ -337,6 +169,8 @@ func dockerControllerFixture(t *testing.T) (*dockerHelperController, *fakeDocker
 	engine := &fakeDockerEngine{
 		containers: map[string]dockerContainer{"node-agent": old},
 		images:     map[string]dockerImage{DockerImageRepository + ":" + targetVersion: image},
+		// The tests below name the replacement by this identity.
+		createIDs: []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 	}
 	args, _ := json.Marshal(protocol.AgentUpgradeArgs{Version: targetVersion, ExpectedVersion: currentVersion})
 	task := protocol.Task{ID: "tsk_docker_upgrade_001", Kind: TaskKind, Args: args, NotAfterMS: 2000}
