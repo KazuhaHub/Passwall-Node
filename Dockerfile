@@ -26,7 +26,7 @@ RUN target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
 # The entrypoint starts as root only to turn a read-only Docker secret into the
 # daemon's required mode-0600 credential and to repair the state-volume owner.
 # It then execs the daemon through su-exec as an unprivileged numeric UID/GID.
-FROM alpine:3.24.1
+FROM alpine:3.24.2
 ARG VERSION=dev
 ARG STATE_SCHEMA=9
 ARG UPGRADE_CONTRACT=1
