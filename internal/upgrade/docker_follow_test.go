@@ -452,6 +452,11 @@ func TestFollowTargetRefusals(t *testing.T) {
 		// the lock in it by path; a handover is not started onto one it would
 		// refuse, or onto a lock file that is no longer the one this updater
 		// holds.
+		{name: "the control directory is open to its group", setup: func(t *testing.T, f fixture) {
+			if err := os.Chmod(f.c.options.ControlDir, 0770); err != nil {
+				t.Fatal(err)
+			}
+		}, reason: "updater directory unusable"},
 		{name: "the updater directory is open to others", setup: func(t *testing.T, f fixture) {
 			if err := os.Chmod(f.c.updaterDir(), 0755); err != nil {
 				t.Fatal(err)

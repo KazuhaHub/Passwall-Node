@@ -41,11 +41,21 @@ type updaterLock struct {
 // lock that predates that directory's repair is not trusted on the directory's
 // word. It is opened without following a link, refused unless it is a regular
 // file owned by root, and its mode and group are put back to 0600 root's.
+//
+// NEITHER THE FILE NOR THE DIRECTORY IS REACHED THROUGH A LINK. The directory is
+// opened first, refusing a link, and the lock is opened inside that descriptor,
+// refusing one again.
 func openUpdaterLock(dir string, rootUID, rootGID uint32) (*updaterLock, error) {
-	file, err := os.OpenFile(filepath.Join(dir, updaterLockName), os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0600)
+	parent, err := os.OpenFile(dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, fmt.Errorf("updater lock cannot be opened: %w", err)
 	}
+	defer parent.Close()
+	fd, err := unix.Openat(int(parent.Fd()), updaterLockName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("updater lock cannot be opened: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), filepath.Join(dir, updaterLockName))
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
@@ -69,6 +79,63 @@ func openUpdaterLock(dir string, rootUID, rootGID uint32) (*updaterLock, error) 
 		}
 	}
 	return &updaterLock{file: file, flock: unix.Flock}, nil
+}
+
+// prepareUpdaterDir makes <control>/updater a real directory, root's alone,
+// 0700, creating it if needed; see ensureUpdaterDir for why.
+//
+// IT WORKS ON DESCRIPTORS, NOT PATHS. The control directory is opened, refusing a
+// link, and checked through that descriptor before anything is created in it:
+// it has to be root's, and writable by nobody else, or someone else could swap
+// what the updater is about to change for a link to anything at all. The updater
+// directory is then made and opened inside that descriptor, again refusing a
+// link, and its owner and mode are read and put right through its own
+// descriptor, so a chown or a chmod can never land anywhere else. Nothing is
+// changed in a control directory that fails the check: the handover is off, and
+// the control directory is prepareControl's, as it always was.
+func prepareUpdaterDir(control string, rootUID, rootGID uint32) error {
+	parent, err := os.OpenFile(control, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("the control directory cannot be opened: %w", err)
+	}
+	defer parent.Close()
+	info, err := parent.Stat()
+	if err != nil {
+		return err
+	}
+	if uid, _, ok := dockerFileOwner(info); !ok || uid != rootUID || info.Mode().Perm()&0022 != 0 {
+		return errors.New("the control directory is not root's alone: someone else could write it")
+	}
+	created := true
+	if err := unix.Mkdirat(int(parent.Fd()), DockerUpdaterDir, 0700); errors.Is(err, unix.EEXIST) {
+		created = false
+	} else if err != nil {
+		return err
+	}
+	fd, err := unix.Openat(int(parent.Fd()), DockerUpdaterDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+		return errors.New("updater directory is not a real directory")
+	} else if err != nil {
+		return err
+	}
+	dir := os.NewFile(uintptr(fd), filepath.Join(control, DockerUpdaterDir))
+	defer dir.Close()
+	if info, err = dir.Stat(); err != nil {
+		return err
+	}
+	uid, gid, ok := dockerFileOwner(info)
+	if !ok || (!created && uid != rootUID) {
+		return errors.New("updater directory is not owned by root")
+	}
+	if created || gid != rootGID {
+		if err := dir.Chown(int(rootUID), int(rootGID)); err != nil {
+			return err
+		}
+	}
+	if info.Mode().Perm() != 0700 {
+		return dir.Chmod(0700)
+	}
+	return nil
 }
 
 // tryLock takes the lock without waiting. It reports false with no error while

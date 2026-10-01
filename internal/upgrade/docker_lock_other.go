@@ -16,6 +16,8 @@ type updaterLock struct{}
 
 func openUpdaterLock(string, uint32, uint32) (*updaterLock, error) { return nil, errFlockUnsupported }
 
+func prepareUpdaterDir(string, uint32, uint32) error { return errFlockUnsupported }
+
 func (*updaterLock) tryLock() (bool, error) { return false, errFlockUnsupported }
 
 func (*updaterLock) isFile(os.FileInfo) bool { return false }

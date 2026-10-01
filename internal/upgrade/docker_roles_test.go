@@ -348,6 +348,61 @@ func TestAnUpdaterWithoutTheLockRunsAloneWhenNothingElseCanBe(t *testing.T) {
 	}
 }
 
+// A CONTROL DIRECTORY SOMEONE OTHER THAN ROOT CAN WRITE SWITCHES THE HANDOVER OFF
+// and leaves the updater directory uncreated. The control directory itself is
+// then prepareControl's, exactly as before the handover existed: one root owns is
+// put back to 0750 and the updater runs, alone and unlocked; one anyone else owns
+// is refused, and the updater stops.
+func TestAControlDirOthersCanWriteSwitchesTheHandoverOff(t *testing.T) {
+	withoutUpdaterDir := func(t *testing.T) (*dockerHelperController, *lockedBuffer) {
+		t.Helper()
+		c, _, logs := processFixture(t)
+		c.unlock()
+		if err := os.RemoveAll(c.updaterDir()); err != nil {
+			t.Fatal(err)
+		}
+		return c, logs
+	}
+	noUpdaterDir := func(t *testing.T, c *dockerHelperController) {
+		t.Helper()
+		if _, err := os.Lstat(c.updaterDir()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the updater directory was created in that control directory: %v", err)
+		}
+	}
+	t.Run("root's, but open to its group", func(t *testing.T) {
+		c, logs := withoutUpdaterDir(t)
+		if err := os.Chmod(c.options.ControlDir, 0770); err != nil {
+			t.Fatal(err)
+		}
+		serving(t, c)
+		waitFor(t, "the unlocked updater", func() bool { return c.primaryNow.Load() && controlPathExists(c, "heartbeat") })
+		if info, err := os.Lstat(c.options.ControlDir); err != nil || info.Mode().Perm() != 0750 {
+			t.Fatalf("the control directory was not put back to 0750: %v (%v)", info.Mode().Perm(), err)
+		}
+		noUpdaterDir(t, c)
+		if !strings.Contains(logs.String(), "handover: disabled (updater directory unusable: ") {
+			t.Fatalf("log:\n%s", logs)
+		}
+	})
+	t.Run("not root's", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("as root, the test's own directory is root's")
+		}
+		c, _ := withoutUpdaterDir(t)
+		c.options.RootUID++
+		stop, done := serving(t, c)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("an updater whose control directory root does not own kept running")
+		}
+		if err := stop(); err == nil {
+			t.Fatal("an updater whose control directory root does not own ran")
+		}
+		noUpdaterDir(t, c)
+	})
+}
+
 // lockFreeIn reports whether a probe can take c's updater lock, which it gives
 // straight back.
 func lockFreeIn(c *dockerHelperController) bool {

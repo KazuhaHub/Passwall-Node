@@ -344,45 +344,31 @@ func (c *dockerHelperController) readStandbyProof() (dockerStandbyProof, error) 
 // mode is put right. One owned by anyone else, or anything that is not a real
 // directory, is refused and left as it is: someone other than this updater made
 // it, and the handover is switched off rather than built on it.
+//
+// AND NOTHING IS TOUCHED IN A CONTROL DIRECTORY SOMEONE ELSE CAN WRITE. Before
+// the handover, the first thing the updater did was prepareControl, which refuses
+// a control directory root does not own and locks down one it does. This now runs
+// before that — prepareControl is the primary's alone — so it checks the control
+// directory itself, without changing it, and does everything through descriptors
+// (prepareUpdaterDir). A control directory that fails the check is left to
+// prepareControl, which refuses or repairs it exactly as it always did.
 func (c *dockerHelperController) ensureUpdaterDir() error {
-	path := c.updaterDir()
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(path, 0700); err != nil {
-			return err
-		}
-		if err := os.Chown(path, int(c.options.RootUID), int(c.options.RootGID)); err != nil {
-			return err
-		}
-		return os.Chmod(path, 0700)
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("updater directory is not a real directory")
-	}
-	uid, gid, ok := dockerFileOwner(info)
-	if !ok || uid != c.options.RootUID {
-		return errors.New("updater directory is not owned by root")
-	}
-	if gid != c.options.RootGID {
-		if err := os.Chown(path, int(c.options.RootUID), int(c.options.RootGID)); err != nil {
-			return err
-		}
-	}
-	if info.Mode().Perm() != 0700 {
-		return os.Chmod(path, 0700)
-	}
-	return nil
+	return prepareUpdaterDir(c.options.ControlDir, c.options.RootUID, c.options.RootGID)
 }
 
 // updaterDirUnusable is why the updater directory or the lock in it is not what
 // ensureUpdaterDir and openUpdaterLock leave behind — a real directory and a
-// regular file, both root's, 0700 and 0600 — or why that lock file is not the one
-// this process holds; nil when it is all as it should be. It only looks, and
-// repairs nothing.
+// regular file, both root's, 0700 and 0600, inside a control directory nobody
+// but root can write — or why that lock file is not the one this process holds;
+// nil when it is all as it should be. It only looks, and repairs nothing.
 func (c *dockerHelperController) updaterDirUnusable() error {
+	control, err := os.Lstat(c.options.ControlDir)
+	if err != nil {
+		return err
+	}
+	if uid, _, ok := dockerFileOwner(control); !ok || uid != c.options.RootUID || !control.IsDir() || control.Mode().Perm()&0022 != 0 {
+		return errors.New("the control directory is not root's alone: someone else could write it")
+	}
 	check := func(path, what, kindName string, kind fs.FileMode, mode os.FileMode) (os.FileInfo, error) {
 		info, err := os.Lstat(path)
 		if err != nil {

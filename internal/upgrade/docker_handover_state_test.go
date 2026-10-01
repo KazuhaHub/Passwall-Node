@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -527,6 +528,9 @@ func TestUpdaterDirIsRootOnly(t *testing.T) {
 		if err := os.Chmod(c.updaterDir(), 0755); err != nil {
 			t.Fatal(err)
 		}
+		// Unprivileged, the test owns the control directory as well, so the
+		// control directory's own check may be what refuses first; either way
+		// nothing is changed.
 		c.options.RootUID++
 		if err := c.ensureUpdaterDir(); err == nil {
 			t.Fatal("a directory not owned by root was accepted")
@@ -557,6 +561,82 @@ func TestUpdaterDirIsRootOnly(t *testing.T) {
 		}
 		if err := c.ensureUpdaterDir(); err == nil {
 			t.Fatal("a file was accepted as the updater directory")
+		}
+	})
+	t.Run("a symlink's target is never changed", func(t *testing.T) {
+		c := handoverStateFixture(t)
+		elsewhere := t.TempDir()
+		if err := os.Chmod(elsewhere, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(c.updaterDir()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(elsewhere, c.updaterDir()); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.ensureUpdaterDir(); err == nil {
+			t.Fatal("a symlinked updater directory was accepted")
+		}
+		if info, err := os.Stat(elsewhere); err != nil || info.Mode().Perm() != 0755 {
+			t.Fatalf("the symlink's target was changed to %v (%v)", info.Mode().Perm(), err)
+		}
+	})
+}
+
+// THE UPDATER DIRECTORY IS TOUCHED ONLY INSIDE A CONTROL DIRECTORY ONLY ROOT CAN
+// WRITE. Everything the updater does to it — create it, put its owner and mode
+// right, open the lock in it — happens inside the control directory, and in one
+// that someone else can write, that someone could swap what the updater is about
+// to change for a link to anything else. So the control directory is checked
+// first, and only read: one that is not root's, or that its group or others can
+// write, leaves the updater directory uncreated and as it was, and the handover
+// off. What happens to the control directory itself is prepareControl's, exactly
+// as before the handover existed.
+func TestUpdaterDirIsTouchedOnlyInARootOnlyControlDir(t *testing.T) {
+	for _, mode := range []os.FileMode{0770, 0777, 0757} {
+		t.Run(fmt.Sprintf("a control directory with mode %04o", mode), func(t *testing.T) {
+			c := handoverStateFixture(t)
+			if err := os.Remove(c.updaterDir()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(c.options.ControlDir, mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.ensureUpdaterDir(); err == nil {
+				t.Fatal("an updater directory was made in a control directory others can write")
+			}
+			if _, err := os.Lstat(c.updaterDir()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the updater directory was created: %v", err)
+			}
+		})
+	}
+	t.Run("an existing updater directory is not repaired there", func(t *testing.T) {
+		c := handoverStateFixture(t)
+		if err := os.Chmod(c.updaterDir(), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(c.options.ControlDir, 0777); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.ensureUpdaterDir(); err == nil {
+			t.Fatal("an updater directory in a control directory others can write was accepted")
+		}
+		if info, _ := os.Lstat(c.updaterDir()); info.Mode().Perm() != 0755 {
+			t.Fatalf("it was changed to %v", info.Mode().Perm())
+		}
+	})
+	t.Run("a control directory that is not root's", func(t *testing.T) {
+		c := handoverStateFixture(t)
+		if err := os.Remove(c.updaterDir()); err != nil {
+			t.Fatal(err)
+		}
+		c.options.RootUID++
+		if err := c.ensureUpdaterDir(); err == nil {
+			t.Fatal("an updater directory was made in a control directory root does not own")
+		}
+		if _, err := os.Lstat(c.updaterDir()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the updater directory was created: %v", err)
 		}
 	})
 }
