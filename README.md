@@ -261,7 +261,10 @@ The last of these is logged once per reason. `handover: disabled (<reason>)` on
 the first line means following is off on this host: `opt-out`, or the updater
 could not identify its own container or lock its directory — another container
 runtime, or a filesystem under `./upgrades` without `flock`. It then works
-exactly as it did before following existed.
+exactly as it did before following existed, as long as no other updater can be
+running: one that cannot use the lock while a handover it took part in is still
+recorded, or while a container that handover named still exists, waits for the
+lock instead of acting beside the updater that may hold it.
 
 ## Linux systemd installation
 

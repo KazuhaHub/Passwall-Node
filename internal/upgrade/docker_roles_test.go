@@ -202,6 +202,152 @@ func TestStandbyAndRetiredNeverWritePrepareControlPaths(t *testing.T) {
 	}
 }
 
+// playAs makes c the process RunDockerHelper starts in container id: nothing
+// decided yet, and resolving itself through a mountinfo naming that container
+// and the hostname that container was given.
+func playAs(t *testing.T, c *dockerHelperController, e *fakeDockerEngine, id string) {
+	t.Helper()
+	template, err := os.ReadFile(filepath.Join("testdata", "mountinfo", "overlay2-var-lib-docker.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mountinfo := strings.ReplaceAll(string(template), mountinfoFixtureID, id)
+	c.options.Mountinfo = func() (string, error) { return mountinfo, nil }
+	container, err := e.InspectContainer(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config dockerConfig
+	if err := json.Unmarshal(container.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	c.options.Hostname = func() (string, error) { return config.Hostname, nil }
+	c.selfID, c.locked = "", false
+}
+
+// holdLock takes the updater lock with a descriptor of its own, standing in for
+// another updater that holds it, until the test ends.
+func holdLock(t *testing.T, c *dockerHelperController) {
+	t.Helper()
+	holder, err := openUpdaterLock(c.updaterDir(), c.options.RootUID, c.options.RootGID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { holder.close() })
+	if held, err := holder.tryLock(); !held || err != nil {
+		t.Fatal(held, err)
+	}
+}
+
+// An updater lock that does not open, as with a transient EMFILE or EIO on the
+// bind source, and one whose filesystem refuses flock for a moment, as a network
+// filesystem's lock manager may.
+func unopenableLock(string) (*updaterLock, error) {
+	return nil, fmt.Errorf("updater lock cannot be opened: %w", unix.EMFILE)
+}
+
+func unlockableLock(c *dockerHelperController) func(string) (*updaterLock, error) {
+	return func(dir string) (*updaterLock, error) {
+		lock, err := openUpdaterLock(dir, c.options.RootUID, c.options.RootGID)
+		if err == nil {
+			lock.flock = func(int, int) error { return unix.ENOLCK }
+		}
+		return lock, err
+	}
+}
+
+// AN UPDATER THAT CANNOT USE THE LOCK STILL NEVER ACTS BESIDE ONE THAT HOLDS IT.
+//
+// Running without the lock is the updater as it was before the handover existed,
+// and that is safe only where no other updater can be alive. A lock file that
+// will not open, or a filesystem that refuses flock for a moment, says nothing
+// about that; the journal does, because only a handover ever puts a second
+// updater beside the first. Here another updater holds the lock while a process
+// the journal names — the successor in standby, the predecessor restarted after
+// it gave its role away — or a stranger arriving mid-handover cannot use the lock
+// at all. None of them becomes the primary, and nothing the agent can see moves:
+// no marker, no heartbeat, no mode or owner, no receipt.
+func TestAnUpdaterWithoutTheLockNeverActsBesideItsHolder(t *testing.T) {
+	successor := func(f inFlight) (*dockerHelperController, string) { return f.s, f.h.SuccessorID }
+	predecessor := func(f inFlight) (*dockerHelperController, string) { return f.p, updaterFixtureID }
+	stranger := func(f inFlight) (*dockerHelperController, string) {
+		x := f.stranger(t, "node-updater-recreated")
+		return x, x.selfID
+	}
+	for _, tc := range []struct {
+		name    string
+		phase   string
+		process func(inFlight) (*dockerHelperController, string)
+		// unlockable is a lock that opens but whose flock the filesystem
+		// refuses; otherwise the lock does not open at all.
+		unlockable bool
+	}{
+		{name: "the successor in standby", phase: handoverCreated, process: successor},
+		{name: "the predecessor restarted after the commit", phase: handoverCommitted, process: predecessor},
+		{name: "the predecessor restarted after the handover completed", phase: handoverCompleted, process: predecessor},
+		{name: "a stranger mid-handover whose flock is refused", phase: handoverCreated, process: stranger, unlockable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := handoverInFlight(t)
+			writeControlMarkers(t, f.p)
+			h := f.h
+			if tc.phase != handoverCreated {
+				h = f.commit(t)
+				if tc.phase != handoverCommitted {
+					h.Phase = tc.phase
+					if err := f.p.writeHandover(h); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			c, self := tc.process(f)
+			playAs(t, c, f.e, self)
+			c.options.LockOpener = unopenableLock
+			if tc.unlockable {
+				c.options.LockOpener = unlockableLock(c)
+			}
+			holdLock(t, f.p)
+			before := agentVisible(t, f.p)
+			serving(t, c)
+			time.Sleep(200 * time.Millisecond)
+			sameVisible(t, before, agentVisible(t, f.p))
+			if c.primaryNow.Load() {
+				t.Fatal("an updater that could not use the lock ran as the primary beside its holder")
+			}
+		})
+	}
+}
+
+// AND IT STILL RUNS ALONE WHERE NOTHING ELSE CAN BE. With no journal, or a
+// finished one that gives this process no role but a candidate's and whose every
+// other container is gone, no other updater can be alive. One that cannot use the
+// lock is then the primary at once, unlocked, with the handover off: the updater
+// it always was.
+func TestAnUpdaterWithoutTheLockRunsAloneWhenNothingElseCanBe(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, *dockerHelperController)
+	}{
+		{name: "no journal"},
+		{name: "a finished handover whose successor is gone", setup: func(t *testing.T, c *dockerHelperController) {
+			seedHandover(t, c, handoverFixture(handoverAborted))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, logs := processFixture(t)
+			if tc.setup != nil {
+				tc.setup(t, c)
+			}
+			c.options.LockOpener = unopenableLock
+			serving(t, c)
+			waitFor(t, "the unlocked updater", func() bool { return c.primaryNow.Load() && controlPathExists(c, "heartbeat") })
+			if !strings.Contains(logs.String(), "handover: disabled (updater lock unusable") {
+				t.Fatalf("log:\n%s", logs)
+			}
+		})
+	}
+}
+
 // lockFreeIn reports whether a probe can take c's updater lock, which it gives
 // straight back.
 func lockFreeIn(c *dockerHelperController) bool {

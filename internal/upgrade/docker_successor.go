@@ -465,22 +465,15 @@ func (c *dockerHelperController) reclaim(ctx context.Context, h dockerHandover) 
 	return true
 }
 
-// tryLock takes the updater lock without waiting, opening this process's
-// descriptor first if it has none. It reports false, with no error, while
-// another process holds it.
+// tryLock takes the updater lock without waiting, first making sure of the
+// updater directory and opening this process's descriptor if it has none. It
+// reports false, with no error, while another process holds it; when the lock
+// would not open, it reports the error with no descriptor left open.
 func (c *dockerHelperController) tryLock() (bool, error) {
 	if c.lock == nil {
-		open := c.options.LockOpener
-		if open == nil {
-			open = func(dir string) (*updaterLock, error) {
-				return openUpdaterLock(dir, c.options.RootUID, c.options.RootGID)
-			}
-		}
-		lock, err := open(c.updaterDir())
-		if err != nil {
+		if err := c.openLock(); err != nil {
 			return false, err
 		}
-		c.lock = lock
 	}
 	held, err := c.lock.tryLock()
 	c.locked = held

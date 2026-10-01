@@ -207,13 +207,17 @@ func followOptOut(value string) bool {
 // back. Only the primary acts, and only the primary runs prepareControl — every
 // write the agent can see.
 //
-// WITHOUT A USABLE LOCK there is nothing to elect with, and nothing to hand over
-// to: the process is the primary at once, unlocked, with the handover off,
-// which is the updater as it was before the handover existed. That is a
-// filesystem without flock, an updater directory that is not root's alone, or a
-// lock file that cannot be opened. A process that cannot prove its own
-// container still competes for the lock — two updaters must never both act —
-// but never touches the journal, which it cannot know is about it.
+// WITHOUT A USABLE LOCK there is nothing to elect with — a filesystem without
+// flock, an updater directory that cannot be made root's alone, a lock file that
+// will not open — and the process may run as the primary unlocked, with the
+// handover off, which is the updater as it was before the handover existed. But
+// only when no other updater can be alive to act beside it (aloneWithoutLock):
+// the lock failing in this one process says nothing about whether a predecessor
+// still holds it. Otherwise the process takes the role the journal gives it, as
+// any other would, and a candidate keeps trying the lock, which a transient
+// failure gives back. A process that cannot prove its own container still
+// competes for the lock — two updaters must never both act — but never touches
+// the journal, which it cannot know is about it.
 func (c *dockerHelperController) serve(ctx context.Context) error {
 	if c.started.IsZero() {
 		c.started = c.now()
@@ -226,10 +230,8 @@ func (c *dockerHelperController) serve(ctx context.Context) error {
 		c.selfID = self.ID
 	}
 	lockable := true
-	if err := c.ensureUpdaterDir(); err != nil {
-		lockable, disabled = false, firstReason(disabled, "updater directory unusable: "+err.Error())
-	} else if err := c.openLock(); err != nil {
-		lockable, disabled = false, firstReason(disabled, "updater lock unusable: "+err.Error())
+	if err := c.openLock(); err != nil {
+		lockable, disabled = false, firstReason(disabled, err.Error())
 	}
 	if !releaseid.ValidVersion(c.options.Version) {
 		disabled = firstReason(disabled, fmt.Sprintf("compiled version %q is not a release", c.options.Version))
@@ -242,7 +244,7 @@ func (c *dockerHelperController) serve(ctx context.Context) error {
 	} else {
 		c.logf("handover: disabled (%s)", disabled)
 	}
-	if !lockable {
+	if !lockable && c.aloneWithoutLock(ctx) {
 		return c.unlocked(ctx)
 	}
 	for ctx.Err() == nil {
@@ -269,7 +271,7 @@ func (c *dockerHelperController) serve(ctx context.Context) error {
 			}
 		default:
 			held, err := c.compete(ctx)
-			if errors.Is(err, errFlockUnsupported) {
+			if err != nil {
 				c.logf("handover: disabled (%v)", err)
 				return c.unlocked(ctx)
 			}
@@ -299,9 +301,15 @@ func firstReason(current, next string) string {
 	return next
 }
 
-// openLock opens this process's descriptor of the updater lock, without taking
-// it.
+// openLock makes sure of the updater directory and opens this process's
+// descriptor of the lock in it, without taking it. It runs at the start and
+// again before every retry of a lock that would not open, so a directory that
+// was put right, or a failure that has passed, gives the lock back.
 func (c *dockerHelperController) openLock() error {
+	c.unlock()
+	if err := c.ensureUpdaterDir(); err != nil {
+		return fmt.Errorf("updater directory unusable: %w", err)
+	}
 	open := c.options.LockOpener
 	if open == nil {
 		open = func(dir string) (*updaterLock, error) {
@@ -310,32 +318,41 @@ func (c *dockerHelperController) openLock() error {
 	}
 	lock, err := open(c.updaterDir())
 	if err != nil {
-		return err
+		return fmt.Errorf("updater lock unusable: %w", err)
 	}
 	c.lock = lock
 	return nil
 }
 
 // compete is a candidate trying for the lock every Poll. It reports true once
-// it holds it; false when the journal no longer makes it a candidate or the
-// process is stopping; and errFlockUnsupported when the filesystem cannot elect
-// anyone at all.
+// it holds it, and false when the journal no longer makes it a candidate or the
+// process is stopping. It returns why the lock cannot be used at all — it will
+// not open, or the filesystem refuses flock — only when no other updater can be
+// alive (aloneWithoutLock), which is when the process may act without it; while
+// another may be, it keeps trying instead, because a lock that failed here may
+// still be held there.
 func (c *dockerHelperController) compete(ctx context.Context) (bool, error) {
 	poll := time.NewTicker(c.options.Poll)
 	defer poll.Stop()
 	said := ""
+	note := func(message string) {
+		if message != said {
+			said = message
+			c.logf("%s", message)
+		}
+	}
 	for {
 		held, err := c.tryLock()
 		switch {
-		case errors.Is(err, errFlockUnsupported):
-			return false, err
-		case err != nil:
-			if err.Error() != said {
-				said = err.Error()
-				c.logf("handover: the updater lock cannot be taken yet: %v", err)
-			}
 		case held:
 			return true, nil
+		case err != nil && (c.lock == nil || errors.Is(err, errFlockUnsupported)):
+			if c.aloneWithoutLock(ctx) {
+				return false, err
+			}
+			note(fmt.Sprintf("handover: the updater lock cannot be used (%v) and another updater may be acting; waiting for it", err))
+		case err != nil:
+			note(fmt.Sprintf("handover: the updater lock cannot be taken yet: %v", err))
 		}
 		select {
 		case <-ctx.Done():
@@ -350,8 +367,56 @@ func (c *dockerHelperController) compete(ctx context.Context) (bool, error) {
 	}
 }
 
+// aloneWithoutLock reports whether no other updater can be alive to act beside
+// this one, which is the only case in which it may act without the lock.
+//
+// WITHOUT THE LOCK, ONLY THE JOURNAL CAN SAY SO. Only a handover ever puts a
+// second updater beside the first, and every handover is in the journal, written
+// under a lock that worked on this very directory. So the process is alone when
+// there is no journal — or no updater directory any updater could have used — or
+// when the journal is finished, gives this process no role but a candidate's, and
+// every container it names other than this one inspects as gone. Anything it
+// cannot read or ask, it does not count as gone: a journal that does not decode,
+// a directory or a container the engine will not answer for. A process that
+// cannot prove its own container cannot tell itself from the containers the
+// journal names, and is alone only when none of them exists.
+func (c *dockerHelperController) aloneWithoutLock(ctx context.Context) bool {
+	info, err := os.Lstat(c.updaterDir())
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return true
+	case err != nil:
+		return false
+	case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+		// Every updater refuses it, so nothing in it was ever locked or written.
+		return true
+	}
+	journal, err := c.loadHandover()
+	switch {
+	case err != nil:
+		return false
+	case journal == nil:
+		return true
+	case !handoverTerminal(journal.Phase):
+		return false
+	}
+	if role, _ := classifyRole(journal, c.selfID); role != roleCandidate {
+		return false
+	}
+	for _, id := range []string{journal.PredecessorID, journal.SuccessorID} {
+		if id == "" || id == c.selfID {
+			continue
+		}
+		if _, err := c.handoverInspect(ctx, id); !errors.Is(err, errDockerNotFound) {
+			return false
+		}
+	}
+	return true
+}
+
 // unlocked is the updater without a lock: the primary at once, with nothing to
-// elect against and the handover off.
+// elect against and the handover off. Only a process that is alone
+// (aloneWithoutLock) runs it.
 func (c *dockerHelperController) unlocked(ctx context.Context) error {
 	c.unlock()
 	c.selfID = ""
