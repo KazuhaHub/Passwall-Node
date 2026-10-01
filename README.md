@@ -198,9 +198,12 @@ proved readiness with, that it would accept the Agent as its target and that it
 can do the updater's job, all without writing anything the Agent can see. Only
 then does the old updater hand over; the new one stops and removes it and takes
 its container name. Any failure before the hand-over removes the copy and leaves
-the old updater exactly as it was. The Agent is only ever inspected, and keeps
-serving throughout. For about fifteen seconds two updater containers exist;
-only the one holding the lock in `./upgrades/updater/` acts.
+the old updater exactly as it was. Stopping the old updater in the meantime
+leaves the copy for whichever updater runs next: the old one, started again,
+removes it; if the old one is removed instead, the copy, once it has proven
+itself, takes over. The Agent is only ever inspected, and keeps serving
+throughout. For about fifteen seconds two updater containers exist; only the one
+holding the lock in `./upgrades/updater/` acts.
 
 It follows only:
 

@@ -1065,6 +1065,44 @@ func TestHandoverCrashMatrix(t *testing.T) {
 	}
 }
 
+// COMPOSE CAN SCALE THE PREDECESSOR AWAY AND KEEP ITS SUCCESSOR. During standby
+// two containers carry the updater service's labels, and a plain `compose up`
+// reconciles them to one: which one it keeps depends on the Compose version. When
+// it keeps the successor it stops the predecessor through the API and removes it.
+// The predecessor, stopped, leaves the successor and the journal as they are, and
+// the successor — proven, its predecessor gone at two looks, the lock free —
+// abandons the handover, takes the lock and the canonical name, and is the one
+// updater left.
+func TestAPredecessorComposeScalesAwayIsSucceededByItsStandby(t *testing.T) {
+	h := newFakeHost(t)
+	h.base.StandbyWait, h.base.StabilityWindow = 20*time.Second, 10*time.Second
+	h.launch(updaterFixtureID)
+	h.eventually("the successor proven in standby", 5*time.Second, func() error {
+		if !h.proven() || h.phase() != handoverCreated {
+			return fmt.Errorf("journal %q, proven %v", h.phase(), h.proven())
+		}
+		return nil
+	})
+	ctx := t.Context()
+	successorID := h.journal().SuccessorID
+	if err := h.engine.StopContainer(ctx, updaterFixtureID); err != nil {
+		t.Fatal(err)
+	}
+	h.stopped(nil, updaterFixtureID)
+	if phase := h.phase(); phase != handoverCreated {
+		t.Fatalf("the stopped predecessor moved the journal to %s", phase)
+	}
+	if s, err := h.engine.InspectContainer(ctx, successorID); err != nil || !s.State.Running {
+		t.Fatalf("the stopped predecessor took its successor down: running %v (%v)\n%s", s.State.Running, err, h.logs)
+	}
+	if err := h.engine.RemoveContainer(ctx, updaterFixtureID, false); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("the standby to take over", 10*time.Second, func() error {
+		return h.matrixEnd(matrixWant{phase: handoverAbandoned, reason: "predecessor removed", successor: true})
+	})
+}
+
 // longerStability holds the commit off long enough for a successor-side fault
 // planned during the wait to land before it.
 func longerStability(h *fakeHost) { h.base.StabilityWindow = 300 * time.Millisecond }

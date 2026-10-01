@@ -4,6 +4,7 @@ package upgrade
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -480,6 +481,88 @@ func TestHandoverPreemptedRightBeforeTheCommit(t *testing.T) {
 	}
 	if h := readJournal(t, c); h.Phase != handoverAborted || h.Reason != handoverPreemptedReason {
 		t.Fatalf("journal %s %q, want a pre-emption", h.Phase, h.Reason)
+	}
+}
+
+// A PREDECESSOR STOPPED ONCE ITS SUCCESSOR IS RECORDED LEAVES IT STANDING. A stop
+// is SIGTERM to the updater, PID 1 in its container, and from the moment the
+// journal names the successor it is treated exactly as a crash at that step
+// would be: the journal and the successor are left for whichever updater holds
+// the lock next. That is the predecessor itself if it is started again, which
+// aborts the handover by the recorded ID; the successor if the predecessor is
+// removed instead, which abandons it and takes over; or a stranger, which aborts
+// it. Removing the successor on the way out would leave no updater at all when
+// what stops the predecessor is Compose scaling a two-container service back to
+// one, and keeping the successor. Before the successor is recorded, a stop still
+// aborts, and cleans up by name.
+func TestAStoppedPredecessorLeavesItsSuccessorStanding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// stop arranges for the predecessor's context to end at one step.
+		stop func(e *fakeDockerEngine, cancel context.CancelFunc)
+		// phase is how the journal is left; mutations, what reached the engine.
+		phase     string
+		mutations []string
+		running   bool
+	}{
+		{name: "before the successor is created", phase: handoverAborted, mutations: nil,
+			stop: func(e *fakeDockerEngine, cancel context.CancelFunc) {
+				e.onInspect = func(target string) (dockerContainer, bool) {
+					if strings.HasPrefix(target, "node-updater-next-") {
+						cancel()
+					}
+					return dockerContainer{}, false
+				}
+			}},
+		{name: "once the successor is recorded, before it is checked", phase: handoverCreated, mutations: []string{"create"},
+			stop: func(e *fakeDockerEngine, cancel context.CancelFunc) {
+				e.onCreate = func(string, string) { cancel() }
+			}},
+		{name: "while the successor proves itself", phase: handoverCreated, mutations: []string{"create", "start"}, running: true,
+			stop: func(e *fakeDockerEngine, cancel context.CancelFunc) {
+				afterStart(e, func(string) { time.AfterFunc(50*time.Millisecond, cancel) })
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, e, logs := predecessorFixture(t)
+			c.options.StandbyWait, c.options.StabilityWindow = 10*time.Second, 5*time.Second
+			standIn(t, c, e, honestProof)
+			target, err := c.followTarget(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			tc.stop(e, cancel)
+			started := time.Now()
+			if err := c.handOver(ctx, target); err != nil {
+				t.Fatalf("handOver = %v after its stop, want nil", err)
+			}
+			if time.Since(started) > 2*time.Second {
+				t.Fatalf("the stop was honoured after %s", time.Since(started))
+			}
+			h := readJournal(t, c)
+			if h.Phase != tc.phase {
+				t.Fatalf("journal %s %q, want %s", h.Phase, h.Reason, tc.phase)
+			}
+			var done []string
+			for _, op := range mutations(e) {
+				done = append(done, op.op)
+			}
+			if !slices.Equal(done, tc.mutations) {
+				t.Fatalf("mutations %v, want %v", done, tc.mutations)
+			}
+			if tc.phase != handoverCreated {
+				return
+			}
+			successor, err := e.InspectContainer(t.Context(), h.SuccessorID)
+			if err != nil || successor.State.Running != tc.running {
+				t.Fatalf("the successor is running %v (%v), want %v", successor.State.Running, err, tc.running)
+			}
+			if !strings.Contains(logs.String(), "handover "+h.ID[:8]+": stopped before the commit; ") {
+				t.Fatalf("log:\n%s", logs)
+			}
+		})
 	}
 }
 

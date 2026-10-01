@@ -113,8 +113,8 @@ jobs:
     needs: assumptions
     runs-on: ${{ matrix.runner }}
     # The scenarios run on the updater's production timers — a thirty-second
-    # settle, a sixty-second standby wait — about twenty minutes in all, after two
-    # image builds.
+    # settle, a sixty-second standby wait — about twenty-five minutes in all,
+    # after two image builds.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -176,7 +176,7 @@ jobs:
       # a SKIP anywhere in it is a scenario that did not run. That check is
       # inverted with `!`, which exempts a command from `set -e`, so it only fails
       # the step as the script's last command.
-      - name: The updater follows the agent onto its image (E1-E9)
+      - name: The updater follows the agent onto its image (E1-E10)
         env:
           PN_DOCKER_UPDATER_E2E: "1"
           PN_E2E_UPDATER_VERSION: 4.0.99.1

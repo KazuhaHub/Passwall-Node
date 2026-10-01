@@ -77,6 +77,7 @@ func TestDockerUpdaterFollowsAgentE2E(t *testing.T) {
 	t.Run("E7 an agent request pre-empts the handover and the predecessor answers it", h.preempted)
 	t.Run("E8 a compose recreate mid-handover leaves one primary updater", h.stranger)
 	t.Run("E9 the opt-out keeps the updater where it is", h.optedOut)
+	t.Run("E10 a plain compose up mid-handover leaves one primary updater", h.composeReconciles)
 	h.assertNothingPulled(t)
 }
 
@@ -513,12 +514,13 @@ func (h *handoverE2E) preempted(t *testing.T) {
 //
 // WHAT COMPOSE DOES HERE IS NOT THE UPDATER'S, AND IT IS NOT SETTLED. With two
 // containers of a one-container service it recreates one and scales the other away
-// at the same moment, while the predecessor, stopped, is removing its successor
-// too; the rename onto the service's name can then find it still taken, or a
-// removal find its container gone, and Compose exits with an error. An operator
-// who sees that runs the command again, and so does this, once, saying so. The
-// updater's side is asserted either way; the name is asserted only when Compose
-// finished its own job the first time.
+// at the same moment, and which one it keeps differs between its releases. The
+// predecessor, stopped, leaves its successor standing, as it would had it crashed,
+// so nothing the updater does races Compose's own removals; should Compose still
+// exit with an error — the rename onto the service's name finding it taken, say —
+// an operator who sees that runs the command again, and so does this, once, saying
+// so. The updater's side is asserted either way; the name is asserted only when
+// Compose finished its own job the first time.
 func (h *handoverE2E) stranger(t *testing.T) {
 	r := h.start(t, "e8-stranger", handoverComposePSP, handoverStart{})
 	created := r.waitPhase(90*time.Second, "", handoverCreated)
@@ -569,6 +571,55 @@ func (h *handoverE2E) stranger(t *testing.T) {
 	// stranger aborts a handover that never committed and supersedes one that did.
 	if phases := r.sampler.phasesOf(created.ID); !slices.Contains(phases, handoverAborted) && !slices.Contains(phases, handoverSuperseded) {
 		t.Errorf("the interrupted handover went %v, want it aborted or superseded", phases)
+	}
+	r.endExemption(t)
+	r.finish()
+}
+
+// A PLAIN COMPOSE UP MID-HANDOVER. During standby two containers carry the updater
+// service's labels, and `compose up` reconciles them to the one the service asks
+// for. Which one it keeps is Compose's choice and differs between its releases;
+// the runner's Compose may only ever show one of the two. Either way exactly one
+// updater is left, under the service's name, and it is the primary. If Compose
+// keeps the predecessor, the successor it took away is one that stopped, and the
+// handover aborts — or, had it already committed, the predecessor reclaims the
+// role once the successor never takes it. If Compose keeps the successor, the
+// predecessor it stopped leaves the successor standing, since a stop is treated as
+// a crash, and the successor, once it sees the predecessor gone, abandons the
+// handover and takes over — or, had it already committed, finishes it.
+func (h *handoverE2E) composeReconciles(t *testing.T) {
+	r := h.start(t, "e10-compose-up", handoverComposePSP, handoverStart{})
+	created := r.waitPhase(90*time.Second, "", handoverCreated)
+	r.waitRunning(t, created.SuccessorID)
+	r.exempt(true, false)
+	r.mustCompose("up", "--detach", "--pull", "never", handoverUpdaterService)
+	var kept handoverListed
+	r.wait(t, 5*time.Minute, "one primary updater after compose up", func() (bool, error) {
+		journal, err := r.journal()
+		if err != nil || journal == nil || journal.ID != created.ID || !handoverTerminal(journal.Phase) {
+			return false, err
+		}
+		updaters, err := r.updaters(t.Context())
+		if err != nil {
+			return false, err
+		}
+		if len(updaters) != 1 {
+			return false, fmt.Errorf("%d updater containers", len(updaters))
+		}
+		kept = updaters[0]
+		age, err := r.heartbeatAge()
+		return err == nil && age < 6*time.Second && kept.State == "running" && slices.Equal(kept.Names, []string{"/" + r.compose.updater}), err
+	})
+	journal := r.mustJournal(t)
+	t.Logf("compose kept %s; the handover ended %s (%s)", kept.ID[:12], journal.Phase, journal.Reason)
+	switch {
+	case kept.ID == r.predecessor.ID && (journal.Phase == handoverAborted || journal.Phase == handoverReverted):
+		r.wantGone(t, created.SuccessorID)
+	case kept.ID == created.SuccessorID && (journal.Phase == handoverAbandoned || journal.Phase == handoverCompleted):
+		r.wantGone(t, r.predecessor.ID)
+	default:
+		t.Errorf("compose kept %s and the handover ended %s: neither the predecessor with the role kept or taken back, nor the successor with it taken over",
+			kept.ID[:12], journal.Phase)
 	}
 	r.endExemption(t)
 	r.finish()

@@ -221,7 +221,7 @@ core 选择仍是 declarative `ConfigBody.Core`，TLS material 仍随配置内�
 updater 自己成功升级装上的、更高版本、本机架构、带 `io.kazuhahub.passwall-node.updater-handover` 标签的镜像；
 `PSP_NODE_UPDATER_FOLLOW_AGENT=false` 可关闭。4.0.1.6 及更早的 updater 没有这段代码，须手动重建一次。
 信任基础不变（官方仓库、精确标签与标签、已作为 Agent 证明、只升不降、二进制 digest 绑定）；签名 digest
-校验是后续项。真实 Docker 验证在独立的 `docker-updater.yml`（A1–A9 探针、E1–E9 端到端），不在 test.yml、
+校验是后续项。真实 Docker 验证在独立的 `docker-updater.yml`（A1–A9 探针、E1–E10 端到端），不在 test.yml、
 不自动阻塞发布：含此改动的版本须等它在发布提交上两架构全绿后再打 tag。详见 README「The updater follows
 the Agent」与 `internal/upgrade/ACCEPTANCE.md`。
 

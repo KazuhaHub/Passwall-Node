@@ -84,7 +84,8 @@ func (c *dockerHelperController) followAgent(ctx context.Context) error {
 // the one decision point.
 //
 // It returns errHandoverCommitted after the commit, nil after an abort (which
-// it has logged), and an error only if the handover could not even be recorded.
+// it has logged) or a stop that left the handover to the next lock holder, and
+// an error only if the handover could not even be recorded.
 func (c *dockerHelperController) handOver(ctx context.Context, t handoverTarget) error {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
@@ -123,14 +124,30 @@ func (c *dockerHelperController) handOver(ctx context.Context, t handoverTarget)
 	h = created
 	c.logf("handover %s: following agent %s (image %s); successor %s created", id[:8], t.version, shortImageID(t.image.ID), h.SuccessorName)
 
+	// FROM HERE ON, A STOP IS A CRASH. A stop is SIGTERM to this process, and
+	// once the journal names the successor this process leaves it, and the
+	// journal, exactly as a crash at this step would: whichever updater holds the
+	// lock next decides. That is this one, started again, which aborts by the
+	// recorded ID; the successor, if this container is removed instead, which
+	// abandons the handover and takes over; or a stranger, which aborts it.
+	// Removing the successor on the way out would be right only if this
+	// container were coming back, and what stops it may be Compose scaling the
+	// service back to one container — and keeping the successor.
+	abort := func(reason string) error {
+		if ctx.Err() != nil {
+			c.logf("handover %s: stopped before the commit; %s and the journal are left to whichever updater holds the lock next", id[:8], h.SuccessorName)
+			return nil
+		}
+		return c.abortHandover(ctx, h, "", false, reason)
+	}
 	if err := c.verifySuccessor(ctx, h, t); err != nil {
-		return c.abortHandover(ctx, h, "", false, "successor differs from this updater: "+err.Error())
+		return abort("successor differs from this updater: " + err.Error())
 	}
 	if _, err := c.mutate(ctx, updaterMutation{op: "start", target: h.SuccessorID}); err != nil {
-		return c.abortHandover(ctx, h, "", false, "successor could not be started")
+		return abort("successor could not be started")
 	}
 	if reason := c.waitStandby(ctx, h); reason != "" {
-		return c.abortHandover(ctx, h, "", false, reason)
+		return abort(reason)
 	}
 	return c.commitHandover(ctx, h)
 }
@@ -321,7 +338,9 @@ func (c *dockerHelperController) commitHandover(ctx context.Context, h dockerHan
 //
 // THE ABORT IS RECORDED EVEN IF THE REMOVAL FAILED. A surviving successor reads
 // aborted and retires, and the next handover waits until it is gone. The cleanup
-// runs on its own budget, past a cancelled context, like a rollback.
+// runs on its own budget, past a cancelled context, like a rollback: a stop
+// before the successor is recorded still has to find it by name. Once it is
+// recorded, handOver does not abort for a stop at all.
 func (c *dockerHelperController) abortHandover(ctx context.Context, h dockerHandover, known string, byName bool, reason string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), durationOr(c.options.AbortBudget, dockerAbortBudget))
 	defer cancel()

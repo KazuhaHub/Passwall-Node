@@ -153,7 +153,7 @@ func TestTheDockerUpdaterWorkflowRunsTheHandoverEndToEnd(t *testing.T) {
 		t.Error("the handover job runs TestDockerUpdaterFollowsAgentE2E, which docker_handover_e2e_linux_test.go does not define")
 	}
 
-	script := extractStepScript(t, job, "      - name: The updater follows the agent onto its image (E1-E9)\n")
+	script := extractStepScript(t, job, "      - name: The updater follows the agent onto its image (E1-E10)\n")
 	run := func(t *testing.T, log string, status int) (string, error) {
 		t.Helper()
 		work := t.TempDir()

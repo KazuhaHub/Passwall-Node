@@ -113,6 +113,13 @@ sampled.
   logged and the command run once more, as an operator would.
 - E9: `PSP_NODE_UPDATER_FOLLOW_AGENT=false` logs `handover: disabled (opt-out)`
   and creates nothing.
+- E10: a plain `compose up -d` mid-handover, which reconciles the two containers
+  carrying the updater service's labels to one, leaves exactly one updater under
+  the service's name, the primary. Which container Compose keeps differs between
+  its releases and both are accepted: the predecessor, with the handover aborted,
+  or the successor, which the stopped predecessor left standing and which then
+  took over. The runner's Compose may show only one of the two; the other is
+  unit-tested against the fake engine.
 
 Boundaries: the agent upgrade that would install the newer image is not run —
 that needs a PSP authorization and a registry answering as `ghcr.io` — and the
