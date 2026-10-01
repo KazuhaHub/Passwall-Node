@@ -91,6 +91,11 @@ type dockerHelperOptions struct {
 	// LockOpener opens the updater lock in the updater directory. Nil means
 	// openUpdaterLock with RootUID and RootGID.
 	LockOpener func(dir string) (*updaterLock, error)
+	// ReclaimMinAge, ReclaimCheck and HeartbeatStale are the retired
+	// predecessor's reclaim predicate: how long after the commit, how often it
+	// looks, and how old a heartbeat counts as stale. Zero means
+	// dockerReclaimMinAge, dockerReclaimCheck and dockerHeartbeatStale.
+	ReclaimMinAge, ReclaimCheck, HeartbeatStale time.Duration
 }
 
 // dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
@@ -118,6 +123,9 @@ type dockerHelperController struct {
 	// tidyNote is the last thing tidying logged, so a condition that persists
 	// is logged once.
 	tidyNote string
+	// started is when this process started, which bounds how soon a retired
+	// predecessor may reclaim.
+	started time.Time
 }
 
 type dockerTransaction struct {

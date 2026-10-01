@@ -25,6 +25,13 @@ const (
 	// handoverUpgradeContract is the upgrade contract a v1 handover is between:
 	// a successor that speaks another one may not take the role over.
 	handoverUpgradeContract = 1
+	// The reclaim predicate: no sooner than dockerReclaimMinAge after the
+	// commit, looked at every dockerReclaimCheck, with a heartbeat older than
+	// dockerHeartbeatStale at two looks in a row — which is also the agent's
+	// own freshness bound, so the agent already sees no updater.
+	dockerReclaimMinAge  = 2 * time.Minute
+	dockerReclaimCheck   = 30 * time.Second
+	dockerHeartbeatStale = 30 * time.Second
 )
 
 // standby is a successor before the commit. It reports whether it rolled
@@ -377,6 +384,85 @@ func (c *dockerHelperController) tidyLog(message string) {
 		c.tidyNote = message
 		c.logf("%s", message)
 	}
+}
+
+// retiredWatch is a predecessor after its commit: retired, unless its successor
+// never manages to act. It reports whether it reclaimed the role, holding the
+// lock as the primary; otherwise it returns when the journal moves on — the
+// role loop then finds it plainly retired — or the process is stopping.
+//
+// IT NEVER RECLAIMS MERELY BECAUSE THE LOCK IS FREE FOR A MOMENT. A healthy
+// successor stops this predecessor within seconds of the commit, so the watch
+// exists only for one that never runs as primary: crash-looping, or failing its
+// prepareControl. Every condition has to hold: the journal still committed and
+// naming this process; at least ReclaimMinAge past the later of the commit and
+// this process's own start; the heartbeat stale at this look and the one
+// before, so a single restart of a healthy successor — stale for one look at
+// most — is not a reason; and the lock free.
+func (c *dockerHelperController) retiredWatch(ctx context.Context, h dockerHandover) bool {
+	since := c.now()
+	if c.started.After(since) {
+		since = c.started
+	}
+	minAge := durationOr(c.options.ReclaimMinAge, dockerReclaimMinAge)
+	look := time.NewTicker(durationOr(c.options.ReclaimCheck, dockerReclaimCheck))
+	defer look.Stop()
+	staleBefore := false
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-look.C:
+		}
+		if journal, _ := c.readHandover(false); journal == nil || journal.ID != h.ID ||
+			journal.Phase != handoverCommitted || journal.PredecessorID != c.selfID {
+			return false
+		}
+		now := c.now()
+		stale := c.heartbeatStale(now)
+		due := stale && staleBefore && now.Sub(since) >= minAge
+		staleBefore = stale
+		if due && c.reclaim(ctx, h) {
+			return true
+		}
+	}
+}
+
+// heartbeatStale reports whether nobody has proven an updater alive lately.
+func (c *dockerHelperController) heartbeatStale(now time.Time) bool {
+	info, err := os.Stat(filepath.Join(c.options.ControlDir, "heartbeat"))
+	return err != nil || now.Sub(info.ModTime()) > durationOr(c.options.HeartbeatStale, dockerHeartbeatStale)
+}
+
+// reclaim takes the role back from a successor that never acted: under the
+// lock, and only if the journal read again under it is still committed to this
+// predecessor. The handover is recorded reverted — a failed attempt, with its
+// back-off — and the successor is stopped and removed; what this process then
+// runs is the ordinary primary, whose recovery handles any agent swap the
+// successor left in flight, and whose tidying finishes what this could not.
+func (c *dockerHelperController) reclaim(ctx context.Context, h dockerHandover) bool {
+	if held, err := c.tryLock(); !held || err != nil {
+		return false
+	}
+	journal, err := c.readHandover(true)
+	if err != nil || journal == nil || journal.ID != h.ID || journal.Phase != handoverCommitted || journal.PredecessorID != c.selfID {
+		c.unlock()
+		return false
+	}
+	const reason = "successor never took over"
+	reverted := *journal
+	reverted.Phase, reverted.Reason = handoverReverted, reason
+	reverted.NotBeforeUnix = handoverNotBefore(journal.Attempt, reason, c.now())
+	if err := c.writeHandover(reverted); err != nil {
+		c.unlock()
+		return false
+	}
+	c.logf("handover %s: successor %s never took over and the heartbeat is stale; reclaimed the updater role, attempt %d/%d",
+		h.ID[:8], shortID(journal.SuccessorID), journal.Attempt, handoverMaxAttempts)
+	if err := c.removeUpdater(ctx, journal.SuccessorID); err != nil {
+		c.logf("handover %s: successor %s could not be removed (%v); tidying will retry", h.ID[:8], shortID(journal.SuccessorID), err)
+	}
+	return true
 }
 
 // tryLock takes the updater lock without waiting, opening this process's
