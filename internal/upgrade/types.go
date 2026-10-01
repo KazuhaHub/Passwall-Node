@@ -30,6 +30,10 @@ const (
 	DockerLabelAgentID         = "io.kazuhahub.passwall-node.agent-id"
 	DockerLabelStateSchema     = "io.kazuhahub.passwall-node.state-schema"
 	DockerLabelUpgradeContract = "io.kazuhahub.passwall-node.upgrade-contract"
+	// DockerLabelUpdaterHandover lists, comma-separated, the updater handover
+	// protocols an image's updater speaks. It is a label rather than a field of
+	// BuildInfo so that no strictly decoded document changes shape.
+	DockerLabelUpdaterHandover = "io.kazuhahub.passwall-node.updater-handover"
 )
 
 type Args = protocol.AgentUpgradeArgs
