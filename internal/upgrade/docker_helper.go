@@ -48,6 +48,13 @@ type dockerHelperOptions struct {
 	// step is bounded only by the client's five-minute timeout. Zero means
 	// dockerHandoverCallBudget.
 	HandoverCallBudget time.Duration
+	// RootUID and RootGID own the root-only updater directory, its lock and the
+	// handover journal. Their zero values are root, which is production; tests
+	// set their own IDs so they run unprivileged.
+	RootUID, RootGID uint32
+	// Now is the wall clock the handover's back-off is measured on. Nil means
+	// time.Now.
+	Now func() time.Time
 }
 
 // dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
