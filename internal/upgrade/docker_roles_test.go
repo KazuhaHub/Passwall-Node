@@ -129,7 +129,12 @@ func TestRunDockerHelperStartsPrimaryOnlyWithLock(t *testing.T) {
 		}
 		serving(t, c)
 		waitFor(t, "the unlocked updater", func() bool { return controlPathExists(c, "heartbeat") })
-		if !strings.Contains(logs.String(), "handover: disabled (") || !strings.Contains(logs.String(), "flock") {
+		// ONE STARTUP LINE, AND THE RIGHT ONE. Opening the lock file proves
+		// nothing about flock, so the updater does not say lock=ok before an
+		// flock has answered; here the first one refuses.
+		first, _, _ := strings.Cut(logs.String(), "\n")
+		if !strings.HasPrefix(first, "handover: disabled (") || !strings.Contains(first, "flock") ||
+			strings.Contains(logs.String(), "handover: enabled") {
 			t.Fatalf("log:\n%s", logs)
 		}
 	})
@@ -191,12 +196,20 @@ func TestStandbyAndRetiredNeverWritePrepareControlPaths(t *testing.T) {
 			_ = json.Unmarshal(container.Config, &config)
 			c.options.Hostname = func() (string, error) { return config.Hostname, nil }
 			c.selfID = ""
+			logs := &lockedBuffer{}
+			c.options.Logger = log.New(logs, "", 0)
 			before := agentVisible(t, f.p)
 			serving(t, c)
 			time.Sleep(200 * time.Millisecond)
 			sameVisible(t, before, agentVisible(t, f.p))
 			if c.primaryNow.Load() || !lockFreeIn(c) {
 				t.Fatal("a standby or retired updater took the lock")
+			}
+			// It never takes an flock, but a predecessor took one on this very
+			// directory to write the journal that gives it this role, so the lock
+			// works here and it says so.
+			if first, _, _ := strings.Cut(logs.String(), "\n"); first != "handover: enabled self="+self[:12]+" lock=ok" {
+				t.Fatalf("log:\n%s", logs)
 			}
 		})
 	}

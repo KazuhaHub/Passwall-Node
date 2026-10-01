@@ -133,6 +133,9 @@ type dockerHelperController struct {
 	// primaryNow is true while this process runs as the primary. It is read
 	// from outside the process's goroutine, by tests that count primaries.
 	primaryNow atomic.Bool
+	// announced is whether this process has said, once, whether the handover is
+	// enabled.
+	announced bool
 }
 
 type dockerTransaction struct {
@@ -239,10 +242,14 @@ func (c *dockerHelperController) serve(ctx context.Context) error {
 	if c.options.FollowOptOut {
 		disabled = firstReason(disabled, "opt-out")
 	}
-	if disabled == "" {
-		c.logf("handover: enabled self=%s lock=ok", shortID(c.selfID))
-	} else {
-		c.logf("handover: disabled (%s)", disabled)
+	// A REASON TO DISABLE IS SAID AT ONCE; "ENABLED" WAITS FOR AN flock TO ANSWER.
+	// Opening the lock file proves nothing about flock, and a filesystem that
+	// refuses it says so only when the lock is first tried, so lock=ok is said
+	// only once an flock has worked here: taken, refused as held, or — for a
+	// successor or a retired predecessor, which never take it — implied by the
+	// journal a predecessor wrote under it.
+	if disabled != "" {
+		c.announce(disabled)
 	}
 	if !lockable && c.aloneWithoutLock(ctx) {
 		return c.unlocked(ctx)
@@ -253,6 +260,9 @@ func (c *dockerHelperController) serve(ctx context.Context) error {
 			c.logf("handover: the journal cannot be read: %v", err)
 		}
 		role, _ := classifyRole(journal, c.selfID)
+		if role != roleCandidate {
+			c.announce("")
+		}
 		switch role {
 		case roleRetired:
 			// Returning would only let the restart policy start this container
@@ -272,7 +282,7 @@ func (c *dockerHelperController) serve(ctx context.Context) error {
 		default:
 			held, err := c.compete(ctx)
 			if err != nil {
-				c.logf("handover: disabled (%v)", err)
+				c.announce(err.Error())
 				return c.unlocked(ctx)
 			}
 			if !held {
@@ -292,6 +302,20 @@ func (c *dockerHelperController) serve(ctx context.Context) error {
 		c.unlock()
 	}
 	return nil
+}
+
+// announce says, once, whether the handover is enabled: disabled for a reason,
+// or, with none, enabled.
+func (c *dockerHelperController) announce(disabled string) {
+	if c.announced {
+		return
+	}
+	c.announced = true
+	if disabled != "" {
+		c.logf("handover: disabled (%s)", disabled)
+		return
+	}
+	c.logf("handover: enabled self=%s lock=ok", shortID(c.selfID))
 }
 
 func firstReason(current, next string) string {
@@ -345,13 +369,17 @@ func (c *dockerHelperController) compete(ctx context.Context) (bool, error) {
 		held, err := c.tryLock()
 		switch {
 		case held:
+			c.announce("")
 			return true, nil
-		case err != nil && (c.lock == nil || errors.Is(err, errFlockUnsupported)):
+		case err == nil:
+			// Held by another process, which is flock working.
+			c.announce("")
+		case c.lock == nil || errors.Is(err, errFlockUnsupported):
 			if c.aloneWithoutLock(ctx) {
 				return false, err
 			}
 			note(fmt.Sprintf("handover: the updater lock cannot be used (%v) and another updater may be acting; waiting for it", err))
-		case err != nil:
+		default:
 			note(fmt.Sprintf("handover: the updater lock cannot be taken yet: %v", err))
 		}
 		select {

@@ -295,8 +295,8 @@ func (h *handoverE2E) start(t *testing.T, name string, compose handoverCompose, 
 	if r.predecessor.Image != h.updaterImage.ID {
 		t.Fatalf("the updater runs %s, want the updater image %s", r.predecessor.Image, h.updaterImage.ID)
 	}
-	// THE UPDATER SAYS WHAT IT IS ON ITS FIRST LINE: this is where a host whose
-	// mountinfo or flock the updater cannot use would show.
+	// THE UPDATER SAYS WHAT IT IS ONCE, as soon as its lock has answered: this is
+	// where a host whose mountinfo or flock the updater cannot use would show.
 	startup := "handover: enabled self=" + r.predecessor.ID[:12] + " lock=ok"
 	if options.optOut {
 		startup = "handover: disabled (opt-out)"
@@ -625,8 +625,8 @@ func (h *handoverE2E) composeReconciles(t *testing.T) {
 	r.finish()
 }
 
-// THE OPT-OUT. The updater says so on its first line and again when it would have
-// looked, and creates nothing.
+// THE OPT-OUT. The updater says so at start and again when it would have looked,
+// and creates nothing.
 func (h *handoverE2E) optedOut(t *testing.T) {
 	r := h.start(t, "e9-opt-out", handoverComposePSP, handoverStart{optOut: true})
 	r.waitLog(r.predecessor.ID, 90*time.Second, "handover: not following the agent (opt-out)")
