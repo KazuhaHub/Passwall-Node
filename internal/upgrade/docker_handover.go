@@ -41,19 +41,24 @@ var errHandoverCommitted = errors.New("the updater role was committed to a succe
 // never be in progress at once in one process.
 //
 // Only the cheap checks run on every tick; the evaluation runs when followState
-// says it can have a new answer. A refusal is logged once per reason and
-// changes nothing. It returns errHandoverCommitted once this process has handed
-// its role to a successor.
+// says it can have a new answer, and tidies before it decides. A refusal is
+// logged once per reason and changes nothing. A successor that could not yet
+// stop its predecessor retries here too, on its own schedule. It returns
+// errHandoverCommitted once this process has handed its role to a successor.
 func (c *dockerHelperController) followAgent(ctx context.Context) error {
 	if c.selfID == "" || !c.locked {
 		return nil
 	}
 	now := c.now()
+	if !c.finishAt.IsZero() && !now.Before(c.finishAt) {
+		c.reconcile(ctx)
+	}
 	if !c.follow.due(now, c.slotKey(), durationOr(c.options.FollowSettle, dockerFollowSettle),
 		durationOr(c.options.FollowInterval, dockerFollowInterval)) {
 		return nil
 	}
 	c.follow.evaluated(now)
+	c.tidy(ctx)
 	target, err := c.followTarget(ctx)
 	if err != nil {
 		if reason := err.Error(); reason != c.follow.refusal {
@@ -86,14 +91,7 @@ func (c *dockerHelperController) handOver(ctx context.Context, t handoverTarget)
 		return fmt.Errorf("handover identity could not be generated: %w", err)
 	}
 	id := hex.EncodeToString(raw)
-	h := dockerHandover{
-		ID: id, Phase: handoverPrepared, Attempt: t.attempt,
-		CanonicalName: t.canonical, SuccessorName: t.canonical + "-next-" + id[:8], RetiredName: t.canonical + "-retired-" + id[:8],
-		PredecessorID: t.self.ID, PredecessorImageID: t.self.Image, PredecessorVersion: c.options.Version,
-		ImageID: t.image.ID, ImageReference: t.reference, Version: t.version,
-		AgentContainerID: t.agent.ID, AgentBinarySHA256: t.evidence.BinarySHA256, EvidenceTaskID: t.evidence.TaskID,
-		RequestSHA256: t.requestSHA256,
-	}
+	h := c.preparedHandover(t, id)
 	if err := c.writeHandover(h); err != nil {
 		return fmt.Errorf("handover %s could not be prepared: %w", id[:8], err)
 	}
@@ -135,6 +133,18 @@ func (c *dockerHelperController) handOver(ctx context.Context, t handoverTarget)
 		return c.abortHandover(ctx, h, "", false, reason)
 	}
 	return c.commitHandover(ctx, h)
+}
+
+// preparedHandover is the journal a handover of t under this id begins with.
+func (c *dockerHelperController) preparedHandover(t handoverTarget, id string) dockerHandover {
+	return dockerHandover{
+		ID: id, Phase: handoverPrepared, Attempt: t.attempt,
+		CanonicalName: t.canonical, SuccessorName: t.canonical + "-next-" + id[:8], RetiredName: t.canonical + "-retired-" + id[:8],
+		PredecessorID: t.self.ID, PredecessorImageID: t.self.Image, PredecessorVersion: c.options.Version,
+		ImageID: t.image.ID, ImageReference: t.reference, Version: t.version,
+		AgentContainerID: t.agent.ID, AgentBinarySHA256: t.evidence.BinarySHA256, EvidenceTaskID: t.evidence.TaskID,
+		RequestSHA256: t.requestSHA256,
+	}
 }
 
 // verifySuccessor checks the created successor before anything starts it.

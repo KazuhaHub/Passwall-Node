@@ -83,6 +83,14 @@ type dockerHelperOptions struct {
 	// are where a handover changes state without an engine call, and a test has
 	// to be able to fail exactly one of them.
 	JournalFault func(next dockerHandover) error
+	// StandbyCheck is how often a successor in standby retries its checks,
+	// AbandonCheck how often it looks for its predecessor, and FinishRetry how
+	// often a successor that took over retries stopping its predecessor. Zero
+	// means dockerStandbyCheck, dockerAbandonCheck and dockerFinishRetry.
+	StandbyCheck, AbandonCheck, FinishRetry time.Duration
+	// LockOpener opens the updater lock in the updater directory. Nil means
+	// openUpdaterLock with RootUID and RootGID.
+	LockOpener func(dir string) (*updaterLock, error)
 }
 
 // dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
@@ -101,6 +109,15 @@ type dockerHelperController struct {
 	locked bool
 	// follow is when this primary evaluates following the agent.
 	follow followState
+	// lock is this process's descriptor of the updater lock, open while it holds
+	// the lock or is trying for it.
+	lock *updaterLock
+	// finishAt is when a successor whose predecessor could not be stopped tries
+	// again; zero when nothing is pending.
+	finishAt time.Time
+	// tidyNote is the last thing tidying logged, so a condition that persists
+	// is logged once.
+	tidyNote string
 }
 
 type dockerTransaction struct {

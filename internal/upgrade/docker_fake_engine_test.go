@@ -95,6 +95,9 @@ type fakeDockerEngine struct {
 	// loseCreate makes the next create take effect and then fail, as a create
 	// whose answer was lost on the way back does.
 	loseCreate bool
+	// onStop runs after a stop took effect, with the target as it was
+	// addressed.
+	onStop func(string)
 }
 
 type fakeRemoval struct {
@@ -272,7 +275,11 @@ func (f *fakeDockerEngine) StopContainer(ctx context.Context, target string) err
 	container.State.Running = false
 	f.containers[name] = container
 	slow := f.slowStop[name] || f.slowStop[container.ID]
+	onStop := f.onStop
 	f.mu.Unlock()
+	if onStop != nil {
+		onStop(target)
+	}
 	if slow {
 		<-ctx.Done()
 		return errDockerUnavailable
