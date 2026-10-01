@@ -320,11 +320,15 @@ func (p *dockerProbe) probeMountinfo(t *testing.T) {
 		id := p.run(t, "a1-"+network, "--network", network, "--restart", "no", p.imageA)
 		container := p.mustInspect(t, id)
 		report := p.report(t, id)
-		mounted, line, err := dockerHostnameMountID(report.Mountinfo)
+		mounted, err := parseMountinfoSelfID(report.Mountinfo)
 		if err != nil {
 			t.Fatalf("network %s: %v\n%s", network, err, report.Mountinfo)
 		}
-		t.Logf("network %s: %s", network, line)
+		for _, line := range strings.Split(report.Mountinfo, "\n") {
+			if strings.Contains(line, " /etc/hostname ") {
+				t.Logf("network %s: %s", network, line)
+			}
+		}
 		if mounted != container.ID {
 			t.Errorf("network %s: the /etc/hostname mount names %s, but the container is %s", network, mounted, container.ID)
 		}
@@ -573,7 +577,7 @@ func (p *dockerProbe) probeHostname(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := p.report(t, own)
-	mounted, _, err := dockerHostnameMountID(report.Mountinfo)
+	mounted, err := parseMountinfoSelfID(report.Mountinfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -935,33 +939,6 @@ func (p *dockerProbe) wait(t *testing.T, within time.Duration, what string, done
 }
 
 var dockerProbeContainerID = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
-// dockerHostnameRoot matches the root of the /etc/hostname bind mount, which Docker
-// serves from <data-root>/containers/<id>/hostname. Only the tail is matched, so
-// any data root — and a data root on its own filesystem, whose mount root starts at
-// /containers — reads the same.
-var dockerHostnameRoot = regexp.MustCompile(`/containers/([0-9a-f]{64})/hostname$`)
-
-// dockerHostnameMountID returns the container ID named by the one /etc/hostname
-// mount in a mountinfo text, and that mount's line. Field 4 of a mountinfo line is
-// the mount's root within its filesystem, field 5 its mount point.
-func dockerHostnameMountID(mountinfo string) (string, string, error) {
-	var found []string
-	for _, line := range strings.Split(mountinfo, "\n") {
-		if fields := strings.Fields(line); len(fields) >= 5 && fields[4] == "/etc/hostname" {
-			found = append(found, line)
-		}
-	}
-	if len(found) != 1 {
-		return "", "", fmt.Errorf("%d /etc/hostname mounts, want exactly one", len(found))
-	}
-	root := strings.Fields(found[0])[3]
-	match := dockerHostnameRoot.FindStringSubmatch(root)
-	if match == nil {
-		return "", found[0], fmt.Errorf("the /etc/hostname mount root %q names no container", root)
-	}
-	return match[1], found[0], nil
-}
 
 // holdDockerProbeLock takes an exclusive flock on path, the way the updater's lock
 // is taken, and reports through the state file: "waiting" once it has found the

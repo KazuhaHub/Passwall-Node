@@ -38,6 +38,16 @@ type dockerHelperOptions struct {
 	// while an upgrade is in progress.
 	HeartbeatInterval time.Duration
 	Logger            *log.Logger
+
+	// Mountinfo and Hostname are where this process reads its own identity:
+	// /proc/self/mountinfo and the kernel's hostname. Nil means those; tests
+	// substitute them to play a given container.
+	Mountinfo func() (string, error)
+	Hostname  func() (string, error)
+	// HandoverCallBudget bounds each engine call the handover makes, so that no
+	// step is bounded only by the client's five-minute timeout. Zero means
+	// dockerHandoverCallBudget.
+	HandoverCallBudget time.Duration
 }
 
 // dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
