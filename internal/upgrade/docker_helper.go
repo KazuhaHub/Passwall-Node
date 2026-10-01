@@ -82,8 +82,8 @@ func RunDockerHelper(ctx context.Context, schema int, stderr io.Writer) error {
 	if os.Geteuid() != 0 {
 		return errors.New("Docker upgrade helper must run as root")
 	}
-	target := os.Getenv("PSP_NODE_UPGRADE_TARGET_CONTAINER")
-	agentID := os.Getenv("PSP_NODE_UPGRADE_TARGET_AGENT_ID")
+	target := os.Getenv(dockerTargetContainerEnv)
+	agentID := os.Getenv(dockerTargetAgentIDEnv)
 	uid, uidErr := parseDockerIdentity(os.Getenv("PUID"))
 	gid, gidErr := parseDockerIdentity(os.Getenv("PGID"))
 	if uidErr != nil || gidErr != nil || !dockerObjectName.MatchString(target) || len(agentID) == 0 || len(agentID) > 128 || strings.ContainsAny(agentID, "\r\n\x00") {

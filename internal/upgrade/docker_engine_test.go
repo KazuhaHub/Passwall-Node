@@ -257,3 +257,124 @@ func TestInspectDecodesRestartAndCommandFields(t *testing.T) {
 		})
 	}
 }
+
+// THE SUCCESSOR IS CREATED BY THE AGENT SWAP'S OWN, UNCHANGED REQUEST. Fed the
+// updater's inspect with Docker's default hostname stripped, CreateReplacement
+// sends the updater's whole configuration with only the image and the image's
+// identity labels changed, and its HostConfig byte for byte. Compose's labels
+// travel unchanged, com.docker.compose.image included: rewriting that one would
+// make a routine `compose up -d` recreate the updater at the older compose tag.
+// And the request the agent swap sends is still exactly the one 4.0.1.6 sent.
+func TestCreateReplacementBodyForSuccessor(t *testing.T) {
+	capture := func(t *testing.T, name string, old dockerContainer, image dockerImage, reference string) []byte {
+		t.Helper()
+		var body []byte
+		client := &dockerHTTP{client: &http.Client{Transport: dockerRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Query().Get("name") != name {
+				t.Fatalf("created as %q, want %q", request.URL.Query().Get("name"), name)
+			}
+			var err error
+			if body, err = io.ReadAll(request.Body); err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{},
+				Body: io.NopCloser(strings.NewReader(`{"Id":"` + strings.Repeat("3", 64) + `"}`))}, nil
+		})}}
+		if _, err := client.CreateReplacement(t.Context(), name, old, image, reference); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	t.Run("the agent swap's request is unchanged", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join("testdata", "create", "agent.input.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var input struct {
+			Config      json.RawMessage   `json:"config"`
+			HostConfig  json.RawMessage   `json:"host_config"`
+			ImageLabels map[string]string `json:"image_labels"`
+			Reference   string            `json:"reference"`
+		}
+		if err := json.Unmarshal(data, &input); err != nil {
+			t.Fatal(err)
+		}
+		image := dockerImage{}
+		image.Config.Labels = input.ImageLabels
+		golden, err := os.ReadFile(filepath.Join("testdata", "create", "agent.body.golden.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := capture(t, "passwall-node-server-7-agent", dockerContainer{Config: input.Config, HostConfig: input.HostConfig}, image, input.Reference)
+		if !bytes.Equal(body, golden) {
+			t.Fatalf("the agent swap now sends\n%s\nwhere 4.0.1.6 sent\n%s", body, golden)
+		}
+	})
+
+	t.Run("the successor", func(t *testing.T) {
+		_, self, _ := identityFixture(t, false)
+		reference := DockerImageRepository + ":4.0.1.8"
+		image := dockerImage{ID: "sha256:" + strings.Repeat("2", 64)}
+		image.Config.Labels = map[string]string{
+			"org.opencontainers.image.version":  "4.0.1.8",
+			"org.opencontainers.image.revision": "0c3f6a9d2e5b8c1f4a7d0e3b6c9f2a5d8e1b4c7f",
+			DockerLabelStateSchema:              "9",
+			DockerLabelUpgradeContract:          "1",
+			DockerLabelUpdaterHandover:          "1",
+			"foreign":                           "not-copied",
+		}
+		source, err := successorSource(self)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := capture(t, "passwall-node-server-7-updater-next-1a2b3c4d", source, image, reference)
+		var sent, original map[string]json.RawMessage
+		if err := json.Unmarshal(body, &sent); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(self.Config, &original); err != nil {
+			t.Fatal(err)
+		}
+		if _, kept := sent["Hostname"]; kept {
+			t.Fatal("the predecessor's default hostname was sent")
+		}
+		if !bytes.Equal(sent["HostConfig"], self.HostConfig) {
+			t.Fatalf("HostConfig = %s, want the predecessor's %s verbatim", sent["HostConfig"], self.HostConfig)
+		}
+		var image2 string
+		if json.Unmarshal(sent["Image"], &image2) != nil || image2 != reference {
+			t.Fatalf("Image = %s, want %q", sent["Image"], reference)
+		}
+		for key, value := range original {
+			switch key {
+			case "Hostname", "Image", "Labels":
+				continue
+			}
+			if !bytes.Equal(sent[key], value) {
+				t.Fatalf("%s = %s, want the predecessor's %s", key, sent[key], value)
+			}
+		}
+		var labels, before map[string]string
+		if json.Unmarshal(sent["Labels"], &labels) != nil || json.Unmarshal(original["Labels"], &before) != nil {
+			t.Fatal("invalid labels")
+		}
+		want := map[string]string{}
+		for key, value := range before {
+			want[key] = value
+		}
+		want["org.opencontainers.image.version"] = "4.0.1.8"
+		want["org.opencontainers.image.revision"] = "0c3f6a9d2e5b8c1f4a7d0e3b6c9f2a5d8e1b4c7f"
+		if len(labels) != len(want) {
+			t.Fatalf("labels = %v, want %v", labels, want)
+		}
+		for key, value := range want {
+			if labels[key] != value {
+				t.Fatalf("label %s = %q, want %q (labels %v)", key, labels[key], value, labels)
+			}
+		}
+		if labels["com.docker.compose.image"] != before["com.docker.compose.image"] {
+			t.Fatal("com.docker.compose.image was rewritten")
+		}
+	})
+}
