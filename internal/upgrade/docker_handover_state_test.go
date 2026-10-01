@@ -595,3 +595,85 @@ func TestDockerTransactionShapeIsFrozen(t *testing.T) {
 		})
 	}
 }
+
+// EVERY PROCESS DERIVES ITS ROLE FROM THE JOURNAL AND ITS OWN IDENTITY, AND FROM
+// NOTHING ELSE — not from what it was doing before a restart, which it cannot
+// remember. One row per cell of the role table: what a predecessor, a successor
+// and a stranger (a container the journal does not name, such as one Compose
+// recreated) each become in every phase, and what a candidate that wins the lock
+// then does about the journal. A process that cannot resolve itself is a
+// candidate that never touches the journal.
+func TestClassifyRole(t *testing.T) {
+	const stranger = "7777777777777777777777777777777777777777777777777777777777777777"
+	journal := func(phase string) *dockerHandover {
+		h := handoverFixture(phase)
+		return &h
+	}
+	for _, tc := range []struct {
+		phase     string // "" is no journal
+		self      string
+		role      handoverRole
+		reconcile handoverReconcile
+	}{
+		{"", stranger, roleCandidate, reconcileNone},
+
+		{handoverPrepared, updaterFixtureID, roleCandidate, reconcileAbort},
+		{handoverPrepared, stranger, roleCandidate, reconcileAbort},
+		// A prepared journal names no successor, so no process can be it.
+
+		{handoverCreated, updaterFixtureID, roleCandidate, reconcileAbort},
+		{handoverCreated, successorFixtureID, roleStandby, reconcileNone},
+		{handoverCreated, stranger, roleCandidate, reconcileAbort},
+
+		{handoverCommitted, updaterFixtureID, roleRetiredWatch, reconcileNone},
+		{handoverCommitted, successorFixtureID, roleCandidate, reconcileFinish},
+		{handoverCommitted, stranger, roleCandidate, reconcileSupersede},
+
+		{handoverCompleted, updaterFixtureID, roleRetired, reconcileNone},
+		{handoverCompleted, successorFixtureID, roleCandidate, reconcileNone},
+		{handoverCompleted, stranger, roleCandidate, reconcileTidy},
+
+		{handoverAborted, updaterFixtureID, roleCandidate, reconcileTidy},
+		{handoverAborted, successorFixtureID, roleRetired, reconcileNone},
+		{handoverAborted, stranger, roleCandidate, reconcileTidy},
+
+		{handoverReverted, updaterFixtureID, roleCandidate, reconcileTidy},
+		{handoverReverted, successorFixtureID, roleRetired, reconcileNone},
+		{handoverReverted, stranger, roleCandidate, reconcileTidy},
+
+		{handoverAbandoned, updaterFixtureID, roleRetired, reconcileNone},
+		{handoverAbandoned, successorFixtureID, roleCandidate, reconcileNone},
+		{handoverAbandoned, stranger, roleCandidate, reconcileTidy},
+
+		{handoverSuperseded, updaterFixtureID, roleRetired, reconcileNone},
+		{handoverSuperseded, successorFixtureID, roleRetired, reconcileNone},
+		{handoverSuperseded, stranger, roleCandidate, reconcileTidy},
+	} {
+		who := map[string]string{updaterFixtureID: "predecessor", successorFixtureID: "successor", stranger: "stranger"}[tc.self]
+		t.Run(tc.phase+"/"+who, func(t *testing.T) {
+			var j *dockerHandover
+			if tc.phase != "" {
+				j = journal(tc.phase)
+			}
+			if role, reconcile := classifyRole(j, tc.self); role != tc.role || reconcile != tc.reconcile {
+				t.Fatalf("classifyRole = %s, %s; want %s, %s", role, reconcile, tc.role, tc.reconcile)
+			}
+		})
+	}
+
+	// UNRESOLVED IS ALWAYS A CANDIDATE WITH NOTHING TO RECONCILE, whatever the
+	// journal says: a process that does not know which container it is cannot
+	// know whether the journal is about it, so it must not act on it.
+	for _, phase := range []string{"", handoverPrepared, handoverCreated, handoverCommitted, handoverCompleted,
+		handoverAborted, handoverReverted, handoverAbandoned, handoverSuperseded} {
+		t.Run(phase+"/unresolved", func(t *testing.T) {
+			var j *dockerHandover
+			if phase != "" {
+				j = journal(phase)
+			}
+			if role, reconcile := classifyRole(j, ""); role != roleCandidate || reconcile != reconcileNone {
+				t.Fatalf("classifyRole = %s, %s; want candidate with nothing to reconcile", role, reconcile)
+			}
+		})
+	}
+}

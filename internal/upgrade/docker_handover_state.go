@@ -430,3 +430,113 @@ func printable(value string) bool {
 	}
 	return true
 }
+
+// handoverRole is what an updater process is, given the journal and its own
+// container ID.
+type handoverRole int
+
+const (
+	// roleCandidate competes for the lock, and on winning it re-reads the
+	// journal under it and becomes primary only if it is still a candidate.
+	roleCandidate handoverRole = iota
+	// roleStandby is a successor proving it could take over. It holds no lock
+	// and writes nothing the agent can see.
+	roleStandby
+	// roleRetired holds no lock, writes nothing and makes no engine call. It
+	// waits to be stopped, because returning would only let the restart policy
+	// start it again into the same role.
+	roleRetired
+	// roleRetiredWatch is a retired predecessor whose successor has not yet
+	// finished taking over: retired, but ready to reclaim if the successor never
+	// manages to act.
+	roleRetiredWatch
+)
+
+func (r handoverRole) String() string {
+	return [...]string{"candidate", "standby", "retired", "retired-watch"}[r]
+}
+
+// handoverReconcile is what a candidate does about the journal once it is
+// primary, before it enters the ordinary loop.
+type handoverReconcile int
+
+const (
+	reconcileNone handoverReconcile = iota
+	// reconcileAbort ends a handover that never committed: its successor is
+	// removed and the predecessor's role was never given up.
+	reconcileAbort
+	// reconcileFinish is the successor completing its own takeover: it stops the
+	// predecessor and records the handover completed.
+	reconcileFinish
+	// reconcileSupersede is a stranger finding a committed handover between two
+	// other containers. It holds the lock, so it is the updater; both of them
+	// are tidied away.
+	reconcileSupersede
+	// reconcileTidy removes what a finished handover left behind.
+	reconcileTidy
+)
+
+func (r handoverReconcile) String() string {
+	return [...]string{"none", "abort", "finish", "supersede", "tidy"}[r]
+}
+
+// classifyRole is the role table. A process derives its role from the journal
+// and its own identity alone, never from what it remembers doing, so a restart
+// at any point lands it in the role the journal gives it.
+//
+// A STRANGER IS ANY CONTAINER THE JOURNAL DOES NOT NAME, typically one Compose
+// recreated. It is a candidate in every phase: if it wins the lock it is the
+// updater, and the journal only tells it what to clean up. Before commit that is
+// an abort, so the predecessor's role was never given away; after commit the
+// pair is superseded, and fencing — every winner re-reads the journal under the
+// lock — means a superseded successor can never act.
+//
+// A PROCESS THAT CANNOT RESOLVE ITSELF does not know whether the journal is
+// about it, so it is a candidate that reconciles nothing and, as the caller
+// guarantees, never writes the journal.
+func classifyRole(journal *dockerHandover, self string) (handoverRole, handoverReconcile) {
+	if self == "" || journal == nil {
+		return roleCandidate, reconcileNone
+	}
+	predecessor := self == journal.PredecessorID
+	successor := journal.SuccessorID != "" && self == journal.SuccessorID
+	switch journal.Phase {
+	case handoverPrepared:
+		// No successor exists yet, so only the predecessor or a stranger reads it.
+		return roleCandidate, reconcileAbort
+	case handoverCreated:
+		if successor {
+			return roleStandby, reconcileNone
+		}
+		return roleCandidate, reconcileAbort
+	case handoverCommitted:
+		switch {
+		case predecessor:
+			return roleRetiredWatch, reconcileNone
+		case successor:
+			return roleCandidate, reconcileFinish
+		}
+		return roleCandidate, reconcileSupersede
+	case handoverCompleted, handoverAbandoned:
+		// The successor rolled forward; the predecessor gave its role away.
+		switch {
+		case predecessor:
+			return roleRetired, reconcileNone
+		case successor:
+			return roleCandidate, reconcileNone
+		}
+		return roleCandidate, reconcileTidy
+	case handoverAborted, handoverReverted:
+		// The predecessor kept or took back its role; the successor never had it.
+		if successor {
+			return roleRetired, reconcileNone
+		}
+		return roleCandidate, reconcileTidy
+	case handoverSuperseded:
+		if predecessor || successor {
+			return roleRetired, reconcileNone
+		}
+		return roleCandidate, reconcileTidy
+	}
+	return roleCandidate, reconcileNone
+}
