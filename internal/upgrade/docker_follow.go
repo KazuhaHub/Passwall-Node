@@ -207,12 +207,22 @@ func (c *dockerHelperController) followTarget(ctx context.Context) (handoverTarg
 // followDisabled is why this process may not start a handover, or "" when it
 // may. A process that cannot start one may still have to finish or clean up
 // one; that is decided by the journal, not here.
+//
+// The updater directory is looked at again here, not only at the start: a
+// successor makes sure of it and opens the lock in it by path when it starts, so
+// a handover is never begun onto a directory it would refuse, or onto a lock
+// file that is no longer the one this process holds.
 func (c *dockerHelperController) followDisabled() string {
 	switch {
 	case c.selfID == "":
 		return "self unresolved"
 	case !c.locked:
 		return "the updater lock is not held"
+	}
+	if why := c.updaterDirUnusable(); why != nil {
+		return "updater directory unusable: " + why.Error()
+	}
+	switch {
 	case !releaseid.ValidVersion(c.options.Version):
 		return fmt.Sprintf("the compiled version %q is not a release", c.options.Version)
 	case c.options.FollowOptOut:

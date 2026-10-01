@@ -74,6 +74,13 @@ func followFixture(t *testing.T) (*dockerHelperController, *fakeDockerEngine) {
 	if err := controller.ensureUpdaterDir(); err != nil {
 		t.Fatal(err)
 	}
+	// The primary's own descriptor of the lock, so the lock file is there and is
+	// the one it holds. The fixture takes no flock on it: the tests play the
+	// processes that compete for it.
+	if err := controller.openLock(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(controller.unlock)
 	controller.selfID = updater.ID
 	controller.locked = true
 	return controller, engine
@@ -441,6 +448,38 @@ func TestFollowTargetRefusals(t *testing.T) {
 		{name: "the lock is not held", setup: func(_ *testing.T, f fixture) { f.c.locked = false }, reason: "lock"},
 		{name: "the compiled version is not a release", setup: func(_ *testing.T, f fixture) { f.c.options.Version = "dev" }, reason: "version"},
 		{name: "the opt-out", setup: func(_ *testing.T, f fixture) { f.c.options.FollowOptOut = true }, reason: "opt-out"},
+		// A successor starts by making sure of the updater directory and opening
+		// the lock in it by path; a handover is not started onto one it would
+		// refuse, or onto a lock file that is no longer the one this updater
+		// holds.
+		{name: "the updater directory is open to others", setup: func(t *testing.T, f fixture) {
+			if err := os.Chmod(f.c.updaterDir(), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}, reason: "updater directory unusable"},
+		{name: "the lock is open to its group", setup: func(t *testing.T, f fixture) {
+			if err := os.Chmod(filepath.Join(f.c.updaterDir(), updaterLockName), 0640); err != nil {
+				t.Fatal(err)
+			}
+		}, reason: "updater directory unusable"},
+		{name: "the lock was replaced", setup: func(t *testing.T, f fixture) {
+			path := filepath.Join(f.c.updaterDir(), updaterLockName)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}, reason: "updater directory unusable"},
+		{name: "the updater directory is a symlink", setup: func(t *testing.T, f fixture) {
+			moved := f.c.updaterDir() + ".moved"
+			if err := os.Rename(f.c.updaterDir(), moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, f.c.updaterDir()); err != nil {
+				t.Fatal(err)
+			}
+		}, reason: "updater directory unusable"},
 		// F2: the request slot.
 		{name: "an agent swap in the slot", setup: func(t *testing.T, f fixture) {
 			editReceiptRaw(t, f.c, "tsk_docker_upgrade_001", func(r *Receipt) { r.Phase = "activating" })

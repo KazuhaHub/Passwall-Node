@@ -11,9 +11,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// updaterLockName is the lock inside the root-only updater directory.
-const updaterLockName = "lock"
-
 // errFlockUnsupported is a filesystem that cannot take an flock at all. It is
 // not a failure of the updater: the handover is switched off, and the updater
 // runs alone and unlocked exactly as it did before the handover existed.
@@ -89,6 +86,13 @@ func (l *updaterLock) tryLock() (bool, error) {
 	default:
 		return false, fmt.Errorf("updater lock: %w", err)
 	}
+}
+
+// isFile reports whether info, read by path, is the file this descriptor has
+// open.
+func (l *updaterLock) isFile(info os.FileInfo) bool {
+	held, err := l.file.Stat()
+	return err == nil && os.SameFile(held, info)
 }
 
 // close releases the lock, if this descriptor held it, by closing it.

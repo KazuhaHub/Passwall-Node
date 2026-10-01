@@ -27,6 +27,9 @@ const (
 	standbyProofName    = "standby.v1.json"
 )
 
+// updaterLockName is the lock inside the root-only updater directory.
+const updaterLockName = "lock"
+
 // The handover's phases. prepared, created and committed are live; the other
 // five end a handover and are never written over by it again.
 const (
@@ -370,6 +373,41 @@ func (c *dockerHelperController) ensureUpdaterDir() error {
 	}
 	if info.Mode().Perm() != 0700 {
 		return os.Chmod(path, 0700)
+	}
+	return nil
+}
+
+// updaterDirUnusable is why the updater directory or the lock in it is not what
+// ensureUpdaterDir and openUpdaterLock leave behind — a real directory and a
+// regular file, both root's, 0700 and 0600 — or why that lock file is not the one
+// this process holds; nil when it is all as it should be. It only looks, and
+// repairs nothing.
+func (c *dockerHelperController) updaterDirUnusable() error {
+	check := func(path, what, kindName string, kind fs.FileMode, mode os.FileMode) (os.FileInfo, error) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		uid, _, ok := dockerFileOwner(info)
+		switch {
+		case info.Mode().Type() != kind:
+			return nil, fmt.Errorf("%s is not %s", what, kindName)
+		case !ok || uid != c.options.RootUID:
+			return nil, fmt.Errorf("%s is not owned by root", what)
+		case info.Mode().Perm() != mode:
+			return nil, fmt.Errorf("%s has mode %04o, not %04o", what, info.Mode().Perm(), mode)
+		}
+		return info, nil
+	}
+	if _, err := check(c.updaterDir(), "the updater directory", "a real directory", fs.ModeDir, 0700); err != nil {
+		return err
+	}
+	lock, err := check(filepath.Join(c.updaterDir(), updaterLockName), "the lock", "a regular file", 0, 0600)
+	if err != nil {
+		return err
+	}
+	if c.lock == nil || !c.lock.isFile(lock) {
+		return errors.New("the lock file is not the one this updater holds")
 	}
 	return nil
 }
