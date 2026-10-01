@@ -85,6 +85,16 @@ type fakeDockerEngine struct {
 	// ops is every container and image call, in order, as it was addressed. A
 	// test asserts on it to prove what was never touched.
 	ops []fakeOp
+	// onCreate runs after a create took effect, with the new container's name
+	// and identity, so a test can make the daemon's answer differ from the
+	// request.
+	onCreate func(name, id string)
+	// onInspect answers an inspect in place of the fake when it reports true:
+	// a container the test needs under a name it cannot know in advance.
+	onInspect func(target string) (dockerContainer, bool)
+	// loseCreate makes the next create take effect and then fail, as a create
+	// whose answer was lost on the way back does.
+	loseCreate bool
 }
 
 type fakeRemoval struct {
@@ -198,6 +208,14 @@ func (f *fakeDockerEngine) InspectContainer(ctx context.Context, target string) 
 	f.record("inspect", target, "")
 	if err := f.maybeFail(ctx, "inspect", target); err != nil {
 		return dockerContainer{}, err
+	}
+	f.mu.Lock()
+	onInspect := f.onInspect
+	f.mu.Unlock()
+	if onInspect != nil {
+		if container, ok := onInspect(target); ok {
+			return container, nil
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -343,6 +361,13 @@ func (f *fakeDockerEngine) CreateReplacement(ctx context.Context, name string, o
 			config[key] = value
 		}
 	}
+	// A container created without a hostname gets the daemon's default, its own
+	// short ID, and an inspect reports it.
+	var hostname string
+	_ = json.Unmarshal(config["Hostname"], &hostname)
+	if hostname == "" {
+		config["Hostname"], _ = json.Marshal(id[:12])
+	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		return "", err
@@ -357,7 +382,31 @@ func (f *fakeDockerEngine) CreateReplacement(ctx context.Context, name string, o
 	created.State = dockerContainer{}.State
 	f.containers[name] = created
 	f.creates = append(f.creates, fakeCreate{name: name, body: body})
+	lost := f.loseCreate
+	f.loseCreate = false
+	onCreate := f.onCreate
+	f.mu.Unlock()
+	if onCreate != nil {
+		onCreate(name, id)
+	}
+	f.mu.Lock()
+	if lost {
+		return "", errDockerUnavailable
+	}
 	return id, nil
+}
+
+// edit changes a container in place, by name or ID, safely beside other
+// callers.
+func (f *fakeDockerEngine) edit(target string, change func(*dockerContainer)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name, container, ok := f.resolve(target)
+	if !ok {
+		return
+	}
+	change(&container)
+	f.containers[name] = container
 }
 
 // crash is the engine's side of a process exit nobody asked for: the restart

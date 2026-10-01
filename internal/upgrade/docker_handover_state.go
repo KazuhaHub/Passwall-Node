@@ -265,6 +265,11 @@ func (c *dockerHelperController) writeHandover(next dockerHandover) error {
 }
 
 func (c *dockerHelperController) storeHandover(h dockerHandover) error {
+	if c.options.JournalFault != nil {
+		if err := c.options.JournalFault(h); err != nil {
+			return err
+		}
+	}
 	return atomicHelperDocument(c.updaterDir(), handoverJournalName, h, c.options.RootGID)
 }
 

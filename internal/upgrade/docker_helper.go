@@ -73,6 +73,16 @@ type dockerHelperOptions struct {
 	// EvidenceScanCap bounds the entries of receipts/ the evidence scan reads.
 	// Zero means dockerEvidenceScanCap.
 	EvidenceScanCap int
+	// StandbyWait is how long a predecessor waits for its successor's proof and
+	// stability, StabilityWindow how long the successor has to stay up, and
+	// AbortBudget what an abort's cleanup may spend. Zero means
+	// dockerStandbyWait, dockerStabilityWindow and dockerAbortBudget.
+	StandbyWait, StabilityWindow, AbortBudget time.Duration
+	// JournalFault, when set, is asked before every journal write and fails it
+	// by returning an error. It is a fault-injection seam: the journal's writes
+	// are where a handover changes state without an engine call, and a test has
+	// to be able to fail exactly one of them.
+	JournalFault func(next dockerHandover) error
 }
 
 // dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
