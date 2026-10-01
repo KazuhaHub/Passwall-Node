@@ -53,7 +53,7 @@ func TestDockerEngineAssumptions(t *testing.T) {
 		t.Skip("Docker engine probes run only in docker-updater.yml, on a disposable GitHub-hosted runner")
 	}
 	if os.Geteuid() != 0 {
-		runDockerE2EAsRoot(t, "^TestDockerEngineAssumptions$")
+		runDockerE2EAsRoot(t, "^TestDockerEngineAssumptions$", 12*time.Minute)
 		return
 	}
 	if os.Getenv("PN_DOCKER_UPDATER_E2E_ROOT") != "1" {
@@ -155,10 +155,18 @@ type dockerProbeContainer struct {
 	} `json:"HostConfig"`
 }
 
-type dockerProbe struct {
+// dockerHost is the real Docker host the privileged tests drive: the Engine
+// through the helper's own client, the CLI by absolute path, and the watch for the
+// image pulls none of them may cause.
+type dockerHost struct {
 	engine *dockerHTTP
 	cli    string
-	nonce  string
+	watch  *dockerPullWatch
+}
+
+type dockerProbe struct {
+	*dockerHost
+	nonce string
 	// prefix starts every container and project name this run creates.
 	prefix         string
 	imageA, imageB string
@@ -168,15 +176,15 @@ type dockerProbe struct {
 	// images is the local image store once the probe images are built; nothing
 	// after that may add to it.
 	images []string
-	watch  *dockerPullWatch
 }
 
 // runDockerE2EAsRoot re-executes this test binary as root, through sudo, with an
 // explicit environment rather than the caller's, as TestUpgradeSystemdRealNodeE2E
-// does. The Docker CLI's path is resolved here, where the runner's PATH is, and
-// passed on as an absolute path. Output is streamed: a probe that hangs should be
-// visible before the job's timeout, not after it.
-func runDockerE2EAsRoot(t *testing.T, pattern string) {
+// does: the fixed variables, plus the named ones the caller passes on from its own.
+// The Docker CLI's path is resolved here, where the runner's PATH is, and passed on
+// as an absolute path. Output is streamed: a probe that hangs should be visible
+// before the job's timeout, not after it.
+func runDockerE2EAsRoot(t *testing.T, pattern string, timeout time.Duration, passOn ...string) {
 	t.Helper()
 	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		t.Fatal("refusing privileged Docker probes outside a disposable GitHub-hosted runner")
@@ -189,16 +197,19 @@ func runDockerE2EAsRoot(t *testing.T, pattern string) {
 	if err != nil || !filepath.IsAbs(cli) {
 		t.Fatal("the Docker CLI is not on PATH as an absolute path")
 	}
-	arguments := []string{"-n", "env", "PATH=/usr/bin:/bin", "LANG=C", "GITHUB_ACTIONS=true", "RUNNER_ENVIRONMENT=github-hosted",
-		"PN_DOCKER_UPDATER_E2E=1", "PN_DOCKER_UPDATER_E2E_ROOT=1", "PN_DOCKER_CLI=" + cli,
-		binary, "-test.run=" + pattern, "-test.v", "-test.timeout=12m"}
-	ctx, cancel := context.WithTimeout(context.Background(), 13*time.Minute)
+	arguments := []string{"-n", "env", "PATH=/usr/bin:/bin", "HOME=/root", "LANG=C", "GITHUB_ACTIONS=true", "RUNNER_ENVIRONMENT=github-hosted",
+		"PN_DOCKER_UPDATER_E2E=1", "PN_DOCKER_UPDATER_E2E_ROOT=1", "PN_DOCKER_CLI=" + cli}
+	for _, name := range passOn {
+		arguments = append(arguments, name+"="+os.Getenv(name))
+	}
+	arguments = append(arguments, binary, "-test.run="+pattern, "-test.v", "-test.timeout="+timeout.String())
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Minute)
 	defer cancel()
 	command := exec.CommandContext(ctx, "/usr/bin/sudo", arguments...)
 	command.WaitDelay = 2 * time.Second
 	command.Stdout, command.Stderr = os.Stdout, os.Stderr
 	if err := command.Run(); err != nil {
-		t.Fatalf("the privileged Docker probes failed: %v", err)
+		t.Fatalf("the privileged Docker tests failed: %v", err)
 	}
 }
 
@@ -229,16 +240,40 @@ func dockerE2EGuard(ctx context.Context, engine *dockerHTTP, cli string) error {
 	return nil
 }
 
-func newDockerProbe(t *testing.T) *dockerProbe {
+// newDockerHost refuses any host but a disposable runner with no containers of its
+// own, says what Docker it found, and starts watching for pulls: every pull from
+// here on is a failure. Whoever holds it stops the watch and reads what it saw.
+func newDockerHost(t *testing.T) *dockerHost {
 	t.Helper()
 	engine, err := newDockerHTTP(dockerSocket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &dockerProbe{engine: engine, cli: os.Getenv("PN_DOCKER_CLI")}
-	if err := dockerE2EGuard(t.Context(), engine, p.cli); err != nil {
+	h := &dockerHost{engine: engine, cli: os.Getenv("PN_DOCKER_CLI")}
+	if err := dockerE2EGuard(t.Context(), engine, h.cli); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if h.watch != nil {
+			_, _ = h.watch.stop()
+			h.watch = nil
+		}
+	})
+	h.watch = h.watchPulls(t, time.Now())
+
+	// WHAT RAN, for whoever reads a red run: the daemon, Compose, and the image
+	// store the identity probe is about.
+	t.Logf("Docker Engine %s", h.docker(t, "version", "--format", "{{.Server.Version}} (API {{.Server.APIVersion}})"))
+	t.Logf("Docker Compose %s", h.docker(t, "compose", "version", "--short"))
+	t.Logf("storage %s", h.docker(t, "info", "--format", "{{.Driver}} {{json .DriverStatus}} live-restore={{.LiveRestoreEnabled}}"))
+	return h
+}
+
+func newDockerProbe(t *testing.T) *dockerProbe {
+	t.Helper()
+	// The pull watch starts before the build, so a pull the build caused would be
+	// seen too.
+	p := &dockerProbe{dockerHost: newDockerHost(t)}
 	var random [4]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		t.Fatal(err)
@@ -246,15 +281,6 @@ func newDockerProbe(t *testing.T) *dockerProbe {
 	p.nonce = hex.EncodeToString(random[:])
 	p.prefix = "pnprobe-" + p.nonce
 	t.Cleanup(func() { p.cleanup(t) })
-	// Every pull from here on is a failure; the watch starts before the build so
-	// that one would be seen too.
-	p.watch = p.watchPulls(t, time.Now())
-
-	// WHAT RAN, for whoever reads a red run: the daemon, Compose, and the image
-	// store the identity probe is about.
-	t.Logf("Docker Engine %s", p.docker(t, "version", "--format", "{{.Server.Version}} (API {{.Server.APIVersion}})"))
-	t.Logf("Docker Compose %s", p.docker(t, "compose", "version", "--short"))
-	t.Logf("storage %s", p.docker(t, "info", "--format", "{{.Driver}} {{json .DriverStatus}} live-restore={{.LiveRestoreEnabled}}"))
 
 	p.buildImages(t)
 	p.images = p.imageIDs(t)
@@ -680,7 +706,7 @@ func (p *dockerProbe) probeDaemonRestart(t *testing.T) {
 // restartDaemon restarts dockerd. The pull watch ends with the daemon's event
 // stream, so it is read before and started again after; the new one replays from
 // just before the restart.
-func (p *dockerProbe) restartDaemon(t *testing.T) {
+func (p *dockerHost) restartDaemon(t *testing.T) {
 	t.Helper()
 	p.stopWatch(t)
 	from := time.Now()
@@ -715,7 +741,7 @@ func (p *dockerProbe) assertNothingPulled(t *testing.T) {
 	}
 }
 
-func (p *dockerProbe) stopWatch(t *testing.T) {
+func (p *dockerHost) stopWatch(t *testing.T) {
 	t.Helper()
 	if p.watch == nil {
 		return
@@ -739,7 +765,7 @@ type dockerPullWatch struct {
 	events  []string
 }
 
-func (p *dockerProbe) watchPulls(t *testing.T, since time.Time) *dockerPullWatch {
+func (p *dockerHost) watchPulls(t *testing.T, since time.Time) *dockerPullWatch {
 	t.Helper()
 	command := exec.Command(p.cli, "events", "--since", strconv.FormatInt(since.Unix()-1, 10),
 		"--filter", "type=image", "--filter", "event=pull", "--format", "{{json .}}")
@@ -815,7 +841,7 @@ func (p *dockerProbe) cleanup(t *testing.T) {
 
 // docker runs the Docker CLI and returns its trimmed standard output, failing the
 // test with its standard error.
-func (p *dockerProbe) docker(t *testing.T, args ...string) string {
+func (p *dockerHost) docker(t *testing.T, args ...string) string {
 	t.Helper()
 	stdout, stderr, err := p.dockerOutput(args...)
 	if err != nil {
@@ -824,7 +850,7 @@ func (p *dockerProbe) docker(t *testing.T, args ...string) string {
 	return strings.TrimSpace(stdout)
 }
 
-func (p *dockerProbe) dockerOutput(args ...string) (string, string, error) {
+func (p *dockerHost) dockerOutput(args ...string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	command := exec.CommandContext(ctx, p.cli, args...)
@@ -846,13 +872,13 @@ func (p *dockerProbe) run(t *testing.T, name string, args ...string) string {
 	return id
 }
 
-func (p *dockerProbe) inspect(ctx context.Context, name string) (dockerProbeContainer, error) {
+func (p *dockerHost) inspect(ctx context.Context, name string) (dockerProbeContainer, error) {
 	var container dockerProbeContainer
 	err := p.engine.call(ctx, http.MethodGet, "/"+dockerAPIVersion+"/containers/"+url.PathEscape(name)+"/json", nil, []int{http.StatusOK}, &container)
 	return container, err
 }
 
-func (p *dockerProbe) mustInspect(t *testing.T, name string) dockerProbeContainer {
+func (p *dockerHost) mustInspect(t *testing.T, name string) dockerProbeContainer {
 	t.Helper()
 	container, err := p.inspect(t.Context(), name)
 	if err != nil {
@@ -861,7 +887,7 @@ func (p *dockerProbe) mustInspect(t *testing.T, name string) dockerProbeContaine
 	return container
 }
 
-func (p *dockerProbe) waitRunning(t *testing.T, name string) dockerProbeContainer {
+func (p *dockerHost) waitRunning(t *testing.T, name string) dockerProbeContainer {
 	t.Helper()
 	var running dockerProbeContainer
 	p.wait(t, 30*time.Second, name+" to be running", func() (bool, error) {
@@ -883,7 +909,7 @@ func (p *dockerProbe) templateSource(t *testing.T) dockerContainer {
 	return source
 }
 
-func (p *dockerProbe) imageIDs(t *testing.T) []string {
+func (p *dockerHost) imageIDs(t *testing.T) []string {
 	t.Helper()
 	var images []struct {
 		ID string `json:"Id"`
@@ -923,7 +949,7 @@ func (p *dockerProbe) report(t *testing.T, name string) dockerProbeReport {
 	return report
 }
 
-func (p *dockerProbe) wait(t *testing.T, within time.Duration, what string, done func() (bool, error)) {
+func (p *dockerHost) wait(t *testing.T, within time.Duration, what string, done func() (bool, error)) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for {

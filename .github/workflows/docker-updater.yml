@@ -102,3 +102,88 @@ jobs:
           go test -v ./internal/upgrade -run '^TestDockerEngineAssumptions$' -count=1 -timeout=15m | tee "$RUNNER_TEMP/docker-assumptions.log"
           grep -q '^--- PASS: TestDockerEngineAssumptions ' "$RUNNER_TEMP/docker-assumptions.log"
           ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/docker-assumptions.log"
+
+  # THE HANDOVER ITSELF, END TO END, on the daemon the probes above vouched for:
+  # it needs them, so a handover is never run on a Docker whose behaviour they
+  # refused. TestDockerUpdaterFollowsAgentE2E starts the panel's own compose, lets
+  # the updater move itself onto the agent's image, and breaks the move at each
+  # step that can break.
+  handover:
+    name: Updater follows the agent (${{ matrix.arch }})
+    needs: assumptions
+    runs-on: ${{ matrix.runner }}
+    # The scenarios run on the updater's production timers — a thirty-second
+    # settle, a sixty-second standby wait — about twenty minutes in all, after two
+    # image builds.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - name: Docker Engine and Compose are present
+        run: |
+          set -eu
+          docker version
+          docker compose version
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact preferred compiler
+        run: |
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      - name: Verify native runner architecture
+        run: test "$(go env GOHOSTARCH)" = "${{ matrix.arch }}"
+      # TWO IMAGES, NO REGISTRY. The release recipe, built twice the way release.yml
+      # builds it — the binary under bin/linux-<arch>/, the version, schema and
+      # contract as build arguments — at two versions no release will ever use, so
+      # no published image can stand in for either. The binary is rebuilt between
+      # them, since the recipe copies whatever is at that path. Tagged under the
+      # official repository, because that is the only one the updater accepts; the
+      # end-to-end never pulls, and fails if anything does.
+      - name: Build the updater's and the agent's test images
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          arch=$(go env GOARCH)
+          mkdir -p "bin/linux-$arch"
+          for version in 4.0.99.1 4.0.99.2; do
+            go build -trimpath -ldflags="-s -w -X github.com/KazuhaHub/passwall-node/v4/internal/version.Version=$version" \
+              -o "bin/linux-$arch/passwall-node" ./cmd/node
+            test "$("bin/linux-$arch/passwall-node" --version)" = "$version"
+            upgrade_info=$("bin/linux-$arch/passwall-node" --upgrade-info)
+            docker build --file Dockerfile.release \
+              --build-arg VERSION="$version" \
+              --build-arg STATE_SCHEMA="$(printf '%s' "$upgrade_info" | jq -er .state_schema)" \
+              --build-arg UPGRADE_CONTRACT="$(printf '%s' "$upgrade_info" | jq -er .upgrade_contract)" \
+              --tag "ghcr.io/kazuhahub/passwall-node:$version" .
+          done
+      # The test re-executes itself as root through sudo: it SIGKILLs host
+      # processes and restarts the daemon. The log must show the test passing, and
+      # a SKIP anywhere in it is a scenario that did not run. That check is
+      # inverted with `!`, which exempts a command from `set -e`, so it only fails
+      # the step as the script's last command.
+      - name: The updater follows the agent onto its image (E1-E9)
+        env:
+          PN_DOCKER_UPDATER_E2E: "1"
+          PN_E2E_UPDATER_VERSION: 4.0.99.1
+          PN_E2E_AGENT_VERSION: 4.0.99.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./internal/upgrade -run '^TestDockerUpdaterFollowsAgentE2E$' -count=1 -timeout=40m | tee "$RUNNER_TEMP/docker-handover.log"
+          grep -q '^--- PASS: TestDockerUpdaterFollowsAgentE2E ' "$RUNNER_TEMP/docker-handover.log"
+          ! grep -Eq '^[[:space:]]*--- SKIP:' "$RUNNER_TEMP/docker-handover.log"
