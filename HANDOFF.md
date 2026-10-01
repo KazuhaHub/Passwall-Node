@@ -213,7 +213,7 @@ helper 下载前拒绝 systemd drop-in 覆写并核验旧进程；备份 fsync �
 这不新增数据库/VM 快照恢复、通用终态 GC 或无损流量停机保证；详见 README 的 Remote agent upgrades。
 core 选择仍是 declarative `ConfigBody.Core`，TLS material 仍随配置内联，不能重新伪装成 task。
 
-**Docker updater 跟随 Agent（2026-09-30，分支 `kazuha/updater-self-upgrade`，未合并）**：远程升级 Agent
+**Docker updater 跟随 Agent（2026-09-30）**：远程升级 Agent
 成功后，updater 以 Agent 正在运行的镜像克隆自身（临时名 `<N>-next-<8hex>`），候补不写任何 Agent 可见路径、
 先自证（同镜像与版本、二进制 digest 等于就绪证明、能接受该 Agent、能读请求槽），再经 root-only
 `upgrades/updater/handover.v1.json` 提交并交出 `updater/lock` 的 flock；新 updater 停止并删除旧的、改回原名。
