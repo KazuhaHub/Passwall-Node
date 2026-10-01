@@ -34,6 +34,10 @@ const (
 	// protocols an image's updater speaks. It is a label rather than a field of
 	// BuildInfo so that no strictly decoded document changes shape.
 	DockerLabelUpdaterHandover = "io.kazuhahub.passwall-node.updater-handover"
+	// UpdaterHandoverProtocol is the handover protocol this build speaks: the
+	// value its image lists under DockerLabelUpdaterHandover, and the format of
+	// the journal and proof it reads and writes.
+	UpdaterHandoverProtocol = 1
 )
 
 type Args = protocol.AgentUpgradeArgs

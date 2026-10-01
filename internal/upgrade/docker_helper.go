@@ -55,13 +55,43 @@ type dockerHelperOptions struct {
 	// Now is the wall clock the handover's back-off is measured on. Nil means
 	// time.Now.
 	Now func() time.Time
+
+	// Version is this build's own version, the one the updater compares the
+	// agent's against: it follows only upward.
+	Version string
+	// DigestPath is this build's own binary, whose digest a successor proves
+	// equal to the one the agent reported readiness with. Empty means
+	// DockerBinaryPath.
+	DigestPath string
+	// FollowOptOut is PSP_NODE_UPDATER_FOLLOW_AGENT=false on the updater
+	// service: this updater never starts a handover of its own.
+	FollowOptOut bool
+	// FollowSettle and FollowInterval time the full evaluation: the first one
+	// after this process became primary, and the periodic catch-up. Zero means
+	// dockerFollowSettle and dockerFollowInterval.
+	FollowSettle, FollowInterval time.Duration
+	// EvidenceScanCap bounds the entries of receipts/ the evidence scan reads.
+	// Zero means dockerEvidenceScanCap.
+	EvidenceScanCap int
 }
 
 // dockerHeartbeatInterval is well inside the agent's 30-second freshness bound
 // (validateDockerUpgradeControl), so one missed tick is not a stale heartbeat.
 const dockerHeartbeatInterval = 5 * time.Second
 
-type dockerHelperController struct{ options dockerHelperOptions }
+type dockerHelperController struct {
+	options dockerHelperOptions
+
+	// selfID is this process's own container, once resolveSelf proved it, and
+	// "" otherwise. Without it the journal cannot be about this process, so it
+	// never acts on one.
+	selfID string
+	// locked is true while this process holds the updater lock, which is what
+	// makes it the one updater allowed to act.
+	locked bool
+	// follow is when this primary evaluates following the agent.
+	follow followState
+}
 
 type dockerTransaction struct {
 	OldContainerID string `json:"old_container_id"`
