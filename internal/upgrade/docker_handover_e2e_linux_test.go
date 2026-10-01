@@ -536,11 +536,13 @@ func (h *handoverE2E) stranger(t *testing.T) {
 		r.mustCompose("up", "--detach", "--pull", "never", handoverUpdaterService)
 	}
 	var final handoverListed
+	var settled *dockerHandover
 	r.wait(t, 4*time.Minute, "one primary updater after the recreate", func() (bool, error) {
 		journal, err := r.journal()
 		if err != nil || journal == nil || !handoverTerminal(journal.Phase) {
 			return false, err
 		}
+		settled = journal
 		listed, err := r.projectContainers(t.Context())
 		if err != nil {
 			return false, err
@@ -571,7 +573,18 @@ func (h *handoverE2E) stranger(t *testing.T) {
 	}
 	// ABORTED, OR SUPERSEDED IF THE COMMIT WON THE RACE with Compose's stop: the
 	// stranger aborts a handover that never committed and supersedes one that did.
-	if phases := r.sampler.phasesOf(created.ID); !slices.Contains(phases, handoverAborted) && !slices.Contains(phases, handoverSuperseded) {
+	//
+	// THE JOURNAL THIS WAIT ENDED ON COUNTS AS SEEN. The sampler reads the journal
+	// every 250 ms, and the wait above returns the moment it reads a terminal one,
+	// so the stranger's abort can be written and acted on between two samples: the
+	// first arm64 run ended on an aborted journal whose history still read
+	// [prepared created]. What the wait itself read is as much an observation as a
+	// sample.
+	phases := r.sampler.phasesOf(created.ID)
+	if settled != nil && settled.ID == created.ID && (len(phases) == 0 || phases[len(phases)-1] != settled.Phase) {
+		phases = append(phases, settled.Phase)
+	}
+	if !slices.Contains(phases, handoverAborted) && !slices.Contains(phases, handoverSuperseded) {
 		t.Errorf("the interrupted handover went %v, want it aborted or superseded", phases)
 	}
 	r.endExemption(t)
