@@ -115,13 +115,15 @@ func TestMutateUpdaterRefusesTheAgent(t *testing.T) {
 		}
 		// Addressed by name, acted on by the identity that was checked: a name
 		// that changed hands between the check and the call cannot redirect it.
+		// Every operation is addressed by name here, so the op log can tell the
+		// identity it was acted on by from the name it was asked for by.
 		if _, err := controller.mutateUpdater(ctx, updaterMutation{op: "start", target: "node-updater-next-1a2b3c4d"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := controller.mutateUpdater(ctx, updaterMutation{op: "stop", target: id}); err != nil {
+		if _, err := controller.mutateUpdater(ctx, updaterMutation{op: "stop", target: "node-updater-next-1a2b3c4d"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := controller.mutateUpdater(ctx, updaterMutation{op: "rename", target: id, rename: "node-updater-renamed"}); err != nil {
+		if _, err := controller.mutateUpdater(ctx, updaterMutation{op: "rename", target: "node-updater-next-1a2b3c4d", rename: "node-updater-renamed"}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := controller.mutateUpdater(ctx, updaterMutation{op: "remove", target: "node-updater-renamed"}); err != nil {
