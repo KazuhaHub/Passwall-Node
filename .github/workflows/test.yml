@@ -356,6 +356,33 @@ jobs:
             test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.state-schema" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .state_schema)"
             test "$(docker image inspect --format '{{ index .Config.Labels "io.kazuhahub.passwall-node.upgrade-contract" }}' "$image")" = "$(printf '%s' "$upgrade_info" | jq -r .upgrade_contract)"
           done
+      # THE UPDATER HANDOVER LABEL REACHES BOTH IMAGES. An updater moves itself onto
+      # the agent's image only if that image lists the handover protocol it speaks,
+      # so a LABEL line that stopped applying would quietly end every handover. The
+      # binary cannot be asked — BuildInfo is decoded strictly by older updaters and
+      # must not grow a field — so each image is compared with what its own recipe
+      # declares, and deployment/updater_handover_label_test.go holds both recipes to
+      # the protocols the binary speaks. Each answer is assigned before it is
+      # compared, so a failed inspect stops the step under `set -e` instead of
+      # comparing an empty string; `with` prints nothing for an absent label.
+      - name: Verify the updater handover label
+        shell: bash
+        run: |
+          set -euo pipefail
+          declared() {
+            sed -n 's/^[[:space:]]*io\.kazuhahub\.passwall-node\.updater-handover="\([^"]*\)".*$/\1/p' "$1"
+          }
+          label() {
+            docker image inspect --format '{{ with index .Config.Labels "io.kazuhahub.passwall-node.updater-handover" }}{{ . }}{{ end }}' "$1"
+          }
+          source_declared=$(declared Dockerfile)
+          release_declared=$(declared Dockerfile.release)
+          test -n "$source_declared"
+          test "$release_declared" = "$source_declared"
+          source_label=$(label passwall-node:test)
+          release_label=$(label passwall-node:release)
+          test "$source_label" = "$source_declared"
+          test "$release_label" = "$release_declared"
       - name: Verify BusyBox entrypoint, started directly and from the example compose
         shell: bash
         run: |

@@ -40,6 +40,19 @@ const (
 	UpdaterHandoverProtocol = 1
 )
 
+// UpdaterHandoverProtocols lists, in ascending order, every updater handover
+// protocol this build's updater speaks: exactly what its image declares under
+// DockerLabelUpdaterHandover. Today that is the one it writes; a release bridging
+// to a new protocol, which still reads the old journal, lists both.
+//
+// THE IMAGES ARE HELD TO THIS LIST, NOT TO A SECOND COPY OF IT. The two
+// Dockerfiles and the release workflow write the label by hand, and a deployment
+// test compares each with this value, so a protocol change that missed one fails a
+// test instead of publishing an image whose label promises code its binary lacks.
+func UpdaterHandoverProtocols() []int {
+	return []int{UpdaterHandoverProtocol}
+}
+
 type Args = protocol.AgentUpgradeArgs
 
 // A same-boot elapsed deadline prevents a stale filesystem request from becoming
