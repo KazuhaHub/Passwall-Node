@@ -77,23 +77,42 @@ type dockerMount struct {
 	RW          bool   `json:"RW"`
 }
 
+// dockerContainer is the slice of a container inspect the helper reads.
+//
+// RestartCount and the State fields beyond Running and Pid are DECODE-ONLY, and
+// they exist for the updater handover. A successor that crashed and was brought
+// back by its restart policy reads Running again within a second, so Running
+// alone cannot show that it stayed up; RestartCount and StartedAt can, and
+// StartedAt's zero time is also how a created container that never started looks.
+// Nothing here is ever sent back to the engine: CreateReplacement clones the raw
+// Config and HostConfig, never this struct.
 type dockerContainer struct {
-	ID         string          `json:"Id"`
-	Image      string          `json:"Image"`
-	Name       string          `json:"Name"`
-	Config     json.RawMessage `json:"Config"`
-	HostConfig json.RawMessage `json:"HostConfig"`
-	Mounts     []dockerMount   `json:"Mounts"`
-	State      struct {
-		Running bool `json:"Running"`
-		PID     int  `json:"Pid"`
+	ID           string          `json:"Id"`
+	Image        string          `json:"Image"`
+	Name         string          `json:"Name"`
+	RestartCount int             `json:"RestartCount"`
+	Config       json.RawMessage `json:"Config"`
+	HostConfig   json.RawMessage `json:"HostConfig"`
+	Mounts       []dockerMount   `json:"Mounts"`
+	State        struct {
+		Running    bool      `json:"Running"`
+		Paused     bool      `json:"Paused"`
+		Restarting bool      `json:"Restarting"`
+		PID        int       `json:"Pid"`
+		StartedAt  time.Time `json:"StartedAt"`
 	} `json:"State"`
 }
 
+// dockerConfig is the slice of a container's Config the helper reads. Cmd and
+// Hostname are decode-only, read to recognise an updater container and to tell
+// Docker's default hostname, the container's own short ID, from one an operator
+// set.
 type dockerConfig struct {
-	Image  string            `json:"Image"`
-	Env    []string          `json:"Env"`
-	Labels map[string]string `json:"Labels"`
+	Image    string            `json:"Image"`
+	Hostname string            `json:"Hostname"`
+	Cmd      []string          `json:"Cmd"`
+	Env      []string          `json:"Env"`
+	Labels   map[string]string `json:"Labels"`
 }
 
 type dockerHostConfig struct {

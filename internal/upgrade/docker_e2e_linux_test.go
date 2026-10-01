@@ -428,6 +428,30 @@ func (p *dockerProbe) probeHostKillIsACrash(t *testing.T) {
 	started := p.mustInspect(t, id).State.StartedAt
 	time.Sleep(time.Until(started.Add(11 * time.Second)))
 	kill(2)
+	p.assertHelperDecodes(t, id)
+}
+
+// assertHelperDecodes checks that the helper's own decode, dockerContainer, reads
+// the fields the handover relies on exactly as the probe's decode does. Those
+// fields are decode-only and their unit test runs against bodies written in the
+// Engine's shape; this runs against the Engine itself.
+func (p *dockerProbe) assertHelperDecodes(t *testing.T, id string) {
+	t.Helper()
+	probe := p.mustInspect(t, id)
+	helper, err := p.engine.InspectContainer(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config dockerConfig
+	if err := json.Unmarshal(helper.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	if helper.ID != probe.ID || helper.RestartCount != probe.RestartCount || !helper.State.StartedAt.Equal(probe.State.StartedAt) ||
+		helper.State.Running != probe.State.Running || helper.State.PID != probe.State.Pid || config.Hostname != probe.Config.Hostname {
+		t.Errorf("the helper decodes %s as restarts %d, started %s, running %t, pid %d, hostname %q; the probe reads %d, %s, %t, %d, %q",
+			id, helper.RestartCount, helper.State.StartedAt, helper.State.Running, helper.State.PID, config.Hostname,
+			probe.RestartCount, probe.State.StartedAt, probe.State.Running, probe.State.Pid, probe.Config.Hostname)
+	}
 }
 
 // A7: Compose leaves alone a container cloned through the API with every label
@@ -630,6 +654,7 @@ func (p *dockerProbe) probeDaemonRestart(t *testing.T) {
 	if got := p.mustInspect(t, created); got.State.Running || !got.State.StartedAt.IsZero() || got.HostConfig.RestartPolicy.Name != "unless-stopped" {
 		t.Fatalf("a created container: running=%t started=%s restart=%q", got.State.Running, got.State.StartedAt, got.HostConfig.RestartPolicy.Name)
 	}
+	p.assertHelperDecodes(t, created)
 
 	p.restartDaemon(t)
 

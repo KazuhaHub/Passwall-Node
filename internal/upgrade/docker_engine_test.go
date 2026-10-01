@@ -1,13 +1,18 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 type dockerRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -191,5 +196,64 @@ func TestDockerRemoveContainerSendsTheForceItWasGiven(t *testing.T) {
 		if query != want {
 			t.Fatalf("force=%v sent %q, want %q", force, query, want)
 		}
+	}
+}
+
+// THE HANDOVER READS WHAT THE AGENT SWAP NEVER NEEDED: whether a container has
+// ever started, whether the restart policy has had to bring it back, whether it
+// is paused or mid-restart, and what command and hostname it was created with.
+// A successor that crashed and was restarted looks Running, so Running alone
+// cannot prove it stayed up; RestartCount and StartedAt can. The fields are
+// decode-only and read through the real transport, against bodies in the shape
+// the Engine returns for an updater container, so a misspelt tag cannot pass.
+func TestInspectDecodesRestartAndCommandFields(t *testing.T) {
+	const id = "6b1f4e0c9d2a87b3e5f40c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5"
+	for _, tc := range []struct {
+		file                        string
+		running, paused, restarting bool
+		restarts                    int
+		startedAt                   string
+	}{
+		{file: "updater-running.json", running: true, restarts: 2, startedAt: "2026-09-30T08:15:42.123456789Z"},
+		// Created and never started: Docker reports the zero time.
+		{file: "updater-created.json"},
+		{file: "updater-paused.json", running: true, paused: true, restarts: 2, startedAt: "2026-09-30T08:15:42.123456789Z"},
+		{file: "updater-restarting.json", running: true, restarting: true, restarts: 3, startedAt: "2026-09-30T08:16:03.554201877Z"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join("testdata", "inspect", tc.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &dockerHTTP{client: &http.Client{Transport: dockerRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path != "/v1.41/containers/passwall-node-server-7-updater/json" {
+					t.Fatalf("unexpected inspect request: %s", request.URL.Path)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: http.Header{}}, nil
+			})}}
+			container, err := client.InspectContainer(t.Context(), "passwall-node-server-7-updater")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if container.ID != id || container.RestartCount != tc.restarts || container.State.Running != tc.running ||
+				container.State.Paused != tc.paused || container.State.Restarting != tc.restarting {
+				t.Fatalf("decoded id %s restarts %d running %v paused %v restarting %v", container.ID, container.RestartCount,
+					container.State.Running, container.State.Paused, container.State.Restarting)
+			}
+			if tc.startedAt == "" {
+				if !container.State.StartedAt.IsZero() {
+					t.Fatalf("a never-started container decoded StartedAt %s, want the zero time", container.State.StartedAt)
+				}
+			} else if want, _ := time.Parse(time.RFC3339Nano, tc.startedAt); !container.State.StartedAt.Equal(want) {
+				t.Fatalf("StartedAt = %s, want %s", container.State.StartedAt, want)
+			}
+			var config dockerConfig
+			if err := json.Unmarshal(container.Config, &config); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(config.Cmd, []string{"--run-docker-upgrade-helper"}) || config.Hostname != id[:12] {
+				t.Fatalf("Cmd %q Hostname %q, want the helper command and %q", config.Cmd, config.Hostname, id[:12])
+			}
+		})
 	}
 }

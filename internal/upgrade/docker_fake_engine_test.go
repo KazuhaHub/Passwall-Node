@@ -272,7 +272,12 @@ func (f *fakeDockerEngine) StartContainer(ctx context.Context, target string) er
 		f.mu.Unlock()
 		return errDockerNotFound
 	}
-	container.State.Running = true
+	// A start of a running container is the engine's 304: nothing changes, and in
+	// particular StartedAt does not move.
+	if !container.State.Running {
+		container.State.Running = true
+		container.State.StartedAt = time.Now().UTC()
+	}
 	f.containers[name] = container
 	onStart := f.onStart
 	f.mu.Unlock()
@@ -353,6 +358,23 @@ func (f *fakeDockerEngine) CreateReplacement(ctx context.Context, name string, o
 	f.containers[name] = created
 	f.creates = append(f.creates, fakeCreate{name: name, body: body})
 	return id, nil
+}
+
+// crash is the engine's side of a process exit nobody asked for: the restart
+// policy brings the container straight back, so it is Running again, with a new
+// StartedAt and one more RestartCount. That is the only trace a crash leaves in
+// an inspect, which is why the handover reads exactly those two fields.
+func (f *fakeDockerEngine) crash(target string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name, container, ok := f.resolve(target)
+	if !ok || !container.State.Running {
+		return errDockerNotFound
+	}
+	container.RestartCount++
+	container.State.StartedAt = time.Now().UTC()
+	f.containers[name] = container
+	return nil
 }
 
 // nextID is a fresh identity the engine has never handed out. Callers hold mu.
@@ -680,4 +702,42 @@ func TestFakeEngineAddressesContainersByIDAndName(t *testing.T) {
 			t.Fatalf("op log = %+v\nwant %+v", got, want)
 		}
 	})
+}
+
+// The two inspect fields that betray a crash have to move in the fake the way
+// they move in the engine, or a test of "the successor stayed up" proves nothing.
+func TestFakeEngineTracksStartsAndCrashes(t *testing.T) {
+	ctx := t.Context()
+	_, engine, updater := dockerUpdaterFixture(t)
+	reference := DockerImageRepository + ":4.1.3"
+	id, err := engine.CreateReplacement(ctx, "node-updater-next-c", updater, engine.images[reference], reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _ := engine.InspectContainer(ctx, id)
+	if !created.State.StartedAt.IsZero() || created.RestartCount != 0 {
+		t.Fatalf("a created container has StartedAt %s and RestartCount %d", created.State.StartedAt, created.RestartCount)
+	}
+	if err := engine.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	started, _ := engine.InspectContainer(ctx, id)
+	if started.State.StartedAt.IsZero() {
+		t.Fatal("a start did not set StartedAt")
+	}
+	if err := engine.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := engine.InspectContainer(ctx, id); !again.State.StartedAt.Equal(started.State.StartedAt) {
+		t.Fatal("starting a running container moved StartedAt")
+	}
+	time.Sleep(time.Millisecond)
+	if err := engine.crash(id); err != nil {
+		t.Fatal(err)
+	}
+	crashed, _ := engine.InspectContainer(ctx, id)
+	if !crashed.State.Running || crashed.RestartCount != 1 || !crashed.State.StartedAt.After(started.State.StartedAt) {
+		t.Fatalf("after a crash: running %v, RestartCount %d, StartedAt %s (was %s)", crashed.State.Running,
+			crashed.RestartCount, crashed.State.StartedAt, started.State.StartedAt)
+	}
 }
