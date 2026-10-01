@@ -53,7 +53,13 @@ changed provenance stop cleanup.
 daemon on GitHub-hosted Ubuntu 24.04 amd64 and arm64 machines, for changes to
 `internal/upgrade`, `cmd/node`, the Dockerfiles, the entrypoint or the example
 compose, on dispatch, and weekly, because Docker moves under it. It needs no PSP,
-registry account or published release, and pulls nothing.
+registry account or published release, and its tests never pull: the handover
+end-to-end watches for image pulls from its first step and fails on any. Building
+its two test images from `Dockerfile.release`, as `release.yml` does, is another
+matter: that fetches the `alpine` base from Docker Hub and its packages from the
+Alpine CDN, so an outage of either fails the build, not the tests. The job pulls
+the base in a step of its own first, so that a Docker Hub failure shows under its
+own name.
 
 It is deliberately not part of `test.yml`, whose every job a release waits for:
 it answers questions about Docker and the runner image as much as about the

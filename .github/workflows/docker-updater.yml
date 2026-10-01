@@ -145,12 +145,32 @@ jobs:
           test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
       - name: Verify native runner architecture
         run: test "$(go env GOHOSTARCH)" = "${{ matrix.arch }}"
-      # TWO IMAGES, NO REGISTRY. The release recipe, built twice the way release.yml
-      # builds it — the binary under bin/linux-<arch>/, the version, schema and
-      # contract as build arguments — at two versions no release will ever use, so
-      # no published image can stand in for either. The binary is rebuilt between
-      # them, since the recipe copies whatever is at that path. Tagged under the
-      # official repository, because that is the only one the updater accepts; the
+      # THE RECIPE'S BASE COMES FROM DOCKER HUB. Dockerfile.release starts FROM an
+      # alpine image and installs packages from the Alpine CDN, so building it
+      # depends on both. The base is pulled here first, read from the recipe so
+      # the two cannot disagree, with a few retries, so that a Docker Hub outage
+      # fails a step that says so rather than the build.
+      - name: Pull the release recipe's base image
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(awk '$1 == "FROM" { print $2; exit }' Dockerfile.release)
+          test -n "$base"
+          for attempt in 1 2 3; do
+            if docker pull "$base"; then
+              exit 0
+            fi
+            sleep $((attempt * 15))
+          done
+          exit 1
+      # TWO LOCAL IMAGES, NOTHING PUSHED. The release recipe, built twice the way
+      # release.yml builds it — the binary under bin/linux-<arch>/, the version,
+      # schema and contract as build arguments — at two versions no release will
+      # ever use, so no published image can stand in for either. The build itself
+      # fetches the recipe's base and its Alpine packages, as above; nothing else
+      # here touches a registry. The binary is rebuilt between them, since the
+      # recipe copies whatever is at that path. Tagged under the official
+      # repository, because that is the only one the updater accepts; the
       # end-to-end never pulls, and fails if anything does.
       - name: Build the updater's and the agent's test images
         shell: bash

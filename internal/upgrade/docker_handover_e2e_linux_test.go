@@ -36,9 +36,11 @@ import (
 // psp-compose.yaml, unchanged but for e2e-agent-override.yaml, and against
 // compose.example.yaml for the happy path.
 //
-// TWO IMAGES, NO REGISTRY. docker-updater.yml builds the release recipe twice, at
-// two versions no release will ever use, and passes them in: the updater runs the
-// older, the agent the newer. The agent only sleeps; the updater checks what the
+// TWO LOCAL IMAGES, NOTHING PULLED. docker-updater.yml builds the release recipe
+// twice, at two versions no release will ever use, and passes them in: the
+// updater runs the older, the agent the newer. Building them fetches the recipe's
+// base and its Alpine packages; from the first step of this test on, nothing may
+// be pulled. The agent only sleeps; the updater checks what the
 // agent is, never what it runs. The record an agent upgrade leaves behind — the
 // evidence the updater follows — is written into receipts/ before the updater
 // starts, so every scenario is also the catch-up case: an updater that starts and

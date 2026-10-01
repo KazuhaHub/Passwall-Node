@@ -145,6 +145,16 @@ func TestTheDockerUpdaterWorkflowRunsTheHandoverEndToEnd(t *testing.T) {
 			t.Errorf("the handover job no longer has %q", strings.TrimSpace(required))
 		}
 	}
+	// THE BUILD FETCHES THE RECIPE'S BASE, which no test can stop: it is pulled
+	// in a step of its own before the build, read from the recipe itself, so a
+	// Docker Hub outage is named as one.
+	pull := strings.Index(job, "      - name: Pull the release recipe's base image\n")
+	build := strings.Index(job, "      - name: Build the updater's and the agent's test images\n")
+	if pull < 0 || build < 0 || pull > build {
+		t.Error("the handover job does not pull the release recipe's base in its own step before building")
+	} else if !strings.Contains(job[pull:build], "Dockerfile.release") {
+		t.Error("the base pull does not read its image from Dockerfile.release")
+	}
 	source, err := os.ReadFile("../internal/upgrade/docker_handover_e2e_linux_test.go")
 	if err != nil {
 		t.Fatal(err)
