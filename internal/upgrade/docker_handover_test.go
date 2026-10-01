@@ -263,6 +263,42 @@ func TestHandoverAbortsWhen(t *testing.T) {
 					})
 				}
 			}},
+		// Each of these passes every check before it, so each is caught by its
+		// own: a clone a third party started before this updater could, one the
+		// daemon gave an environment without one of this updater's entries, and
+		// one whose resolved mounts are not this updater's.
+		{name: "the created container was already started", reason: "already been started", created: true,
+			setup: func(_ *testing.T, _ *dockerHelperController, e *fakeDockerEngine) {
+				e.onCreate = func(_, id string) {
+					e.edit(id, func(c *dockerContainer) { c.State.StartedAt = time.Now().UTC() })
+				}
+			}},
+		{name: "the created container's environment lacks one of this updater's entries", reason: "lacks PUID", created: true,
+			setup: func(t *testing.T, _ *dockerHelperController, e *fakeDockerEngine) {
+				e.onCreate = func(_, id string) {
+					e.edit(id, func(c *dockerContainer) {
+						c.Config = editJSON(t, c.Config, func(config map[string]any) {
+							config["Env"] = slices.DeleteFunc(config["Env"].([]any), func(entry any) bool {
+								return strings.HasPrefix(entry.(string), "PUID=")
+							})
+						})
+					})
+				}
+			}},
+		{name: "the created container's mounts differ", reason: "mounts differ", created: true,
+			setup: func(_ *testing.T, _ *dockerHelperController, e *fakeDockerEngine) {
+				e.onCreate = func(_, id string) {
+					e.edit(id, func(c *dockerContainer) {
+						mounts := slices.Clone(c.Mounts)
+						for i := range mounts {
+							if mounts[i].Destination == dockerSocket {
+								mounts[i].RW = false
+							}
+						}
+						c.Mounts = mounts
+					})
+				}
+			}},
 		{name: "the start fails", reason: "could not be started", created: true,
 			setup: func(_ *testing.T, _ *dockerHelperController, e *fakeDockerEngine) {
 				e.fail = map[string]error{"start": &dockerStatusError{Code: http.StatusInternalServerError}}
