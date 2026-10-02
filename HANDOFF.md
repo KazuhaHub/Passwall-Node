@@ -225,6 +225,15 @@ updater 自己成功升级装上的、更高版本、本机架构、带 `io.kazu
 不自动阻塞发布：含此改动的版本须等它在发布提交上两架构全绿后再打 tag。详见 README「The updater follows
 the Agent」与 `internal/upgrade/ACCEPTANCE.md`。
 
+**升级拒绝原因可见（2026-10-01）**：起因是所有者的 NAS 节点（Docker，仅 UI）远程升级失败，updater
+只记一句“labels do not bind…”，PSP 只显示 failed。现在 updater 的每条拒绝保留原句作前缀（日志检索依赖），
+其后列出同类中所有失败的检查及实际值与期望值（标签、安全配置、镜像引用、仅
+`PSP_NODE_AGENT_ID`/`PSP_NODE_DOCKER_REMOTE_UPGRADE` 两个环境变量、挂载、元数据的哪一部分；目标镜像
+同理），实际值一律 `%q` 并截断至 64 字节。agent 把 helper 回执的 `error_code` 与 `error` 附在原任务错误句后
+上报 PSP（systemd 与 Docker 共用），错误码不变；回执文本按不可信处理：转为合法 UTF-8、不可打印字符换成
+空格、整条截断至 2048 字节（协议上限 4096 的一半）并标注。systemd helper 写入回执的原因均为固定句子，
+仅回滚恢复失败时附带 `config/version` 的内容（≤128 字节）与版本号，不含凭据、端点或文件路径。
+
 这里的 crash window 必须精确描述，不能笼统宣传“exactly once”：claim 提交前崩溃不会执行；claim
 提交后、terminal 提交前崩溃会留下 `running`。实现 `TaskRecoverer` 的 kind 在重启后查询/恢复真实结果；
 没有 recovery contract 的 kind 终结为显式 `indeterminate`，绝不盲目再执行。只有下游支持 task ID
