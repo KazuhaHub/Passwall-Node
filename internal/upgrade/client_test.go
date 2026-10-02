@@ -273,7 +273,7 @@ func TestForwardedHelperReasonIsSanitizedAndBounded(t *testing.T) {
 	for _, phase := range []string{"failed", "indeterminate"} {
 		t.Run(phase, func(t *testing.T) {
 			c, request := clientFixture(t)
-			hostile := "line one\nforged: line two\r\x1b[31mred\x00\t‮evil  \xff\xfe" + strings.Repeat("é", 10000)
+			hostile := "line one\nforged: line two\r\x1b[31mred\x00\t\u202eevil\u2028 \xff\xfe" + strings.Repeat("é", 10000)
 			receipt := Receipt{Request: request, Phase: phase, ErrorCode: "agent_upgrade_\nfailed", Error: hostile}
 			if err := AtomicDocument(filepath.Join(c.RootDir, "upgrades"), request.Task.ID+".json", receipt, 0600); err != nil {
 				t.Fatal(err)
