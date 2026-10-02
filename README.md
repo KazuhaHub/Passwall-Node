@@ -181,6 +181,24 @@ is withdrawn the same way. The Agent logs the first result and each change, not
 every sync; search its log for `remote agent upgrade` to see why PSP offers only
 a manual upgrade.
 
+When the updater refuses an upgrade or rolls one back, the Agent reports why to
+PSP with the failed task. A PSP release whose agent-upgrade dialog shows the
+node's reported reason displays it there, so a node with no shell needs none to
+find out; an older PSP stores the reason with the task but still shows just
+"failed". The task's error is the Agent's sentence, then the helper's error code
+and reason:
+
+```
+agent upgrade failed; previous release retained or restored: agent_upgrade_installation_invalid: managed Docker container labels do not bind the expected agent and contract: io.kazuhahub.passwall-node.agent-id is "agt_old" (want "agt_new")
+```
+
+A refusal begins with the same sentence as before and then names every check of
+that kind that failed — each label, security setting, mount, the image reference,
+`PSP_NODE_AGENT_ID` or `PSP_NODE_DOCKER_REMOTE_UPGRADE` — with what it found and
+what it wanted. Found values are quoted and cut at 64 bytes, and no other
+environment variable is ever named. The updater logs the same text after
+`upgrade request held:`. The systemd helper's reasons reach PSP the same way.
+
 On Linux hosts where unprivileged processes cannot bind ports below 1024, use
 listener ports at or above 1024 or deliberately configure the host's
 `net.ipv4.ip_unprivileged_port_start`. The container does not retain root merely

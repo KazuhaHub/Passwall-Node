@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
@@ -664,8 +665,13 @@ func (c *dockerHelperController) processCurrent(ctx context.Context) error {
 		return c.fail(request, "agent_upgrade_download_failed", err)
 	}
 	image, err := c.options.Engine.InspectImage(ctx, newReference)
-	if err != nil || c.validateImage(image, args.Version) != nil {
-		return c.fail(request, "agent_upgrade_schema_unsupported", errors.New("target image identity or upgrade contract is incompatible"))
+	if err != nil {
+		err = fmt.Errorf("%s cannot be inspected: %w", newReference, err)
+	} else {
+		err = c.validateImage(image, args.Version)
+	}
+	if err != nil {
+		return c.fail(request, "agent_upgrade_schema_unsupported", fmt.Errorf("target image identity or upgrade contract is incompatible: %w", err))
 	}
 	if err := c.authorized(request); err != nil {
 		return c.fail(request, "agent_upgrade_authorization_expired", err)
@@ -734,75 +740,223 @@ func (c *dockerHelperController) processCurrent(ctx context.Context) error {
 	return nil
 }
 
+// validateContainer refuses an agent container this updater must not replace,
+// and says exactly why.
+//
+// EVERY REFUSAL NAMES ITS CHECK, WITH WHAT WAS FOUND AND WHAT WAS WANTED. The
+// updater often runs where nobody has a shell — a NAS that offers only a Docker
+// UI — and its refusal reaches the operator only through the receipt the agent
+// forwards to PSP. One sentence for six label checks once left the owner of such
+// a node comparing container metadata by hand. Each refusal still begins with
+// the sentence it always had, because log searches and the docs rely on it, and
+// lists after it every check of that kind that failed, not just the first.
 func (c *dockerHelperController) validateContainer(container dockerContainer, expectedVersion string) (dockerConfig, error) {
 	var config dockerConfig
 	var host dockerHostConfig
-	if len(container.ID) < 12 || json.Unmarshal(container.Config, &config) != nil || json.Unmarshal(container.HostConfig, &host) != nil {
-		return config, errors.New("managed Docker container metadata is invalid")
+	var invalid []string
+	if len(container.ID) < 12 {
+		invalid = append(invalid, fmt.Sprintf("container ID is %d characters (want at least 12)", len(container.ID)))
 	}
-	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "host" {
-		return config, errors.New("managed Docker container security profile differs from the supported installation")
+	if json.Unmarshal(container.Config, &config) != nil {
+		invalid = append(invalid, "Config cannot be decoded")
 	}
-	labels := config.Labels
-	if labels[DockerLabelManaged] != "true" || labels[DockerLabelRole] != "agent" || labels[DockerLabelAgentID] != c.options.AgentID ||
-		labels["org.opencontainers.image.version"] != expectedVersion || labels[DockerLabelStateSchema] != strconv.Itoa(c.options.Schema) ||
-		labels[DockerLabelUpgradeContract] != strconv.Itoa(UpgradeContract) {
-		return config, errors.New("managed Docker container labels do not bind the expected agent and contract")
+	if json.Unmarshal(container.HostConfig, &host) != nil {
+		invalid = append(invalid, "HostConfig cannot be decoded")
 	}
-	if !officialNodeImage(config.Image) || !containsEnv(config.Env, "PSP_NODE_AGENT_ID", c.options.AgentID) ||
-		!containsEnv(config.Env, "PSP_NODE_DOCKER_REMOTE_UPGRADE", "true") {
-		return config, errors.New("managed Docker container environment is not upgrade-enabled")
+	if len(invalid) > 0 {
+		return config, refusal("managed Docker container metadata is invalid", invalid)
+	}
+	var profile []string
+	if host.Privileged {
+		profile = append(profile, "privileged is true (want false)")
+	}
+	if !host.ReadonlyRootfs {
+		profile = append(profile, "read-only rootfs is false (want true)")
+	}
+	if host.NetworkMode != "host" {
+		profile = append(profile, "network mode is "+quoteValue(host.NetworkMode)+` (want "host")`)
+	}
+	if len(profile) > 0 {
+		return config, refusal("managed Docker container security profile differs from the supported installation", profile)
+	}
+	if mismatched := labelMismatches(config.Labels, [][2]string{
+		{DockerLabelManaged, "true"},
+		{DockerLabelRole, "agent"},
+		{DockerLabelAgentID, c.options.AgentID},
+		{"org.opencontainers.image.version", expectedVersion},
+		{DockerLabelStateSchema, strconv.Itoa(c.options.Schema)},
+		{DockerLabelUpgradeContract, strconv.Itoa(UpgradeContract)},
+	}); len(mismatched) > 0 {
+		return config, refusal("managed Docker container labels do not bind the expected agent and contract", mismatched)
+	}
+	// ONLY THE TWO VARIABLES THIS CHECKS ARE EVER NAMED. The rest of the
+	// environment carries the panel endpoint and the credential paths, and this
+	// message leaves the host.
+	var environment []string
+	if !officialNodeImage(config.Image) {
+		environment = append(environment, "image is "+quoteValue(config.Image)+" (want "+DockerImageRepository+":<tag> or @<digest>)")
+	}
+	for _, want := range [][2]string{
+		{"PSP_NODE_AGENT_ID", c.options.AgentID},
+		{"PSP_NODE_DOCKER_REMOTE_UPGRADE", "true"},
+	} {
+		found, ok := envValue(config.Env, want[0])
+		switch {
+		case ok && found == want[1]:
+		case !ok:
+			environment = append(environment, want[0]+" is missing (want "+quoteValue(want[1])+")")
+		default:
+			environment = append(environment, want[0]+" is "+quoteValue(found)+" (want "+quoteValue(want[1])+")")
+		}
+	}
+	if len(environment) > 0 {
+		return config, refusal("managed Docker container environment is not upgrade-enabled", environment)
+	}
+	for _, mount := range container.Mounts {
+		if mount.Destination == dockerSocket {
+			return config, errors.New("network-facing node container must not receive the Docker socket")
+		}
 	}
 	// THE STATE HAS TO OUTLIVE THE CONTAINER, because the upgrade replaces it.
 	// A named volume and a bind mount both do, and compose.example.yaml uses bind
 	// mounts; accepting only volumes refused every installation made from it. A
 	// tmpfs does not persist, and a read-only mount cannot be written by the
 	// replacement, so both are still refused.
-	persistent := func(mount dockerMount) bool {
-		return (mount.Type == "volume" || mount.Type == "bind") && mount.RW
-	}
-	data, control := false, false
-	for _, mount := range container.Mounts {
-		if mount.Destination == dockerSocket {
-			return config, errors.New("network-facing node container must not receive the Docker socket")
-		}
-		if persistent(mount) && mount.Destination == DockerDataDir {
-			data = true
-		}
-		if persistent(mount) && mount.Destination == DockerControlDir {
-			control = true
+	var mounts []string
+	for _, want := range [][2]string{{"data", DockerDataDir}, {"upgrade-control", DockerControlDir}} {
+		if fault := mountFault(container.Mounts, want[1]); fault != "" {
+			mounts = append(mounts, want[0]+" mount at "+want[1]+" is "+fault)
 		}
 	}
-	if !data || !control {
-		return config, errors.New("managed Docker data and upgrade-control mounts are missing or not persistent")
+	if len(mounts) > 0 {
+		return config, refusal("managed Docker data and upgrade-control mounts are missing or not persistent", mounts)
 	}
 	return config, nil
 }
 
-func (c *dockerHelperController) validateImage(image dockerImage, version string) error {
-	if len(image.ID) < 12 || image.OS != "linux" || (image.Architecture != "amd64" && image.Architecture != "arm64") {
-		return errors.New("target image platform identity is invalid")
+// mountFault says why no mount at destination will carry the state across the
+// swap, or returns "" when one will.
+func mountFault(mounts []dockerMount, destination string) string {
+	var first *dockerMount
+	for i := range mounts {
+		mount := &mounts[i]
+		if mount.Destination != destination {
+			continue
+		}
+		if (mount.Type == "volume" || mount.Type == "bind") && mount.RW {
+			return ""
+		}
+		if first == nil {
+			first = mount
+		}
 	}
-	labels := image.Config.Labels
-	if labels["org.opencontainers.image.version"] != version || labels[DockerLabelStateSchema] != strconv.Itoa(c.options.Schema) ||
-		labels[DockerLabelUpgradeContract] != strconv.Itoa(UpgradeContract) {
-		return errors.New("target image does not declare the same state schema and upgrade contract")
+	if first == nil {
+		return "missing"
+	}
+	var faults []string
+	if first.Type != "volume" && first.Type != "bind" {
+		faults = append(faults, "type "+quoteValue(first.Type)+" (want volume or bind)")
+	}
+	if !first.RW {
+		faults = append(faults, "read-only")
+	}
+	return strings.Join(faults, " and ")
+}
+
+func (c *dockerHelperController) validateImage(image dockerImage, version string) error {
+	var platform []string
+	if len(image.ID) < 12 {
+		platform = append(platform, fmt.Sprintf("image ID is %d characters (want at least 12)", len(image.ID)))
+	}
+	if image.OS != "linux" {
+		platform = append(platform, "OS is "+quoteValue(image.OS)+` (want "linux")`)
+	}
+	if image.Architecture != "amd64" && image.Architecture != "arm64" {
+		platform = append(platform, "architecture is "+quoteValue(image.Architecture)+` (want "amd64" or "arm64")`)
+	}
+	if len(platform) > 0 {
+		return refusal("target image platform identity is invalid", platform)
+	}
+	if mismatched := labelMismatches(image.Config.Labels, [][2]string{
+		{"org.opencontainers.image.version", version},
+		{DockerLabelStateSchema, strconv.Itoa(c.options.Schema)},
+		{DockerLabelUpgradeContract, strconv.Itoa(UpgradeContract)},
+	}); len(mismatched) > 0 {
+		return refusal("target image does not declare the same state schema and upgrade contract", mismatched)
 	}
 	return nil
+}
+
+// refusal is a validator's error: the sentence it has always used, then each
+// check that failed.
+func refusal(sentence string, failed []string) error {
+	return errors.New(sentence + ": " + strings.Join(failed, "; "))
+}
+
+// labelMismatches names every wanted label whose value differs, in the order
+// given. A label that is absent compares as "", exactly as the map lookup the
+// checks always used, so what is accepted is unchanged; it is only named
+// differently.
+func labelMismatches(labels map[string]string, want [][2]string) []string {
+	var mismatched []string
+	for _, pair := range want {
+		key, expected := pair[0], pair[1]
+		found, ok := labels[key]
+		switch {
+		case found == expected:
+		case !ok:
+			mismatched = append(mismatched, key+" is missing (want "+quoteValue(expected)+")")
+		default:
+			mismatched = append(mismatched, key+" is "+quoteValue(found)+" (want "+quoteValue(expected)+")")
+		}
+	}
+	return mismatched
+}
+
+// maxQuotedValueBytes bounds each value a refusal quotes.
+const maxQuotedValueBytes = 64
+
+// quoteValue renders a value read from the engine for a refusal.
+//
+// LABELS, IMAGE REFERENCES AND THE TWO ENVIRONMENT VALUES ARE OPERATOR TEXT, and
+// the refusal goes to a log and to PSP. Quoting turns a newline into \n, so it
+// cannot start a forged log line, and an invalid byte into \x.., so it cannot
+// break the UTF-8 the panel requires; the bound keeps one value from crowding out
+// the rest of the message. A cut value says how long it was.
+func quoteValue(value string) string {
+	if len(value) <= maxQuotedValueBytes {
+		return strconv.Quote(value)
+	}
+	cut := 0
+	for cut < len(value) {
+		_, size := utf8.DecodeRuneInString(value[cut:])
+		if cut+size > maxQuotedValueBytes {
+			break
+		}
+		cut += size
+	}
+	return strconv.Quote(value[:cut]) + "... (" + strconv.Itoa(len(value)) + " bytes)"
 }
 
 func officialNodeImage(reference string) bool {
 	return strings.HasPrefix(reference, DockerImageRepository+":") || strings.HasPrefix(reference, DockerImageRepository+"@")
 }
 
-func containsEnv(values []string, key, expected string) bool {
+// envValue is the value of the first entry for key, which is the one a
+// container's process sees.
+func envValue(values []string, key string) (string, bool) {
 	prefix := key + "="
 	for _, value := range values {
-		if strings.HasPrefix(value, prefix) {
-			return value == prefix+expected
+		if found, ok := strings.CutPrefix(value, prefix); ok {
+			return found, true
 		}
 	}
-	return false
+	return "", false
+}
+
+func containsEnv(values []string, key, expected string) bool {
+	found, ok := envValue(values, key)
+	return ok && found == expected
 }
 
 func shortTaskID(value string) string {
