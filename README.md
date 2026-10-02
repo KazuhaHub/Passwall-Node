@@ -181,9 +181,12 @@ is withdrawn the same way. The Agent logs the first result and each change, not
 every sync; search its log for `remote agent upgrade` to see why PSP offers only
 a manual upgrade.
 
-When the updater refuses an upgrade or rolls one back, PSP shows why, so a node
-with no shell needs none to find out. The task's error is the Agent's sentence,
-then the helper's error code and reason:
+When the updater refuses an upgrade or rolls one back, the Agent reports why to
+PSP with the failed task. A PSP release whose agent-upgrade dialog shows the
+node's reported reason displays it there, so a node with no shell needs none to
+find out; an older PSP stores the reason with the task but still shows just
+"failed". The task's error is the Agent's sentence, then the helper's error code
+and reason:
 
 ```
 agent upgrade failed; previous release retained or restored: agent_upgrade_installation_invalid: managed Docker container labels do not bind the expected agent and contract: io.kazuhahub.passwall-node.agent-id is "agt_old" (want "agt_new")

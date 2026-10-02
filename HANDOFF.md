@@ -233,6 +233,9 @@ the Agent」与 `internal/upgrade/ACCEPTANCE.md`。
 上报 PSP（systemd 与 Docker 共用），错误码不变；回执文本按不可信处理：转为合法 UTF-8、不可打印字符换成
 空格、整条截断至 2048 字节（协议上限 4096 的一半）并标注。systemd helper 写入回执的原因均为固定句子，
 仅回滚恢复失败时附带 `config/version` 的内容（≤128 字节）与版本号，不含凭据、端点或文件路径。
+PSP main（d2168f86）只把原因存进任务行，升级状态与对话框都不返回它；要在 PSP 里看到原因，需 PSP 分支
+`kazuha/agent-upgrade-error-detail`（状态带 `result_error_code`/`result_error`，对话框显示）合并发布，且应不晚于
+含此改动的节点版本发布，README 的说法才对匹配版本的运维者成立。
 
 这里的 crash window 必须精确描述，不能笼统宣传“exactly once”：claim 提交前崩溃不会执行；claim
 提交后、terminal 提交前崩溃会留下 `running`。实现 `TaskRecoverer` 的 kind 在重启后查询/恢复真实结果；
