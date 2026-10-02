@@ -7,7 +7,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
@@ -149,9 +152,9 @@ func (c *Client) wait(ctx context.Context, task protocol.Task) ([]byte, error) {
 				}
 				return json.Marshal(receipt.Result)
 			case "failed":
-				return nil, &agent.TaskError{Code: "agent_upgrade_failed", Err: errors.New("agent upgrade failed; previous release retained or restored")}
+				return nil, &agent.TaskError{Code: "agent_upgrade_failed", Err: errors.New(helperReason("agent upgrade failed; previous release retained or restored", receipt))}
 			case "indeterminate":
-				return nil, indeterminate("upgrade outcome requires manual inspection")
+				return nil, indeterminate(helperReason("upgrade outcome requires manual inspection", receipt))
 			case "prepared", "activating", "activated", "rolling_back":
 			default:
 				return nil, indeterminate("unknown upgrade receipt phase")
@@ -257,6 +260,56 @@ func validSHA256(s string) bool {
 	}
 	return true
 }
+
+// maxHelperReasonBytes bounds the whole message helperReason builds: half of
+// what a task result may carry, so the protocol's limit is never the one that
+// cuts it.
+const maxHelperReasonBytes = protocol.MaxTaskErrorBytes / 2
+
+// helperReason is sentence, then the helper's code and reason from its terminal
+// receipt, each only when the receipt carries one.
+//
+// THE REASON IS THE ONLY WAY A REFUSAL LEAVES A NODE WITH NO SHELL. The helper
+// writes it beside its decision, and before this the agent dropped it for one
+// fixed sentence, so PSP could show only that the upgrade failed. The task's code
+// is not taken from the receipt: it stays what it always was, so nothing keyed
+// on codes changes. The sentence stays first for the same reason.
+//
+// ROOT WROTE THE RECEIPT, BUT NOT ITS TEXT. It quotes labels, versions and engine
+// answers, so it is made valid UTF-8 with every control and formatting character
+// turned into a space — no line can be forged in a log, no text reordered on the
+// panel — and cut, saying so, well inside the protocol's limit: PSP refuses a
+// result over that limit or not UTF-8, which would lose the outcome itself.
+func helperReason(sentence string, receipt Receipt) string {
+	message := sentence
+	for _, part := range []string{receipt.ErrorCode, receipt.Error} {
+		if part = printableText(part); part != "" {
+			message += ": " + part
+		}
+	}
+	const mark = "... (truncated)"
+	if len(message) <= maxHelperReasonBytes {
+		return message
+	}
+	cut := maxHelperReasonBytes - len(mark)
+	for cut > 0 && !utf8.RuneStart(message[cut]) {
+		cut--
+	}
+	return message[:cut] + mark
+}
+
+// printableText is value as valid UTF-8 with every character that does not
+// print, other than a space, replaced by a space.
+func printableText(value string) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r == ' ' || unicode.IsPrint(r) {
+			return r
+		}
+		return ' '
+	}, value))
+}
+
 func indeterminate(message string) error {
 	return &agent.TaskError{Code: "agent_upgrade_indeterminate", Indeterminate: true, Err: errors.New(message)}
 }
