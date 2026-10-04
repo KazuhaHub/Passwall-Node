@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -24,6 +25,7 @@ type ReportBuilder struct {
 	CoreVersion  string
 	CoreState    string
 	CoreStatus   func() agentcore.Status
+	PolicyStatus func() *protocol.PolicyStatus
 	// Capabilities are fixed for the process lifetime: what this build and the
 	// components it constructed at startup support, such as host telemetry.
 	Capabilities []string
@@ -83,6 +85,14 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.H
 		report.CoreEngine = status.Engine
 		report.CoreVersion = status.Version
 		report.CoreState = string(status.State)
+	}
+	if b.PolicyStatus != nil && slices.Contains(report.Capabilities, protocol.CapabilityDestinationPolicy) {
+		status := b.PolicyStatus()
+		if status != nil && protocol.ValidatePolicyStatus(*status) == nil {
+			copy := *status
+			copy.Listeners = append([]protocol.ListenerKey(nil), status.Listeners...)
+			report.PolicyStatus = &copy
+		}
 	}
 	for _, stream := range []string{protocol.StreamConfig, protocol.StreamRoster, protocol.StreamDirectives} {
 		doc, err := b.Store.Stream(ctx, stream)

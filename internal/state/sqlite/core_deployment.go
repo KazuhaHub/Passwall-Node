@@ -72,3 +72,21 @@ func validateCoreDeployment(deployment state.CoreDeployment) error {
 	}
 	return nil
 }
+
+func (s *Store) TouchCoreDeployment(ctx context.Context, digest string, appliedAtMS int64) error {
+	if appliedAtMS <= 0 || len(digest) != 64 {
+		return fmt.Errorf("%w: deployment touch requires digest and positive time", state.ErrInvalidState)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE core_deployment SET applied_at_ms = ? WHERE id = 1 AND config_digest = ?`, appliedAtMS, digest)
+	if err != nil {
+		return fmt.Errorf("touch core deployment: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("touch core deployment: %w", state.ErrNotFound)
+	}
+	return nil
+}

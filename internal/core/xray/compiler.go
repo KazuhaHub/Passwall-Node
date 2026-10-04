@@ -34,6 +34,9 @@ type Compiler struct {
 	LogLevel  string
 	AccessLog string
 	ErrorLog  string
+	// Set only after the local receiver is listening; token is persistent.
+	AuditSocket string
+	AuditToken  string
 	// CoreVersion selects the compatibility policy applied while compiling.
 	// Empty means the release marked recommended in the shared core catalog.
 	CoreVersion string
@@ -68,6 +71,7 @@ type xrayConfig struct {
 	Policy    map[string]any   `json:"policy"`
 	Inbounds  []map[string]any `json:"inbounds"`
 	Outbounds []map[string]any `json:"outbounds"`
+	Routing   map[string]any   `json:"routing,omitempty"`
 }
 
 func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (agentcore.Artifact, error) {
@@ -203,6 +207,9 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 	}
 
+	if err := c.compileDestinationPolicy(&config, snapshot); err != nil {
+		return agentcore.Artifact{}, err
+	}
 	encoded, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return agentcore.Artifact{}, fmt.Errorf("encode xray config: %w", err)

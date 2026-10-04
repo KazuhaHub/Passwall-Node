@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -19,8 +20,40 @@ import (
 )
 
 type observedRuntime struct {
-	store state.Store
-	now   func() time.Time
+	store        state.Store
+	now          func() time.Time
+	policyStatus protocol.PolicyStatus
+}
+
+// The contract shim acknowledges policy only after the real processor has
+// completed its round. This exercises the new wire subtree without claiming
+// that this deliberately coreless executable enforces destination traffic.
+func (r *observedRuntime) NewRound() agent.RuntimeRound { return &observedRound{observedRuntime: r} }
+
+type observedRound struct{ *observedRuntime }
+
+func (r *observedRound) Finalize(ctx context.Context) error {
+	doc, err := r.store.Stream(ctx, protocol.StreamConfig)
+	if errors.Is(err, state.ErrNotFound) {
+		r.policyStatus = protocol.PolicyStatus{State: "applied"}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var config protocol.ConfigBody
+	if err := json.Unmarshal(doc.Body, &config); err != nil {
+		return err
+	}
+	if err := protocol.ValidateDestinationPolicy(config.Policy); err != nil {
+		return err
+	}
+	r.policyStatus = protocol.PolicyStatus{State: "applied", Digest: protocol.PolicyDigest(config.Policy)}
+	return nil
+}
+func (r *observedRuntime) PolicyStatus() *protocol.PolicyStatus {
+	status := r.policyStatus
+	return &status
 }
 
 func (r observedRuntime) UpsertListener(ctx context.Context, listener protocol.Listener) error {
@@ -61,7 +94,7 @@ func main() {
 	}
 	defer store.Close()
 	now := time.Now
-	runtime := observedRuntime{store: store, now: now}
+	runtime := &observedRuntime{store: store, now: now, policyStatus: protocol.PolicyStatus{State: "applied"}}
 	issueSink := agent.OutboxIssueSink{Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() }}
 	processor, err := agent.NewProcessor(agent.ProcessorOptions{
 		Store: store, Runtime: runtime,
@@ -81,6 +114,7 @@ func main() {
 		Reports: agent.ReportBuilder{
 			AgentID: agentID, AgentVersion: "contract", CoreEngine: "xray", CoreVersion: "coreless", CoreState: "running",
 			Store: store, Now: now,
+			Capabilities: []string{protocol.CapabilityDestinationPolicy}, PolicyStatus: runtime.PolicyStatus,
 		},
 		Syncer: httpSyncer, Store: store, Processor: processor,
 	}
@@ -105,3 +139,4 @@ func fail(err error) {
 }
 
 var _ agent.Runtime = observedRuntime{}
+var _ agent.RoundScopedRuntime = (*observedRuntime)(nil)

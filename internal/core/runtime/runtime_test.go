@@ -117,8 +117,23 @@ func TestRoundCompilesInstallsAndDeploysAtMostOnce(t *testing.T) {
 	if err := runtime.NewRound().Finalize(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if compiler.calls != 2 || installer.calls != 1 || supervisor.deployCalls != 1 {
+	if compiler.calls != 1 || installer.calls != 1 || supervisor.deployCalls != 1 {
 		t.Fatalf("unchanged heartbeat calls compile/install/deploy = %d/%d/%d", compiler.calls, installer.calls, supervisor.deployCalls)
+	}
+}
+
+func TestRuntimePassesDesiredDestinationPolicyToCompiler(t *testing.T) {
+	store := openRuntimeStore(t)
+	policy := &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, Ports: "25"}}}
+	saveRuntimeBody(t, store, protocol.StreamConfig, protocol.ConfigBody{Policy: policy})
+	compiler := &compilerStub{artifact: testArtifact(`{"inbounds":[]}`)}
+	installer := &installerStub{result: install.Installation{Engine: "xray", Version: "26.6.27", BinaryPath: "/cores/xray"}}
+	runtime := newRuntimeForTest(t, store, compiler, installer, &supervisorStub{})
+	if err := runtime.Converge(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if compiler.snapshot.DestinationPolicy == nil || protocol.PolicyDigest(compiler.snapshot.DestinationPolicy) != protocol.PolicyDigest(policy) {
+		t.Fatal("desired destination policy did not reach the production compiler")
 	}
 }
 

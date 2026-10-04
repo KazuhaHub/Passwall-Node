@@ -213,6 +213,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := coreRuntime.RestoreStatus(ctx); err != nil {
+		return err
+	}
 	xrayTelemetry, err := xray.NewTelemetry(xray.TelemetryOptions{
 		Store: store, Status: supervisor.Status, APIListen: parsed.XrayAPIListen,
 	})
@@ -305,7 +308,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	// NOT among them: they come from taskWorker.Capabilities, which the report
 	// builder calls for every report, because one of them — remote upgrade —
 	// depends on a helper outside this process.
-	var capabilities []string
+	capabilities := []string{protocol.CapabilityDestinationPolicy}
 	// THE CAPABILITY IS DECLARED FROM THE RESULT, NOT FROM THE PLATFORM. A build
 	// whose collector could not be constructed must not advertise
 	// host.telemetry.v1: the panel would then expect telemetry from a node that
@@ -337,6 +340,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Host:           hostReporter,
 		Stats:          runtimeStats,
 	}
+	synchronizer.Reports.PolicyStatus = coreRuntime.PolicyStatus
 	if upgradeClient != nil {
 		synchronizer.OnSynced = func(ctx context.Context) error { return upgradeClient.RecordReady(ctx, store) }
 	}

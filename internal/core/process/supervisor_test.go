@@ -47,6 +47,9 @@ func TestSupervisorHelperProcess(t *testing.T) {
 	}
 	switch action {
 	case "check", "check-next":
+		if strings.Contains(string(config), "slow-check") {
+			time.Sleep(2 * testProcessTimeout)
+		}
 		if strings.Contains(string(config), "invalid") {
 			_, _ = os.Stderr.WriteString("synthetic validation failure")
 			os.Exit(2)
@@ -62,6 +65,47 @@ func TestSupervisorHelperProcess(t *testing.T) {
 		os.Exit(0)
 	default:
 		os.Exit(92)
+	}
+}
+
+func TestCandidateRejectedOnlyForCompletedNonzeroCheck(t *testing.T) {
+	supervisor := newTestSupervisor(t)
+	path, err := writeCandidate(supervisor.options.StateDir, []byte("invalid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	if err := supervisor.validateCandidate(t.Context(), "test", supervisor.options.Binary, path); !errors.Is(err, ErrCandidateRejected) {
+		t.Fatalf("nonzero check lacked rejection marker: %v", err)
+	}
+	if err := supervisor.validateCandidate(t.Context(), "test", filepath.Join(t.TempDir(), "absent"), path); err == nil || errors.Is(err, ErrCandidateRejected) {
+		t.Fatalf("exec failure attributed to candidate: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("slow-check"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	supervisor.options.CheckTimeout = 40 * time.Millisecond
+	if err := supervisor.validateCandidate(t.Context(), "test", supervisor.options.Binary, path); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCandidateRejected) {
+		t.Fatalf("timeout attributed to candidate: %v", err)
+	}
+}
+
+func TestValidateDeploymentNeverStartsOrInstallsCandidate(t *testing.T) {
+	supervisor := newTestSupervisor(t)
+	before := supervisor.Status()
+	d := agentcore.Deployment{Engine: "test", Version: "test", BinaryPath: supervisor.options.Binary, Artifact: testArtifact("good")}
+	if err := supervisor.ValidateDeployment(t.Context(), d); err != nil {
+		t.Fatal(err)
+	}
+	if after := supervisor.Status(); after != before {
+		t.Fatalf("check changed supervisor: before=%+v after=%+v", before, after)
+	}
+	entries, err := os.ReadDir(supervisor.options.StateDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("check installed or retained a candidate: %v %v", entries, err)
+	}
+	if _, running := supervisor.ProcessHandle(); running {
+		t.Fatal("check started a core")
 	}
 }
 

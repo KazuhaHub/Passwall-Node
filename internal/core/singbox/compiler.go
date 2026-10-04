@@ -158,6 +158,9 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			}
 		}
 	}
+	if err := compileDestinationPolicy(&result, snapshot); err != nil {
+		return agentcore.Artifact{}, err
+	}
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return agentcore.Artifact{}, fmt.Errorf("encode sing-box config: %w", err)
