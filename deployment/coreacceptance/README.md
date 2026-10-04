@@ -7,6 +7,8 @@ installer, including catalog archive SHA256 checks and exact executable version
 verification. The test-only Mihomo **1.19.30** client is pinned to an official
 release asset SHA256; amd64 uses its v1 CPU-baseline asset. No moving release,
 private credential, external proxy endpoint or production host is involved.
+The disposable fixture explicitly opts into restricted Xray 26.9.9; production
+installation and REALITY client-compatibility consent remain unchanged.
 
 The fixture enables the existing gated tests and runs them with `-count=1`:
 

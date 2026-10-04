@@ -95,7 +95,12 @@ func prepare(ctx context.Context, directory, environmentFile string, output io.W
 		{"xray", xrayVersion}, {"sing-box", singBoxVersion},
 		{"xray", "26.7.28"}, {"xray", "26.9.9"},
 	} {
-		installed, err := installer.Install(ctx, install.Request{Engine: pin.engine, Version: pin.version})
+		installed, err := installer.Install(ctx, install.Request{
+			Engine: pin.engine, Version: pin.version,
+			// Only this disposable fixture opts into the catalog's restricted
+			// REALITY release; the production installer still requires consent.
+			AcceptRestricted: pin.engine == "xray" && pin.version == "26.9.9",
+		})
 		if err != nil {
 			return fmt.Errorf("install official %s %s: %w", pin.engine, pin.version, err)
 		}
