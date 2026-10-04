@@ -14,9 +14,10 @@ import (
 // closed listener/client join rather than an imperative sequence, so one sync
 // round produces at most one core transition.
 type Snapshot struct {
-	Listeners []protocol.Listener
-	Clients   []protocol.Client
-	Now       time.Time
+	Listeners         []protocol.Listener
+	Clients           []protocol.Client
+	Now               time.Time
+	DestinationPolicy *protocol.DestinationPolicy
 }
 
 // Artifact is a validated, content-addressed core configuration. Digest is a
@@ -80,6 +81,23 @@ func (e *ObjectError) Error() string {
 }
 
 func (e *ObjectError) Unwrap() error { return e.Err }
+
+// PolicyError rejects destination policy independently of listener/client
+// objects. It must never make an unrelated object appear terminally rejected.
+type PolicyError struct {
+	Code      string
+	Listeners []protocol.ListenerKey
+	Err       error
+}
+
+func (e *PolicyError) Error() string {
+	if e == nil {
+		return "destination policy error"
+	}
+	return fmt.Sprintf("destination policy %s: %v", e.Code, e.Err)
+}
+
+func (e *PolicyError) Unwrap() error { return e.Err }
 
 // Supervisor validates, installs, starts, monitors and rolls back one core
 // process. Apply must be content-idempotent: applying an already-running digest

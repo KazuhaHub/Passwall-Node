@@ -99,19 +99,28 @@ func TestCompilerArtifactPassesPinnedSingBoxValidation(t *testing.T) {
 	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := (Compiler{APIListen: "127.0.0.1:10086", APISecret: testAPISecret}).Compile(
-		context.Background(), protocolMatrixSnapshot(t, certificatePath, keyPath),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, artifact.Config, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	command := exec.CommandContext(t.Context(), binary, "check", "-c", configPath)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("sing-box rejected compiled artifact: %v\n%s\n%s", err, output, artifact.Config)
+	for _, withPolicy := range []bool{false, true} {
+		snapshot := protocolMatrixSnapshot(t, certificatePath, keyPath)
+		if withPolicy {
+			snapshot.DestinationPolicy = &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
+				{ID: "p1", Action: protocol.RuleAllow, Domains: []string{"full:allowed.example"}},
+				{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:blocked.example", "keyword:tracking", "regexp:^ads[.].*"}, CIDRs: []string{"10.0.0.0/8"}, Private: true, Ports: "25,80-90", Network: "tcp"},
+				{ID: "p3", Action: protocol.RuleObserve, Protocols: []string{"bittorrent"}},
+				{ID: "g1", Action: protocol.RuleBlock, Subjects: []protocol.SubjectKey{snapshot.Clients[0].Subject}, CatchAll: true},
+			}}
+		}
+		artifact, err := (Compiler{APIListen: "127.0.0.1:10086", APISecret: testAPISecret}).Compile(context.Background(), snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(configPath, artifact.Config, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.CommandContext(t.Context(), binary, "check", "-c", configPath)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("sing-box rejected compiled artifact (policy=%v): %v\n%s\n%s", withPolicy, err, output, artifact.Config)
+		}
 	}
 }
 

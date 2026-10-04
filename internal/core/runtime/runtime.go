@@ -20,6 +20,7 @@ import (
 	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/install"
+	"github.com/KazuhaHub/passwall-node/v4/internal/core/process"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/xray"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
@@ -47,6 +48,10 @@ type Runtime struct {
 	now             func() time.Time
 	convergeMu      sync.Mutex
 	scheduleWake    chan struct{}
+	policyMu        sync.RWMutex
+	policyStatus    protocol.PolicyStatus
+	lastFingerprint string
+	lastDeployment  *state.CoreDeployment
 }
 
 func New(options Options) (*Runtime, error) {
@@ -62,6 +67,7 @@ func New(options Options) (*Runtime, error) {
 	return &Runtime{
 		store: options.Store, installer: options.Installer, supervisor: options.Supervisor,
 		compilerFactory: options.CompilerFactory, now: options.Now, scheduleWake: make(chan struct{}, 1),
+		policyStatus: protocol.PolicyStatus{State: "applied"},
 	}, nil
 }
 
@@ -275,26 +281,35 @@ func (r *round) objectResult(ctx context.Context, stream, key string) error {
 }
 
 func (r *Runtime) converge(ctx context.Context) error {
-	config, err := loadBody[protocol.ConfigBody](ctx, r.store, protocol.StreamConfig)
+	configDoc, err := r.store.Stream(ctx, protocol.StreamConfig)
 	if err != nil {
 		return fmt.Errorf("load desired config: %w", err)
 	}
-	roster, err := optionalBody[protocol.RosterBody](ctx, r.store, protocol.StreamRoster)
-	if err != nil {
+	var config protocol.ConfigBody
+	if err := json.Unmarshal(configDoc.Body, &config); err != nil {
+		return fmt.Errorf("decode desired config: %w", err)
+	}
+	rosterDoc, err := r.store.Stream(ctx, protocol.StreamRoster)
+	var roster *protocol.RosterBody
+	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return fmt.Errorf("load desired roster: %w", err)
+	}
+	if err == nil {
+		roster = &protocol.RosterBody{}
+		if err := json.Unmarshal(rosterDoc.Body, roster); err != nil {
+			return fmt.Errorf("decode desired roster: %w", err)
+		}
 	}
 	selection, err := resolveSelection(config.Core)
 	if err != nil {
 		return err
 	}
-	compiler, err := r.compilerFactory(selection)
-	if err != nil {
-		return fmt.Errorf("construct %s compiler: %w", selection.Engine, err)
-	}
 	snapshot := agentcore.Snapshot{
-		Listeners: append([]protocol.Listener(nil), config.Listeners...),
-		Now:       r.now(),
+		Listeners:         append([]protocol.Listener(nil), config.Listeners...),
+		Now:               r.now(),
+		DestinationPolicy: config.Policy,
 	}
+	inputs := convergenceInputs{Config: configDoc.ETag, Roster: rosterDoc.ETag, Core: selection}
 	if roster != nil {
 		snapshot.Clients = append([]protocol.Client(nil), roster.Clients...)
 		localClients, err := r.store.Clients(ctx)
@@ -306,6 +321,12 @@ func (r *Runtime) converge(ctx context.Context) error {
 			localByKey[local.Key] = local
 		}
 		for index := range snapshot.Clients {
+			client := snapshot.Clients[index]
+			// Expiry still advances the fingerprint when a local gate already
+			// disabled this client and removing it will not alter the artifact.
+			if client.Enabled && client.ExpiresAtMS > 0 && client.ExpiresAtMS <= snapshot.Now.UnixMilli() {
+				inputs.Expired = append(inputs.Expired, client.Key)
+			}
 			local, exists := localByKey[snapshot.Clients[index].Key]
 			if !exists {
 				continue
@@ -317,24 +338,48 @@ func (r *Runtime) converge(ctx context.Context) error {
 			if local.Gate == protocol.GateClosed ||
 				(local.Gate == protocol.GateUnconfigured && local.HeadroomBytes != nil) {
 				snapshot.Clients[index].Enabled = false
+				if client.Enabled {
+					inputs.Disabled = append(inputs.Disabled, client.Key)
+				}
 			}
 		}
 	}
+	fingerprint := inputs.digest()
+	status := r.supervisor.Status()
+	if fingerprint == r.lastFingerprint && r.lastDeployment != nil &&
+		status.State == agentcore.ProcessRunning && status.Engine == selection.Engine &&
+		status.Version == selection.Version && status.ConfigDigest == r.lastDeployment.ConfigDigest {
+		return nil
+	}
+	compiler, err := r.compilerFactory(selection)
+	if err != nil {
+		return fmt.Errorf("construct %s compiler: %w", selection.Engine, err)
+	}
 	artifact, err := compiler.Compile(ctx, snapshot)
 	if err != nil {
+		var rejected *agentcore.PolicyError
+		if errors.As(err, &rejected) {
+			r.rejectPolicy(config.Policy, rejected)
+		}
 		return err
 	}
 	if err := validateArtifact(artifact); err != nil {
 		return fmt.Errorf("compiler returned invalid artifact: %w", err)
 	}
-	status := r.supervisor.Status()
 	if status.State == agentcore.ProcessRunning && status.Engine == selection.Engine &&
 		status.Version == selection.Version && status.ConfigDigest == artifact.Digest {
-		return r.saveDeployment(ctx, selection, artifact, config, roster)
+		return r.confirmDeployment(ctx, selection, artifact, &config, roster, fingerprint)
+	}
+	installConfig := artifact.Config
+	if config.Policy != nil {
+		// Installer checks binary identity here. The supervisor must own the
+		// candidate check so a completed refusal can be attributed with one
+		// policy-free check before any running-process transition.
+		installConfig = nil
 	}
 	installed, err := r.installer.Install(ctx, install.Request{
 		Engine: selection.Engine, Version: selection.Version,
-		AcceptRestricted: selection.AllowRestrictedReality, CurrentConfiguration: artifact.Config,
+		AcceptRestricted: selection.AllowRestrictedReality, CurrentConfiguration: installConfig,
 	})
 	if err != nil {
 		return fmt.Errorf("install %s %s: %w", selection.Engine, selection.Version, err)
@@ -342,13 +387,31 @@ func (r *Runtime) converge(ctx context.Context) error {
 	if installed.Engine != selection.Engine || installed.Version != selection.Version || installed.BinaryPath == "" {
 		return errors.New("core installer returned a mismatched installation")
 	}
-	if err := r.supervisor.Deploy(ctx, agentcore.Deployment{
+	deployment := agentcore.Deployment{
 		Artifact: artifact, Engine: installed.Engine,
 		BinaryPath: installed.BinaryPath, Version: installed.Version,
-	}); err != nil {
+	}
+	if err := r.supervisor.Deploy(ctx, deployment); err != nil {
+		if config.Policy != nil && errors.Is(err, process.ErrCandidateRejected) {
+			// A successful policy-free check is evidence of attribution, never
+			// authorization to deploy a relaxed candidate behind PSP's back.
+			if validator, ok := r.supervisor.(interface {
+				ValidateDeployment(context.Context, agentcore.Deployment) error
+			}); ok {
+				withoutPolicy := snapshot
+				withoutPolicy.DestinationPolicy = nil
+				plain, compileErr := compiler.Compile(ctx, withoutPolicy)
+				if compileErr == nil && validateArtifact(plain) == nil {
+					deployment.Artifact = plain
+					if validator.ValidateDeployment(ctx, deployment) == nil {
+						r.rejectPolicy(config.Policy, &agentcore.PolicyError{Code: protocol.IssueDestinationPolicyRejected, Err: err})
+					}
+				}
+			}
+		}
 		return fmt.Errorf("deploy %s %s: %w", selection.Engine, selection.Version, err)
 	}
-	return r.saveDeployment(ctx, selection, artifact, config, roster)
+	return r.confirmDeployment(ctx, selection, artifact, &config, roster, fingerprint)
 }
 
 func (r *Runtime) saveDeployment(
@@ -373,13 +436,23 @@ func (r *Runtime) saveDeployment(
 	if appliedAtMS <= 0 {
 		return errors.New("runtime clock must be after Unix epoch")
 	}
-	if err := r.store.SaveCoreDeployment(ctx, state.CoreDeployment{
+	deployment := state.CoreDeployment{
 		Engine: selection.Engine, Version: selection.Version, ConfigDigest: artifact.Digest,
 		Artifact: append([]byte(nil), artifact.Config...), ConfigBody: configBody, RosterBody: rosterBody,
 		AppliedAtMS: appliedAtMS,
-	}); err != nil {
-		return fmt.Errorf("record confirmed core deployment: %w", err)
 	}
+	var saveErr error
+	if r.lastDeployment != nil && r.lastDeployment.Engine == deployment.Engine &&
+		r.lastDeployment.Version == deployment.Version && r.lastDeployment.ConfigDigest == deployment.ConfigDigest &&
+		bytes.Equal(r.lastDeployment.ConfigBody, configBody) && bytes.Equal(r.lastDeployment.RosterBody, rosterBody) {
+		saveErr = r.store.TouchCoreDeployment(ctx, artifact.Digest, appliedAtMS)
+	} else {
+		saveErr = r.store.SaveCoreDeployment(ctx, deployment)
+	}
+	if saveErr != nil {
+		return fmt.Errorf("record confirmed core deployment: %w", saveErr)
+	}
+	r.lastDeployment = &deployment
 	r.wakeExpirySchedule()
 	return nil
 }
@@ -405,26 +478,6 @@ func resolveSelection(selection protocol.CoreSelection) (protocol.CoreSelection,
 	selection.Engine = release.Engine
 	selection.Version = release.Version
 	return selection, nil
-}
-
-func loadBody[T any](ctx context.Context, store state.Store, stream string) (*T, error) {
-	document, err := store.Stream(ctx, stream)
-	if err != nil {
-		return nil, err
-	}
-	var body T
-	if err := json.Unmarshal(document.Body, &body); err != nil {
-		return nil, fmt.Errorf("decode %s body: %w", stream, err)
-	}
-	return &body, nil
-}
-
-func optionalBody[T any](ctx context.Context, store state.Store, stream string) (*T, error) {
-	body, err := loadBody[T](ctx, store, stream)
-	if errors.Is(err, state.ErrNotFound) {
-		return nil, nil
-	}
-	return body, err
 }
 
 func validateArtifact(artifact agentcore.Artifact) error {

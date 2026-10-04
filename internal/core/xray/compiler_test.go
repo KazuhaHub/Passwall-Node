@@ -191,18 +191,32 @@ func TestCompilerArtifactPassesPinnedXrayValidation(t *testing.T) {
 				t.Skipf("set %s to the audited Xray binary", test.env)
 			}
 			compiler := Compiler{CoreVersion: test.version, AllowRestrictedReality: test.restricted}
-			artifact, err := compiler.Compile(context.Background(), realitySnapshot(t))
-			if err != nil {
-				t.Fatal(err)
-			}
-			configPath := filepath.Join(t.TempDir(), "config.json")
-			if err := os.WriteFile(configPath, artifact.Config, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			command := exec.CommandContext(t.Context(), binary, "run", "-test", "-config", configPath)
-			output, err := command.CombinedOutput()
-			if err != nil {
-				t.Fatalf("Xray %s rejected compiled artifact: %v\n%s", test.name, err, output)
+			for _, mode := range []string{"legacy", "policy", "policy-webhook"} {
+				snapshot := realitySnapshot(t)
+				if mode != "legacy" {
+					snapshot.DestinationPolicy = &protocol.DestinationPolicy{Exempt: []protocol.SubjectKey{snapshot.Clients[0].Subject}, Rules: []protocol.DestinationRule{
+						{ID: "p1", Action: protocol.RuleAllow, Domains: []string{"full:allowed.example"}},
+						{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:blocked.example", "keyword:tracking", "regexp:^ads[.].*"}, CIDRs: []string{"10.0.0.0/8"}, Private: true, Ports: "25,80-90", Network: "tcp"},
+						{ID: "p3", Action: protocol.RuleObserve, Protocols: []string{"bittorrent"}},
+						{ID: "g1", Action: protocol.RuleBlock, Subjects: []protocol.SubjectKey{snapshot.Clients[0].Subject}, CatchAll: true},
+					}}
+				}
+				if mode == "policy-webhook" {
+					snapshot.DestinationPolicy.Collect, snapshot.DestinationPolicy.CollectRevision = protocol.CollectHits, 9
+					compiler.AuditSocket, compiler.AuditToken = "/tmp/psp-audit.sock", strings.Repeat("a", 32)
+				}
+				artifact, err := compiler.Compile(context.Background(), snapshot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				configPath := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(configPath, artifact.Config, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.CommandContext(t.Context(), binary, "run", "-test", "-config", configPath)
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf("Xray %s rejected %s artifact: %v\n%s", test.name, mode, err, output)
+				}
 			}
 		})
 	}

@@ -76,6 +76,18 @@ change `NODE_VERSION` to the fixed release before pulling and recreating the
 container. Recreating an unchanged old image does not apply the fix. An updater
 older than 4.0.1.7 requires one manual image update before remote upgrades work.
 
+## Destination policies
+
+Destination policies are applied as ordered native Xray or sing-box routing
+rules when supplied by PSP. Nodes advertise `policy.destination.v1` and report
+the digest of the confirmed policy separately from stream receipt. A rejected
+policy leaves the prior core deployment running; PSP decides any fallback.
+Ordinary download, process, listener and storage failures do not report a
+policy rejection. Startup restores status from the last confirmed deployment.
+
+This capability alone does not enable audit collection: hit/usage capabilities
+require their respective collectors. sing-box currently executes rules only.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real

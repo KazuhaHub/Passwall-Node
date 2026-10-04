@@ -465,6 +465,31 @@ func (s *Supervisor) handleApply(
 	return finish(applyErr)
 }
 
+// ErrCandidateRejected identifies a completed core configuration check that
+// exited unsuccessfully. Launch errors and cancelled/timed-out checks do not
+// prove that the candidate was rejected by the core.
+var ErrCandidateRejected = errors.New("core candidate rejected")
+
+// ValidateDeployment checks an artifact with the exact target binary without
+// installing it or touching the running process. Runtime uses this once to
+// distinguish destination-policy rejection from unrelated listener failures.
+func (s *Supervisor) ValidateDeployment(ctx context.Context, deployment agentcore.Deployment) error {
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	if err := validateDeployment(deployment); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.options.StateDir, 0o700); err != nil {
+		return err
+	}
+	path, err := writeCandidate(s.options.StateDir, deployment.Artifact.Config)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
+	return s.validateCandidate(ctx, deployment.Engine, deployment.BinaryPath, path)
+}
+
 func (s *Supervisor) validateCandidate(ctx context.Context, engine, binary, path string) error {
 	commandSpec, err := resolveCommand(s.options.Commands, engine)
 	if err != nil {
@@ -480,6 +505,10 @@ func (s *Supervisor) validateCandidate(ctx context.Context, engine, binary, path
 	if err := command.Run(); err != nil {
 		if checkCtx.Err() != nil {
 			return fmt.Errorf("validate core config: %w", checkCtx.Err())
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.Exited() {
+			return fmt.Errorf("validate core config: %w: %w: %s", ErrCandidateRejected, err, strings.TrimSpace(output.String()))
 		}
 		return fmt.Errorf("validate core config: %w: %s", err, strings.TrimSpace(output.String()))
 	}
