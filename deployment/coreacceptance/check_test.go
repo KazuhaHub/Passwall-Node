@@ -61,6 +61,20 @@ func TestCheckRequiresEveryExecutableLeafAndPackage(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsRecommendedOnlyXrayEvidence(t *testing.T) {
+	var events []testEvent
+	for _, event := range passingEvents() {
+		if event.Test == "TestCompilerArtifactPassesPinnedXrayValidation/26.7.28" ||
+			event.Test == "TestCompilerArtifactPassesPinnedXrayValidation/26.9.9" {
+			continue
+		}
+		events = append(events, event)
+	}
+	if err := checkResults(eventStream(t, events)); err == nil {
+		t.Fatal("recommended-only Xray evidence accepted without testing the other selectable versions")
+	}
+}
+
 func TestCheckRejectsSkippedFailedCachedDuplicateAndMalformedEvidence(t *testing.T) {
 	for _, action := range []string{"skip", "fail", "build-fail"} {
 		t.Run(action, func(t *testing.T) {

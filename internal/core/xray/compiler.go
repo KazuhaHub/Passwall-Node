@@ -131,7 +131,9 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	}
 
 	config := xrayConfig{
-		Log: map[string]any{"loglevel": logLevel},
+		// An absent access field sends connection details to the agent's stdout.
+		// Disable it explicitly unless a caller supplies a local access-log path.
+		Log: map[string]any{"loglevel": logLevel, "access": "none"},
 		API: map[string]any{
 			"tag": "psp-api", "listen": apiListen,
 			"services": []string{"StatsService"},

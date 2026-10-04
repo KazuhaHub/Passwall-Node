@@ -62,6 +62,36 @@ func TestCompilerPinsBroadCompatibilityByDefault(t *testing.T) {
 	}
 }
 
+func TestCompilerAccessLogPolicy(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		access string
+		want   string
+	}{
+		{name: "production default", want: "none"},
+		{name: "explicit file", access: "access.log", want: "access.log"},
+		{name: "explicit disable", access: "none", want: "none"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			artifact, err := (Compiler{AccessLog: test.access}).Compile(context.Background(), realitySnapshot(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config struct {
+				Log map[string]any `json:"log"`
+			}
+			if err := json.Unmarshal(artifact.Config, &config); err != nil {
+				t.Fatal(err)
+			}
+			if got := config.Log["access"]; got != test.want {
+				t.Fatalf("log.access = %#v, want %q; absent access logs leak connection details to stdout", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCompilerWidensVersionGateForThirdPartyClients(t *testing.T) {
 	t.Parallel()
 	artifact, err := (Compiler{CoreVersion: "26.7.28"}).Compile(context.Background(), realitySnapshot(t))

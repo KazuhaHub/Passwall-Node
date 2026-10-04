@@ -90,9 +90,17 @@ func prepare(ctx context.Context, directory, environmentFile string, output io.W
 	if err != nil {
 		return err
 	}
-	binaries := make([]preparedBinary, 0, 3)
-	for _, pin := range []struct{ engine, version string }{{"xray", xrayVersion}, {"sing-box", singBoxVersion}} {
-		installed, err := installer.Install(ctx, install.Request{Engine: pin.engine, Version: pin.version})
+	binaries := make([]preparedBinary, 0, 5)
+	for _, pin := range []struct{ engine, version string }{
+		{"xray", xrayVersion}, {"sing-box", singBoxVersion},
+		{"xray", "26.7.28"}, {"xray", "26.9.9"},
+	} {
+		installed, err := installer.Install(ctx, install.Request{
+			Engine: pin.engine, Version: pin.version,
+			// Only this disposable fixture opts into the catalog's restricted
+			// REALITY release; the production installer still requires consent.
+			AcceptRestricted: pin.engine == "xray" && pin.version == "26.9.9",
+		})
 		if err != nil {
 			return fmt.Errorf("install official %s %s: %w", pin.engine, pin.version, err)
 		}
@@ -112,6 +120,8 @@ func prepare(ctx context.Context, directory, environmentFile string, output io.W
 		{"PSP_TEST_CORE_INSTALL", "1"},
 		{"PSP_TEST_SING_BOX_INSTALL", "1"},
 		{"PSP_TEST_XRAY_26627_BIN", binaries[0].BinaryPath},
+		{"PSP_TEST_XRAY_26728_BIN", binaries[2].BinaryPath},
+		{"PSP_TEST_XRAY_2699_BIN", binaries[3].BinaryPath},
 		{"PSP_TEST_XRAY_CLIENT_BIN", binaries[0].BinaryPath},
 		{"PSP_TEST_SING_BOX_BIN", binaries[1].BinaryPath},
 		{"PSP_TEST_MIHOMO_CLIENT_BIN", clientBinary},
