@@ -54,6 +54,28 @@ disabled.
 digest of its content. Unchanged means no body. Minting is content-idempotent:
 recomputing the same bytes mints no new version.
 
+## Access logs and upgrades
+
+Production Xray configurations explicitly disable access logs (`access: "none"`).
+This prevents per-connection destinations and user emails from appearing in
+systemd journals or Docker logs. An explicit compiler access-log path remains
+available for development; the production daemon does not set one.
+
+When upgrading from an older version, the agent initially starts its saved core
+configuration. Access logs stop only after the first successful synchronization
+and core deployment, normally within one poll interval on a healthy node. An
+offline node or a failed deployment can continue using the old configuration.
+Check the deployed artifact and new log output. The changed configuration restarts
+the core once, interrupting existing connections; SQLite schema v9 is unchanged.
+
+Existing logs remain until cleaned up. `journalctl --vacuum-time=...` affects the
+whole host's archived journal. PSP's Docker updater normally deletes the old
+container and its json-file logs; if it reports a retained rollback container,
+remove that container after confirming the upgrade. For a manual Docker install,
+change `NODE_VERSION` to the fixed release before pulling and recreating the
+container. Recreating an unchanged old image does not apply the fix. An updater
+older than 4.0.1.7 requires one manual image update before remote upgrades work.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real

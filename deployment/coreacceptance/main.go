@@ -57,7 +57,7 @@ func run(arguments []string, output, diagnostic io.Writer) error {
 		if err := checkResults(file); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintln(output, "Verified all 8 executable acceptance leaves and both parent tests: run + pass, no skips or missing evidence.")
+		_, err = fmt.Fprintln(output, "Verified all 10 executable acceptance leaves and both parent tests: run + pass, no skips or missing evidence.")
 		return err
 	default:
 		return fmt.Errorf("unknown command %q", arguments[0])
