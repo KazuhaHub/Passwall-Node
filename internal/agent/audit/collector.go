@@ -553,8 +553,17 @@ func normalizedDestination(destination string) (string, uint16, bool) {
 		}
 		return addr.String(), uint16(n), true
 	}
-	host, err = idna.Lookup.ToASCII(strings.TrimSuffix(host, "."))
-	if err != nil || len(host) == 0 || len(host) > 253 {
+	host = strings.TrimSuffix(host, ".")
+	// The protocol permits ASCII underscores. Apply Lookup only to IDNs;
+	// applying its DNS-label restrictions to ASCII would silently lose hits
+	// for names the wire contract explicitly accepts.
+	if strings.IndexFunc(host, func(r rune) bool { return r > 127 }) >= 0 {
+		host, err = idna.Lookup.ToASCII(host)
+		if err != nil {
+			return "", 0, false
+		}
+	}
+	if len(host) == 0 || len(host) > 253 {
 		return "", 0, false
 	}
 	return strings.ToLower(host), uint16(n), true

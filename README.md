@@ -117,10 +117,16 @@ and uses receipt time rather than the webhook timestamp. Startup fails on a
 non-socket file or runtime-directory symlink. Serving errors and panics return
 to lifecycle; they must not silently disable a declared collector.
 
-This commit adds the collector and sink components only. The production daemon
-does not yet construct them, bind confirmed-deployment snapshots, attach audit
-to reports or advertise `audit.hits.v1`. Report fitting/acknowledgement and
-lifecycle/runtime wiring remain required before stage 2b is delivered. The
+The report builder accepts Host/Audit options and computes a new batch's byte
+allowance after reserving control content. Host is removed first; frozen audit
+that still does not fit is deferred whole. Invalid audit is discarded separately
+and only the kind/ID actually sent is acknowledged after a valid control
+response, before durable-outbox acknowledgement or local core processing.
+
+The production daemon does not yet construct these components, bind
+confirmed-deployment snapshots or advertise `audit.hits.v1`. Lifecycle/runtime
+wiring and real deployment acceptance remain required before stage 2b is
+delivered. The
 usage ingestion entry is present for the later stage 4 filter; it does not
 enable access logging or advertise `audit.usage.v1`.
 

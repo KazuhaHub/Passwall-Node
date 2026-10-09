@@ -292,3 +292,12 @@ func TestCounterOnlyLossExpiryKeepsOriginalHour(t *testing.T) {
 		t.Fatalf("loss expiry stats: %+v", c.Stats())
 	}
 }
+
+func TestASCIIHostNormalizationRetainsProtocolAllowedUnderscores(t *testing.T) {
+	c, _ := testCollector()
+	c.AddHit(1, "user@example", "_Service.Example.:443", "psp-deny-p1")
+	b := nextBatch(t, c, protocol.MaxAuditObservationBytes).Observation
+	if len(b.Hits) != 1 || b.Hits[0].Dest != "_service.example" || b.Unmatched != 0 {
+		t.Fatalf("valid ASCII hostname rejected: %+v", b)
+	}
+}
