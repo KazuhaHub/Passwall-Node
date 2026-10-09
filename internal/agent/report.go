@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent/audit"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
@@ -55,10 +56,27 @@ type BuiltReport struct {
 	// HostDropped says the telemetry sample was removed to fit the wire. The
 	// cadence must NOT advance for such a round — nothing was delivered — so the
 	// caller retries on the next one and records the episode.
-	HostDropped bool
+	HostDropped         bool
+	AuditKind           string
+	AuditBatchIDSent    string
+	AuditUsageTrimmed   int
+	AuditHitsTrimmed    int
+	AuditDeferred       bool
+	AuditInvalidDropped bool
 }
 
-func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.HostObservation) (BuiltReport, error) {
+type AuditSource interface {
+	Next(int) (audit.Batch, error)
+	Acknowledge(string, string) bool
+	DiscardInvalid(string, string)
+}
+
+type BuildOptions struct {
+	Host  *protocol.HostObservation
+	Audit AuditSource
+}
+
+func (b ReportBuilder) Build(ctx context.Context, partial bool, options BuildOptions) (BuiltReport, error) {
 	if b.AgentID == "" {
 		return BuiltReport{}, fmt.Errorf("agent id is required")
 	}
@@ -150,15 +168,56 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.H
 	}
 	report.Issues = batch.Issues
 	report.TaskResults = batch.TaskResults
-	// The telemetry sample is attached LAST, after the control content is
-	// settled, so the wire-size check below sees the report it is actually
-	// deciding about.
-	report.Host = host
+	// Optional observations are attached after control content is settled, so
+	// fitting measures the exact report that would go onto the wire.
+	report.Host = options.Host
+	result := BuiltReport{OutboxIDs: batch.IDs}
+	if options.Audit != nil && slices.Contains(report.Capabilities, protocol.CapabilityAuditHits) {
+		// Control wins. Compute the allowance without Host, which is the first
+		// optional subtree to go; the collector trims NEW rows before freezing.
+		// Its already-frozen pending ignores this allowance and is deferred whole
+		// by fitReportToWire below, never cropped or renumbered on retry.
+		control := report
+		control.Host = nil
+		body, err := encodeReport(&control)
+		if err != nil {
+			return BuiltReport{}, err
+		}
+		allowance := max(int64(0), b.bodyLimit()-int64(len(body))-int64(len(`,"audit":`)))
+		auditBatch, err := options.Audit.Next(int(min(allowance, int64(protocol.MaxAuditObservationBytes))))
+		if err != nil {
+			result.AuditDeferred = true
+		} else if observation := auditBatch.Observation; observation != nil {
+			result.AuditKind = observation.Kind
+			switch {
+			case protocol.ValidateAuditObservation(*observation) != nil:
+				options.Audit.DiscardInvalid(observation.Kind, observation.BatchID)
+				result.AuditInvalidDropped = true
+			case observation.Kind == "usage" && !slices.Contains(report.Capabilities, protocol.CapabilityAuditUsage):
+				result.AuditDeferred = true
+			default:
+				copy := *observation
+				copy.Hits = slices.Clone(observation.Hits)
+				copy.Usage = slices.Clone(observation.Usage)
+				report.Audit = &copy
+				result.AuditHitsTrimmed = auditBatch.HitsTrimmed
+				result.AuditUsageTrimmed = auditBatch.UsageTrimmed
+			}
+		}
+	}
+	hadAudit := report.Audit != nil
 	droppedHost, err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit())
 	if err != nil {
 		return BuiltReport{}, err
 	}
-	return BuiltReport{Report: report, OutboxIDs: batch.IDs, HostDropped: droppedHost}, nil
+	result.Report = report
+	result.HostDropped = droppedHost
+	if report.Audit != nil {
+		result.AuditBatchIDSent = report.Audit.BatchID
+	} else if hadAudit {
+		result.AuditDeferred = true
+	}
+	return result, nil
 }
 
 // fitReportToWire shrinks a report to fit, in a FIXED degradation order, and
@@ -183,6 +242,19 @@ func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64
 	if report.Host != nil {
 		report.Host = nil
 		droppedHost = true
+		body, err = encodeReport(report)
+		if err != nil {
+			return droppedHost, err
+		}
+		if int64(len(body)) <= maxBytes {
+			return droppedHost, nil
+		}
+	}
+	// New audit rows were fitted before freezing. Anything that still does not
+	// fit is an immutable retry: defer the complete batch before considering a
+	// partial control report. The caller retains pending and sends no ack ID.
+	if report.Audit != nil {
+		report.Audit = nil
 		body, err = encodeReport(report)
 		if err != nil {
 			return droppedHost, err

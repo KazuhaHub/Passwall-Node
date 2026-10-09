@@ -88,6 +88,62 @@ policy rejection. Startup restores status from the last confirmed deployment.
 This capability alone does not enable audit collection: hit/usage capabilities
 require their respective collectors. sing-box currently executes rules only.
 
+### Audit hit collection (stage 2b in progress)
+
+`internal/agent/audit` contains independently bounded block (20,000 keys),
+observe (10,000), anonymous trial (10,000), and usage (50,000) lanes. Each limit
+covers all retained hours in that lane. Trial destinations are reduced on the
+node to registrable domains or `(ip)` before aggregation; subject and port are
+discarded. Counter saturation records loss rather than wrapping to zero.
+
+Each lane has one immutable pending batch, bounded by the shared row limits and
+1 MiB subtree limit. A seven-slot schedule gives block four opportunities and
+each other class one; failed reports advance the schedule. New batches select
+the oldest unexpired UTC hour and sort rows before freezing. Rows that do not
+fit remain in that hour, and frozen retries keep their ID and content unchanged.
+Acknowledgement requires the kind and ID actually sent. Collection revision or
+mode changes clear old aggregates, losses and pending data.
+
+All of this is in memory. Restart can lose the entire unacknowledged 48-hour
+backlog; successful synchronization does not establish database persistence.
+The receiver retains first-receipt deduplication for 72 hours. This is
+best-effort telemetry, not a reliable audit trail.
+
+`internal/agent/auditsink` provides a local HTTP receiver on
+`<DataDir>/runtime/audit.sock` (directory 0700, socket 0600), with a random
+node-local token in `X-PSP-Audit` and a deployed revision header. The token is
+saved in `<DataDir>/runtime/audit.token` as 64 lowercase hex characters with
+0600 permissions and reused across restarts, including offline restoration of
+the saved core artifact. Back up and migrate the token together with the
+deployment state. An invalid, non-private or symlinked token file fails startup
+instead of silently changing credentials. It accepts
+only `POST /hit`, limits the body to 4 KiB, discards the webhook's source field,
+and uses receipt time rather than the webhook timestamp. Startup fails on a
+non-socket file or runtime-directory symlink. Serving errors and panics return
+to lifecycle; they must not silently disable a declared collector.
+
+The report builder accepts Host/Audit options and computes a new batch's byte
+allowance after reserving control content. Host is removed first; frozen audit
+that still does not fit is deferred whole. Invalid audit is discarded separately
+and only the kind/ID actually sent is acknowledged after a valid control
+response, before durable-outbox acknowledgement or local core processing.
+
+The production daemon binds the receiver before configuring the compiler and
+advertises `audit.hits.v1` only after listening succeeds. Runtime restores the
+last confirmed policy and roster before starting the core, and publishes new
+collector snapshots only after persisting a confirmed deployment. Socket or
+platform unavailability warns and leaves collection disabled; after capability
+declaration, a receiver failure stops the agent through the shared lifecycle.
+The capability stays fixed across core switches; sing-box does not send audit.
+Real deployment, offline restart and load acceptance remain required before
+stage 2b is delivered. The usage ingestion entry is present for the later
+stage 4 filter; it does not
+enable access logging or advertise `audit.usage.v1`.
+
+The development dependency is the pullable Protocol stage 2a commit, without a
+module replacement. Protocol v0.3.0 and v0.4.0 must be published separately in
+order, followed by Node and then PSP. Neither module tag is published here.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real
@@ -112,7 +168,7 @@ documented, versioned, with a deprecation cycle for breaking changes.
 
 ## Run the production daemon
 
-The build toolchain is pinned to `go1.26.8` in `go.mod` (`go 1.26.0` is the
+The build toolchain is pinned to `go1.26.9` in `go.mod` (`go 1.26.0` is the
 minimum language/toolchain requirement). CI selects that preferred toolchain
 without automatic switching and inspects all six release binaries. Source
 container builds use the same compiler; both container paths use Alpine

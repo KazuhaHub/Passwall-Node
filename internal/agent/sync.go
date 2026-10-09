@@ -44,7 +44,10 @@ type Synchronizer struct {
 	// Host owns the telemetry cadence, cache and failure episode. NIL MEANS THIS
 	// BUILD HAS NO HOST COLLECTOR, which is what keeps the capability from being
 	// advertised by a binary that cannot produce a sample.
-	Host *HostReporter
+	Host  *HostReporter
+	Audit AuditSource
+	// OnAuditInvalid receives only a fixed classification, never row data.
+	OnAuditInvalid func()
 	// Stats observes whether each round synced. NIL MEANS THE RUNTIME SECTION IS
 	// NOT COLLECTED, rather than one that reports zeroes it never measured.
 	Stats *RuntimeStats
@@ -118,9 +121,12 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial, includeHost bool) (
 			}
 		}
 	}
-	built, err := s.Reports.Build(ctx, partial, hostSample)
+	built, err := s.Reports.Build(ctx, partial, BuildOptions{Host: hostSample, Audit: s.Audit})
 	if err != nil {
 		return SyncResult{}, err
+	}
+	if built.AuditInvalidDropped && s.OnAuditInvalid != nil {
+		s.OnAuditInvalid()
 	}
 	if err := protocol.ValidateNodeReport(built.Report); err != nil {
 		return SyncResult{}, fmt.Errorf("validate local node report: %w", err)
@@ -136,6 +142,12 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial, includeHost bool) (
 	}
 	if err := protocol.ValidateSyncResponse(response); err != nil {
 		return SyncResult{}, s.withOfflineConvergence(ctx, fmt.Errorf("validate sync response: %w", err))
+	}
+	// A valid control response ends best-effort delivery, independently of
+	// durable-outbox receipt or local core processing. Only the batch actually
+	// serialized into this round may be acknowledged; deferral carries no ID.
+	if s.Audit != nil && built.AuditBatchIDSent != "" {
+		s.Audit.Acknowledge(built.AuditKind, built.AuditBatchIDSent)
 	}
 	// THE CADENCE ADVANCES HERE AND NOWHERE ELSE. PSP has the sample once its
 	// response validates, and waiting for the outbox acknowledgement or core

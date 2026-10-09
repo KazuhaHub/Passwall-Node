@@ -113,7 +113,7 @@ func TestReportBuilderEvaluatesItsCapabilitySourceOnEveryBuild(t *testing.T) {
 	}
 	build := func() []string {
 		t.Helper()
-		built, err := builder.Build(t.Context(), true, nil)
+		built, err := builder.Build(t.Context(), true, BuildOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
