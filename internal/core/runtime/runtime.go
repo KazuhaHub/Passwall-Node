@@ -18,6 +18,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
 	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent/audit"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/install"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/process"
@@ -38,6 +39,7 @@ type Options struct {
 	Supervisor      agentcore.Supervisor
 	CompilerFactory CompilerFactory
 	Now             func() time.Time
+	OnDeployedAudit func(audit.Snapshot)
 }
 
 type Runtime struct {
@@ -52,6 +54,7 @@ type Runtime struct {
 	policyStatus    protocol.PolicyStatus
 	lastFingerprint string
 	lastDeployment  *state.CoreDeployment
+	onDeployedAudit func(audit.Snapshot)
 }
 
 func New(options Options) (*Runtime, error) {
@@ -67,7 +70,8 @@ func New(options Options) (*Runtime, error) {
 	return &Runtime{
 		store: options.Store, installer: options.Installer, supervisor: options.Supervisor,
 		compilerFactory: options.CompilerFactory, now: options.Now, scheduleWake: make(chan struct{}, 1),
-		policyStatus: protocol.PolicyStatus{State: "applied"},
+		policyStatus:    protocol.PolicyStatus{State: "applied"},
+		onDeployedAudit: options.OnDeployedAudit,
 	}, nil
 }
 
@@ -368,7 +372,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 	}
 	if status.State == agentcore.ProcessRunning && status.Engine == selection.Engine &&
 		status.Version == selection.Version && status.ConfigDigest == artifact.Digest {
-		return r.confirmDeployment(ctx, selection, artifact, &config, roster, fingerprint)
+		return r.confirmDeployment(ctx, selection, artifact, &config, roster, fingerprint, snapshot)
 	}
 	installConfig := artifact.Config
 	if config.Policy != nil {
@@ -411,7 +415,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 		}
 		return fmt.Errorf("deploy %s %s: %w", selection.Engine, selection.Version, err)
 	}
-	return r.confirmDeployment(ctx, selection, artifact, &config, roster, fingerprint)
+	return r.confirmDeployment(ctx, selection, artifact, &config, roster, fingerprint, snapshot)
 }
 
 func (r *Runtime) saveDeployment(

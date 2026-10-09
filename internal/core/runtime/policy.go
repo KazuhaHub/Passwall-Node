@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent/audit"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
@@ -55,10 +57,11 @@ func (r *Runtime) rejectPolicy(policy *protocol.DestinationPolicy, rejected *age
 	})
 }
 
-func (r *Runtime) confirmDeployment(ctx context.Context, selection protocol.CoreSelection, artifact agentcore.Artifact, config *protocol.ConfigBody, roster *protocol.RosterBody, fingerprint string) error {
+func (r *Runtime) confirmDeployment(ctx context.Context, selection protocol.CoreSelection, artifact agentcore.Artifact, config *protocol.ConfigBody, roster *protocol.RosterBody, fingerprint string, snapshot agentcore.Snapshot) error {
 	if err := r.saveDeployment(ctx, selection, artifact, config, roster); err != nil {
 		return err
 	}
+	r.publishAuditSnapshot(selection.Engine, snapshot)
 	r.setPolicyStatus(protocol.PolicyStatus{Digest: protocol.PolicyDigest(config.Policy), State: "applied"})
 	r.lastFingerprint = fingerprint
 	return nil
@@ -75,6 +78,7 @@ func (r *Runtime) RestoreStatus(ctx context.Context) error {
 		r.setPolicyStatus(protocol.PolicyStatus{State: "applied"})
 		r.lastDeployment = nil
 		r.lastFingerprint = ""
+		r.publishAuditSnapshot("", agentcore.Snapshot{})
 		return nil
 	}
 	if err != nil {
@@ -91,8 +95,72 @@ func (r *Runtime) RestoreStatus(ctx context.Context) error {
 	if err := protocol.ValidateDestinationPolicy(config.Policy); err != nil {
 		return fmt.Errorf("validate confirmed policy: %w", err)
 	}
+	deployed := agentcore.Snapshot{DestinationPolicy: config.Policy, Clients: roster.Clients, Now: r.now()}
+	if r.onDeployedAudit != nil {
+		// RosterBody stores the received roster, while compilation may have
+		// disabled credentials using durable local quota gates. Apply those
+		// gates when restoring bindings; never substitute received usernames.
+		clients, err := r.store.Clients(ctx)
+		if err != nil {
+			return fmt.Errorf("restore confirmed roster gates: %w", err)
+		}
+		denied := map[protocol.ClientKey]bool{}
+		for _, client := range clients {
+			denied[client.Key] = client.Gate == protocol.GateClosed || client.Gate == protocol.GateUnconfigured && client.HeadroomBytes != nil
+		}
+		for i := range deployed.Clients {
+			if denied[deployed.Clients[i].Key] {
+				deployed.Clients[i].Enabled = false
+			}
+		}
+	}
 	r.lastDeployment = &deployment
 	r.lastFingerprint = "" // Local gates and crossed deadlines must be checked again.
 	r.setPolicyStatus(protocol.PolicyStatus{Digest: protocol.PolicyDigest(config.Policy), State: "applied"})
+	r.publishAuditSnapshot(deployment.Engine, deployed)
 	return nil
+}
+
+// Build bindings from the snapshot actually compiled, not newly received
+// desired documents. A rejected candidate and failed persistence leave the
+// previous collector snapshot in place. Startup uses only saved deployment
+// bodies; sing-box does not collect hits even when a stale input requests them.
+func (r *Runtime) publishAuditSnapshot(engine string, deployed agentcore.Snapshot) {
+	if r.onDeployedAudit == nil {
+		return
+	}
+	s := audit.Snapshot{Subjects: map[string]protocol.SubjectKey{}, Rules: map[string]protocol.RuleAction{}}
+	p := deployed.DestinationPolicy
+	if engine != "xray" || p == nil {
+		r.onDeployedAudit(s)
+		return
+	}
+	s.Collect, s.Revision = string(p.Collect), p.CollectRevision
+	ambiguous := map[string]bool{}
+	for _, client := range deployed.Clients {
+		if !client.Enabled || len(client.Listeners) == 0 || client.ExpiresAtMS > 0 && deployed.Now.UnixMilli() >= client.ExpiresAtMS {
+			continue
+		}
+		email := strings.TrimSpace(client.Credentials.Username)
+		if email == "" {
+			continue
+		}
+		if _, err := client.Subject.RowID(); err != nil {
+			continue
+		}
+		if previous, found := s.Subjects[email]; found && previous != client.Subject {
+			delete(s.Subjects, email)
+			ambiguous[email] = true
+		}
+		if !ambiguous[email] {
+			s.Subjects[email] = client.Subject
+		}
+	}
+	for _, rule := range p.Rules {
+		if rule.Action == protocol.RuleAllow || len(rule.Subjects) > 0 && len(agentcore.PolicyEmails(deployed, rule.Subjects)) == 0 {
+			continue
+		}
+		s.Rules[rule.ID] = rule.Action
+	}
+	r.onDeployedAudit(s)
 }

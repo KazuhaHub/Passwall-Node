@@ -252,3 +252,107 @@ func TestListenRejectsRuntimeSymlink(t *testing.T) {
 		t.Fatal("socket created through symlink")
 	}
 }
+
+func TestTokenSurvivesRestartWithPrivateFile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux socket setup")
+	}
+	_, c := handlerFixture()
+	dir := t.TempDir()
+	first, err := Listen(dir, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := first.Token()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "runtime", "audit.token"))
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		t.Fatalf("private token file missing: %v %v", info, err)
+	}
+	second, err := Listen(dir, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if second.Token() != token {
+		t.Fatal("saved core's webhook token changed on restart")
+	}
+}
+
+func TestListenRejectsInvalidExistingToken(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux socket setup")
+	}
+	for _, tc := range []struct {
+		name, content string
+		mode          os.FileMode
+	}{
+		{"short", "abc", 0600}, {"uppercase", strings.Repeat("A", 64), 0600}, {"nonhex", strings.Repeat("z", 64), 0600}, {"oversize", strings.Repeat("a", 4096), 0600}, {"public", strings.Repeat("a", 64), 0644},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, c := handlerFixture()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "runtime", "audit.token")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.content), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if s, err := Listen(dir, c); err == nil {
+				if s != nil {
+					s.Close()
+				}
+				t.Fatal("invalid existing token silently replaced")
+			}
+			body, err := os.ReadFile(path)
+			if err != nil || string(body) != tc.content {
+				t.Fatal("existing token was changed")
+			}
+		})
+	}
+}
+
+func TestListenRejectsTokenSymlink(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux socket setup")
+	}
+	_, c := handlerFixture()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runtime", "audit.token")
+	target := filepath.Join(t.TempDir(), "keep")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(strings.Repeat("a", 64)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Listen(dir, c); err == nil {
+		if s != nil {
+			s.Close()
+		}
+		t.Fatal("token symlink accepted")
+	}
+}
+
+func TestCloseBeforeServeReleasesSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux socket setup")
+	}
+	_, c := handlerFixture()
+	s, err := Listen(t.TempDir(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(s.Socket()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("listener leaked before lifecycle start: %v", err)
+	}
+}
