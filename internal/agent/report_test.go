@@ -22,7 +22,7 @@ func TestReportUsesLiveCoreStatus(t *testing.T) {
 		CoreStatus: func() agentcore.Status {
 			return agentcore.Status{Engine: "xray", Version: "26.6.27", State: agentcore.ProcessRunning}
 		},
-	}).Build(t.Context(), true, nil)
+	}).Build(t.Context(), true, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestReportBuilderFlushesTaskResultAsPartialWhenFullCombinationExceedsWireBu
 		t.Fatal(err)
 	}
 	builder := ReportBuilder{AgentID: "agent-1", Store: store}
-	baseline, err := builder.Build(ctx, false, nil)
+	baseline, err := builder.Build(ctx, false, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestReportBuilderFlushesTaskResultAsPartialWhenFullCombinationExceedsWireBu
 		t.Fatalf("test fixture full/partial sizes = %d/%d", len(fullBody), len(partialBody))
 	}
 	builder.maxBodyBytes = int64((len(fullBody) + len(partialBody)) / 2)
-	built, err := builder.Build(ctx, false, nil)
+	built, err := builder.Build(ctx, false, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestReportBuilderFullAndPartialShapes(t *testing.T) {
 		AgentID: "agent-1", Store: store,
 		Capabilities: []string{protocol.TaskCapability("z.v1"), protocol.TaskCapability("a.v1"), protocol.TaskCapability("z.v1")},
 	}
-	full, err := builder.Build(ctx, false, nil)
+	full, err := builder.Build(ctx, false, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestReportBuilderFullAndPartialShapes(t *testing.T) {
 		}
 	}
 
-	partial, err := builder.Build(ctx, true, nil)
+	partial, err := builder.Build(ctx, true, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestReportBuilderAdvancesScheduledQuotaBeforePartialReport(t *testing.T) {
 	built, err := (ReportBuilder{
 		AgentID: "agent-1", Store: store,
 		Now: func() time.Time { return time.UnixMilli(1_000) },
-	}).Build(ctx, true, nil)
+	}).Build(ctx, true, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

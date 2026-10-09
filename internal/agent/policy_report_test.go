@@ -46,7 +46,7 @@ func TestPolicyStatusIsIsolatedAndIncludedInFullAndPartialReports(t *testing.T) 
 				if tc.capable {
 					builder.Capabilities = []string{protocol.CapabilityDestinationPolicy}
 				}
-				built, err := builder.Build(t.Context(), partial, nil)
+				built, err := builder.Build(t.Context(), partial, BuildOptions{})
 				if err != nil {
 					t.Fatal(err)
 				}

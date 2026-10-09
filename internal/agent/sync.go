@@ -44,7 +44,8 @@ type Synchronizer struct {
 	// Host owns the telemetry cadence, cache and failure episode. NIL MEANS THIS
 	// BUILD HAS NO HOST COLLECTOR, which is what keeps the capability from being
 	// advertised by a binary that cannot produce a sample.
-	Host *HostReporter
+	Host  *HostReporter
+	Audit AuditSource
 	// Stats observes whether each round synced. NIL MEANS THE RUNTIME SECTION IS
 	// NOT COLLECTED, rather than one that reports zeroes it never measured.
 	Stats *RuntimeStats
@@ -118,7 +119,7 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial, includeHost bool) (
 			}
 		}
 	}
-	built, err := s.Reports.Build(ctx, partial, hostSample)
+	built, err := s.Reports.Build(ctx, partial, BuildOptions{Host: hostSample, Audit: s.Audit})
 	if err != nil {
 		return SyncResult{}, err
 	}

@@ -334,7 +334,7 @@ func TestSyncOnceReportsActualPartialFallbackShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	builder := ReportBuilder{AgentID: "agent-1", Store: store}
-	baseline, err := builder.Build(ctx, false, nil)
+	baseline, err := builder.Build(ctx, false, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

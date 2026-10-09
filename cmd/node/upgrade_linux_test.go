@@ -514,7 +514,7 @@ func reportAdvertisesUpgrade(t *testing.T, client *upgrade.Client) func() bool {
 	builder := nodeReportBuilder("agent-1", store, nil, nil, nil, worker)
 	return func() bool {
 		t.Helper()
-		built, err := builder.Build(t.Context(), true, nil)
+		built, err := builder.Build(t.Context(), true, agent.BuildOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

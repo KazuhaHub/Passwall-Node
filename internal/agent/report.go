@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent/audit"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
@@ -55,10 +56,27 @@ type BuiltReport struct {
 	// HostDropped says the telemetry sample was removed to fit the wire. The
 	// cadence must NOT advance for such a round — nothing was delivered — so the
 	// caller retries on the next one and records the episode.
-	HostDropped bool
+	HostDropped         bool
+	AuditKind           string
+	AuditBatchIDSent    string
+	AuditUsageTrimmed   int
+	AuditHitsTrimmed    int
+	AuditDeferred       bool
+	AuditInvalidDropped bool
 }
 
-func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.HostObservation) (BuiltReport, error) {
+type AuditSource interface {
+	Next(int) (audit.Batch, error)
+	Acknowledge(string, string) bool
+	DiscardInvalid(string, string)
+}
+
+type BuildOptions struct {
+	Host  *protocol.HostObservation
+	Audit AuditSource
+}
+
+func (b ReportBuilder) Build(ctx context.Context, partial bool, options BuildOptions) (BuiltReport, error) {
 	if b.AgentID == "" {
 		return BuiltReport{}, fmt.Errorf("agent id is required")
 	}
@@ -153,7 +171,7 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.H
 	// The telemetry sample is attached LAST, after the control content is
 	// settled, so the wire-size check below sees the report it is actually
 	// deciding about.
-	report.Host = host
+	report.Host = options.Host
 	droppedHost, err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit())
 	if err != nil {
 		return BuiltReport{}, err
