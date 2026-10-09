@@ -4,6 +4,8 @@ github.com/KazuhaHub/passwall-protocol v0.2.0 h1:nYnqmFMJYXZ3TuiCfKOGeT8zrSOALUP
 github.com/KazuhaHub/passwall-protocol v0.2.0/go.mod h1:IQAhUtHV50QCZFbjIKDvrQBzyQY1tZerGp7F4KfquBI=
 github.com/KazuhaHub/passwall-protocol v0.2.1-0.20261004033110-01759871165c h1:Zex4sGiobH1GlINQoXH87gJQXGQXJTthaAbhjEs5zyU=
 github.com/KazuhaHub/passwall-protocol v0.2.1-0.20261004033110-01759871165c/go.mod h1:IQAhUtHV50QCZFbjIKDvrQBzyQY1tZerGp7F4KfquBI=
+github.com/KazuhaHub/passwall-protocol v0.2.1-0.20261009195400-11a90e9bc95a h1:VMAXGpJERjsxG/erm15zXDoe67YGrHI/bxKysAm9biY=
+github.com/KazuhaHub/passwall-protocol v0.2.1-0.20261009195400-11a90e9bc95a/go.mod h1:IQAhUtHV50QCZFbjIKDvrQBzyQY1tZerGp7F4KfquBI=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=

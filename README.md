@@ -88,6 +88,46 @@ policy rejection. Startup restores status from the last confirmed deployment.
 This capability alone does not enable audit collection: hit/usage capabilities
 require their respective collectors. sing-box currently executes rules only.
 
+### Audit collector foundation (stage 2b in progress)
+
+`internal/agent/audit` contains independently bounded block (20,000 keys),
+observe (10,000), anonymous trial (10,000), and usage (50,000) lanes. Each limit
+covers all retained hours in that lane. Trial destinations are reduced on the
+node to registrable domains or `(ip)` before aggregation; subject and port are
+discarded. Counter saturation records loss rather than wrapping to zero.
+
+Each lane has one immutable pending batch, bounded by the shared row limits and
+1 MiB subtree limit. A seven-slot schedule gives block four opportunities and
+each other class one; failed reports advance the schedule. New batches select
+the oldest unexpired UTC hour and sort rows before freezing. Rows that do not
+fit remain in that hour, and frozen retries keep their ID and content unchanged.
+Acknowledgement requires the kind and ID actually sent. Collection revision or
+mode changes clear old aggregates, losses and pending data.
+
+All of this is in memory. Restart can lose the entire unacknowledged 48-hour
+backlog; successful synchronization does not establish database persistence.
+The receiver retains first-receipt deduplication for 72 hours. This is
+best-effort telemetry, not a reliable audit trail.
+
+`internal/agent/auditsink` provides a local HTTP receiver on
+`<DataDir>/runtime/audit.sock` (directory 0700, socket 0600), with a random
+node-local token in `X-PSP-Audit` and a deployed revision header. It accepts
+only `POST /hit`, limits the body to 4 KiB, discards the webhook's source field,
+and uses receipt time rather than the webhook timestamp. Startup fails on a
+non-socket file or runtime-directory symlink. Serving errors and panics return
+to lifecycle; they must not silently disable a declared collector.
+
+This commit adds the collector and sink components only. The production daemon
+does not yet construct them, bind confirmed-deployment snapshots, attach audit
+to reports or advertise `audit.hits.v1`. Report fitting/acknowledgement and
+lifecycle/runtime wiring remain required before stage 2b is delivered. The
+usage ingestion entry is present for the later stage 4 filter; it does not
+enable access logging or advertise `audit.usage.v1`.
+
+The development dependency is the pullable Protocol stage 2a commit, without a
+module replacement. Protocol v0.3.0 and v0.4.0 must be published separately in
+order, followed by Node and then PSP. Neither module tag is published here.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real
