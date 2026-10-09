@@ -88,7 +88,7 @@ policy rejection. Startup restores status from the last confirmed deployment.
 This capability alone does not enable audit collection: hit/usage capabilities
 require their respective collectors. sing-box currently executes rules only.
 
-### Audit collector foundation (stage 2b in progress)
+### Audit hit collection (stage 2b in progress)
 
 `internal/agent/audit` contains independently bounded block (20,000 keys),
 observe (10,000), anonymous trial (10,000), and usage (50,000) lanes. Each limit
@@ -111,7 +111,12 @@ best-effort telemetry, not a reliable audit trail.
 
 `internal/agent/auditsink` provides a local HTTP receiver on
 `<DataDir>/runtime/audit.sock` (directory 0700, socket 0600), with a random
-node-local token in `X-PSP-Audit` and a deployed revision header. It accepts
+node-local token in `X-PSP-Audit` and a deployed revision header. The token is
+saved in `<DataDir>/runtime/audit.token` as 64 lowercase hex characters with
+0600 permissions and reused across restarts, including offline restoration of
+the saved core artifact. Back up and migrate the token together with the
+deployment state. An invalid, non-private or symlinked token file fails startup
+instead of silently changing credentials. It accepts
 only `POST /hit`, limits the body to 4 KiB, discards the webhook's source field,
 and uses receipt time rather than the webhook timestamp. Startup fails on a
 non-socket file or runtime-directory symlink. Serving errors and panics return
@@ -123,11 +128,16 @@ that still does not fit is deferred whole. Invalid audit is discarded separately
 and only the kind/ID actually sent is acknowledged after a valid control
 response, before durable-outbox acknowledgement or local core processing.
 
-The production daemon does not yet construct these components, bind
-confirmed-deployment snapshots or advertise `audit.hits.v1`. Lifecycle/runtime
-wiring and real deployment acceptance remain required before stage 2b is
-delivered. The
-usage ingestion entry is present for the later stage 4 filter; it does not
+The production daemon binds the receiver before configuring the compiler and
+advertises `audit.hits.v1` only after listening succeeds. Runtime restores the
+last confirmed policy and roster before starting the core, and publishes new
+collector snapshots only after persisting a confirmed deployment. Socket or
+platform unavailability warns and leaves collection disabled; after capability
+declaration, a receiver failure stops the agent through the shared lifecycle.
+The capability stays fixed across core switches; sing-box does not send audit.
+Real deployment, offline restart and load acceptance remain required before
+stage 2b is delivered. The usage ingestion entry is present for the later
+stage 4 filter; it does not
 enable access logging or advertise `audit.usage.v1`.
 
 The development dependency is the pullable Protocol stage 2a commit, without a

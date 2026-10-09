@@ -149,6 +149,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	ctx, stop := signalContext(context.Background())
 	defer stop()
 	logger := newNodeLogger(stderr)
+	now := time.Now
 	if err := os.MkdirAll(parsed.DataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
@@ -161,6 +162,13 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer store.Close()
+	auditRuntime, err := newNodeAudit(parsed.DataDir, now, logger)
+	if err != nil {
+		return err
+	}
+	if auditRuntime.sink != nil {
+		defer auditRuntime.sink.Close()
+	}
 
 	// The node's own recent events, recorded from the three places that already
 	// notice something worth reporting: the sync loop, the core supervisor and
@@ -192,24 +200,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	coreRuntime, err := coreruntime.New(coreruntime.Options{
+	runtimeOptions := coreruntime.Options{
 		Store: store, Installer: installer, Supervisor: supervisor,
-		CompilerFactory: func(selection protocol.CoreSelection) (agentcore.Compiler, error) {
-			switch selection.Engine {
-			case "xray":
-				return xray.Compiler{
-					APIListen: parsed.XrayAPIListen, CoreVersion: selection.Version,
-					AllowRestrictedReality: selection.AllowRestrictedReality,
-				}, nil
-			case "sing-box":
-				return singbox.Compiler{
-					APIListen: parsed.SingBoxAPIListen, APISecret: singBoxAPISecret,
-				}, nil
-			default:
-				return nil, fmt.Errorf("core engine %q is unsupported", selection.Engine)
-			}
-		},
-	})
+		CompilerFactory: nodeCompilerFactory(parsed, singBoxAPISecret, auditRuntime),
+	}
+	auditRuntime.configureRuntime(&runtimeOptions)
+	coreRuntime, err := coreruntime.New(runtimeOptions)
 	if err != nil {
 		return err
 	}
@@ -235,7 +231,6 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 			"xray": xrayTelemetry, "sing-box": singBoxTelemetry,
 		},
 	}
-	now := time.Now
 	issues := agent.OutboxIssueSink{
 		Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() },
 	}
@@ -341,6 +336,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Stats:          runtimeStats,
 	}
 	synchronizer.Reports.PolicyStatus = coreRuntime.PolicyStatus
+	auditRuntime.configureSync(&synchronizer)
 	if upgradeClient != nil {
 		synchronizer.OnSynced = func(ctx context.Context) error { return upgradeClient.RecordReady(ctx, store) }
 	}
@@ -360,7 +356,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	taskWorker.SetResultNotifier(runner.Wake)
 
 	logger.Infof("starting agent_id=%s version=%s endpoint=%s", parsed.AgentID, buildversion.String(), parsed.Endpoint)
-	err = lifecycle.Run(ctx,
+	services := []lifecycle.Service{
 		lifecycle.Service{Name: "core supervisor", Run: supervisor.Run},
 		lifecycle.Service{Name: "sing-box telemetry", Run: singBoxTelemetry.Run},
 		lifecycle.Service{Name: "local expiry", Run: func(ctx context.Context) error {
@@ -368,7 +364,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		}},
 		lifecycle.Service{Name: "task worker", Run: taskWorker.Run},
 		lifecycle.Service{Name: "control-plane sync", Run: runner.Run},
-	)
+	}
+	if service, ok := auditRuntime.service(); ok {
+		services = append(services, service)
+	}
+	err = lifecycle.Run(ctx, services...)
 	if err == nil {
 		logger.Infof("stopped")
 	}

@@ -23,6 +23,11 @@ import (
 )
 
 type Stats struct{ Unauthorized, Malformed, Oversize uint64 }
+
+// ErrTokenFile distinguishes a credential failure from an unavailable socket.
+// A saved core artifact cannot be safely restored with a different credential.
+var ErrTokenFile = errors.New("audit token file is unavailable or invalid")
+
 type Sink struct {
 	collector                         *audit.Collector
 	token, socket                     string
@@ -58,7 +63,7 @@ func Listen(dataDir string, collector *audit.Collector) (*Sink, error) {
 	}
 	token, err := loadToken(filepath.Join(directory, "audit.token"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrTokenFile, err)
 	}
 	if info, err := os.Lstat(socket); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {

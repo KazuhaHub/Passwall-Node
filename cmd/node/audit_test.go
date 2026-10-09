@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -60,8 +61,30 @@ func TestNodeAuditBindsCompilerConfirmedSnapshotAndStaticCapability(t *testing.T
 		t.Fatal("compiler lacks bound socket credential")
 	}
 	artifact, err := xc.Compile(t.Context(), agentcore.Snapshot{DestinationPolicy: &protocol.DestinationPolicy{Collect: protocol.CollectHits, CollectRevision: 7, Rules: []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, Ports: "443"}}}})
-	if err != nil || !strings.Contains(string(artifact.Config), a.sink.Token()) || !strings.Contains(string(artifact.Config), `"X-PSP-Audit-Revision":"7"`) {
+	if err != nil {
 		t.Fatalf("production factory did not emit authenticated webhook: %v", err)
+	}
+	var config struct {
+		Routing struct {
+			Rules []struct {
+				Webhook *struct {
+					URL     string            `json:"url"`
+					Headers map[string]string `json:"headers"`
+				} `json:"webhook"`
+			} `json:"rules"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(artifact.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, rule := range config.Routing.Rules {
+		if rule.Webhook != nil {
+			found = rule.Webhook.URL == a.sink.Socket()+":/hit" && rule.Webhook.Headers["X-PSP-Audit"] == a.sink.Token() && rule.Webhook.Headers["X-PSP-Audit-Revision"] == "7"
+		}
+	}
+	if !found {
+		t.Fatal("production factory did not emit authenticated webhook")
 	}
 	sync := agent.Synchronizer{Reports: agent.ReportBuilder{Capabilities: []string{protocol.CapabilityDestinationPolicy}}}
 	a.configureSync(&sync)
