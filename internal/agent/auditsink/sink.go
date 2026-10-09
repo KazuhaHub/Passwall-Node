@@ -56,6 +56,10 @@ func Listen(dataDir string, collector *audit.Collector) (*Sink, error) {
 	if err := os.Chmod(directory, 0700); err != nil {
 		return nil, fmt.Errorf("restrict audit runtime directory: %w", err)
 	}
+	token, err := loadToken(filepath.Join(directory, "audit.token"))
+	if err != nil {
+		return nil, err
+	}
 	if info, err := os.Lstat(socket); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, errors.New("audit socket path contains a non-socket file")
@@ -66,10 +70,6 @@ func Listen(dataDir string, collector *audit.Collector) (*Sink, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect audit socket: %w", err)
 	}
-	var secret [32]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		return nil, fmt.Errorf("create audit token: %w", err)
-	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		return nil, fmt.Errorf("listen on audit socket: %w", err)
@@ -78,9 +78,69 @@ func Listen(dataDir string, collector *audit.Collector) (*Sink, error) {
 		listener.Close()
 		return nil, fmt.Errorf("restrict audit socket: %w", err)
 	}
-	s := &Sink{collector: collector, token: hex.EncodeToString(secret[:]), socket: socket, listener: listener, fatal: make(chan error, 1)}
+	s := &Sink{collector: collector, token: token, socket: socket, listener: listener, fatal: make(chan error, 1)}
 	s.server = &http.Server{Handler: s, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 8192, ErrorLog: log.New(io.Discard, "", 0)}
 	return s, nil
+}
+
+// Persist the credential used by saved core artifacts so offline restarts can
+// authenticate before the next panel synchronization. Never replace a bad file.
+func loadToken(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		var secret [32]byte
+		if _, err := rand.Read(secret[:]); err != nil {
+			return "", fmt.Errorf("create audit token: %w", err)
+		}
+		token := hex.EncodeToString(secret[:])
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if errors.Is(err, os.ErrExist) {
+			return loadToken(path)
+		}
+		if err != nil {
+			return "", fmt.Errorf("create audit token file: %w", err)
+		}
+		if err = file.Chmod(0600); err == nil {
+			_, err = io.WriteString(file, token)
+		}
+		if err == nil {
+			err = file.Sync()
+		}
+		err = errors.Join(err, file.Close())
+		if err != nil {
+			os.Remove(path)
+			return "", fmt.Errorf("persist audit token: %w", err)
+		}
+		return token, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect audit token file: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || info.Size() != 64 {
+		return "", errors.New("audit token file must be regular, private, and contain 64 lowercase hex characters")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open audit token file: %w", err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return "", errors.New("audit token file changed during startup")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, 65))
+	if err != nil {
+		return "", fmt.Errorf("read audit token file: %w", err)
+	}
+	if len(body) != 64 {
+		return "", errors.New("audit token file must contain 64 lowercase hex characters")
+	}
+	for _, b := range body {
+		if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')) {
+			return "", errors.New("audit token file must contain 64 lowercase hex characters")
+		}
+	}
+	return string(body), nil
 }
 func (s *Sink) Socket() string { return s.socket }
 func (s *Sink) Token() string  { return s.token }
@@ -180,13 +240,16 @@ func (s *Sink) Run(ctx context.Context) error {
 	}
 }
 func (s *Sink) Close() error {
+	var err error
 	if s.server != nil {
-		return s.server.Close()
+		err = s.server.Close()
 	}
 	if s.listener != nil {
-		return s.listener.Close()
+		if closeErr := s.listener.Close(); !errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, closeErr)
+		}
 	}
-	return nil
+	return err
 }
 func (s *Sink) Stats() Stats {
 	return Stats{s.unauthorized.Load(), s.malformed.Load(), s.oversize.Load()}

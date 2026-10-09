@@ -301,6 +301,9 @@ func TestListenRejectsInvalidExistingToken(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.content), tc.mode); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatal(err)
+			}
 			if s, err := Listen(dir, c); err == nil {
 				if s != nil {
 					s.Close()
