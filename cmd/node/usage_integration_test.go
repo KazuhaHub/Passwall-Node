@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -147,6 +148,10 @@ func exercisePrivateUsageTraffic(t *testing.T, binary, version, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// These Xray releases block private destinations in freedom by default.
+	// Only this disposable fixture permits its exact loopback HTTP port; the
+	// production compiler and its default private-network guard stay unchanged.
+	artifact = usageLoopbackFixture(t, artifact, port)
 	if err := supervisor.Deploy(t.Context(), agentcore.Deployment{Artifact: artifact, Engine: "xray", Version: version, BinaryPath: binary, CollectRevision: 7}); err != nil {
 		t.Fatalf("deploy pinned usage artifact: %v", err)
 	}
@@ -209,6 +214,26 @@ func exercisePrivateUsageTraffic(t *testing.T, binary, version, mode string) {
 
 func mainOptionsForUsage(api int) options {
 	return options{XrayAPIListen: net.JoinHostPort("127.0.0.1", strconv.Itoa(api))}
+}
+
+func usageLoopbackFixture(t *testing.T, artifact agentcore.Artifact, port string) agentcore.Artifact {
+	t.Helper()
+	var config map[string]any
+	if err := json.Unmarshal(artifact.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range config["outbounds"].([]any) {
+		outbound := value.(map[string]any)
+		if outbound["protocol"] == "freedom" {
+			outbound["settings"].(map[string]any)["finalRules"] = []any{map[string]any{"action": "allow", "network": "tcp", "port": port, "ip": []string{"127.0.0.1/32"}}}
+		}
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:])}
 }
 
 func usageTrafficPort(t *testing.T) int {

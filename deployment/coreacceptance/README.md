@@ -25,6 +25,10 @@ The fixture enables the existing gated tests and runs them with `-count=1`:
   one usage event; deny does not reach it or count usage. Observe/trial/deny
   also require their separate hit, with anonymous trial fields. Raw access
   lines and fixture account emails must not appear in forwarded daemon output.
+  The disposable traffic artifact adds one freedom final-rule exception for
+  its exact `127.0.0.1` HTTP port, since these versions otherwise block private
+  destinations. Routing, audit and access-log configuration remain compiled;
+  production freedom settings and their private-network guard are unchanged.
 
 The JSON checker requires every executable leaf, parent and all four packages
 to run and pass exactly once. Any skip, failure, missing
