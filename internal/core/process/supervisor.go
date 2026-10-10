@@ -30,16 +30,19 @@ const (
 )
 
 type Options struct {
-	Binary       string
-	Engine       string
-	Version      string
-	StateDir     string
-	Commands     CommandResolver
-	Stdout       io.Writer
-	Stderr       io.Writer
-	CheckTimeout time.Duration
-	StartGrace   time.Duration
-	StopTimeout  time.Duration
+	Binary   string
+	Engine   string
+	Version  string
+	StateDir string
+	Commands CommandResolver
+	Stdout   io.Writer
+	// Factory outputs belong to one process and are closed after it is reaped.
+	// A nil output fails closed; shared outputs must be returned without Close.
+	StdoutForDeployment func(agentcore.Deployment) io.Writer
+	Stderr              io.Writer
+	CheckTimeout        time.Duration
+	StartGrace          time.Duration
+	StopTimeout         time.Duration
 	// Events records core lifecycle transitions for a later diagnostic. NIL
 	// RECORDS NOTHING, which is what a build without one should do.
 	Events   nodeevent.Recorder
@@ -51,6 +54,7 @@ type Options struct {
 	// diagnosis but cannot become an unreported active configuration.
 	RequireInitialConfigDigest bool
 	InitialConfigDigest        string
+	InitialCollectRevision     uint64
 	Now                        func() time.Time
 }
 
@@ -157,7 +161,8 @@ func NewSupervisor(options Options) (*Supervisor, error) {
 		options: options,
 		status: agentcore.Status{
 			State: agentcore.ProcessStopped, Engine: options.Engine, Version: options.Version, BinaryPath: options.Binary,
-			LastChangedAt: options.Now().UTC(),
+			CollectRevision: options.InitialCollectRevision,
+			LastChangedAt:   options.Now().UTC(),
 		},
 		ready:        make(chan struct{}),
 		done:         make(chan struct{}),
@@ -218,6 +223,7 @@ func (s *Supervisor) Apply(ctx context.Context, artifact agentcore.Artifact) err
 	s.mu.RLock()
 	deployment := agentcore.Deployment{
 		Artifact: artifact, Engine: s.activeEngine, BinaryPath: s.activeBinary, Version: s.status.Version,
+		CollectRevision: s.status.CollectRevision,
 	}
 	s.mu.RUnlock()
 	return s.deployLocked(ctx, deployment)
@@ -299,6 +305,7 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 	currentVersion := s.options.Version
 	if s.options.RequireInitialConfigDigest && current.Digest != s.options.InitialConfigDigest {
 		current = agentcore.Artifact{}
+		s.setDigest("")
 		if len(config) != 0 || s.options.InitialConfigDigest != "" {
 			s.setDegraded("stored core config does not match the last confirmed deployment")
 		}
@@ -310,7 +317,8 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 	retryDelay := s.options.RetryMin
 	for {
 		if child == nil && len(current.Config) != 0 {
-			started, startErr := s.start(ctx, ctx, currentEngine, currentBinary, configPath)
+			deployment := agentcore.Deployment{Artifact: current, Engine: currentEngine, BinaryPath: currentBinary, Version: currentVersion, CollectRevision: s.Status().CollectRevision}
+			started, startErr := s.start(ctx, ctx, deployment, configPath)
 			if startErr == nil {
 				child = started
 				retryDelay = s.options.RetryMin
@@ -401,7 +409,7 @@ func (s *Supervisor) handleApply(
 	}
 	deployment := request.deployment
 	if deployment.Artifact.Digest == current.Digest && deployment.Engine == currentEngine && deployment.BinaryPath == currentBinary &&
-		deployment.Version == currentVersion && child != nil {
+		deployment.Version == currentVersion && deployment.CollectRevision == s.Status().CollectRevision && child != nil {
 		return finish(nil)
 	}
 	oldConfig := append([]byte(nil), current.Config...)
@@ -409,6 +417,7 @@ func (s *Supervisor) handleApply(
 	oldEngine := currentEngine
 	oldBinary := currentBinary
 	oldVersion := currentVersion
+	oldRevision := s.Status().CollectRevision
 	if err := installCandidate(s.options.StateDir, request.candidate, oldConfig); err != nil {
 		return finish(fmt.Errorf("install core config: %w", err))
 	}
@@ -429,13 +438,13 @@ func (s *Supervisor) handleApply(
 		}
 		child = nil
 	}
-	started, err := s.start(runCtx, request.ctx, deployment.Engine, deployment.BinaryPath, configPath)
+	started, err := s.start(runCtx, request.ctx, deployment, configPath)
 	if err == nil {
 		child = started
 		currentEngine = deployment.Engine
 		currentBinary = deployment.BinaryPath
 		currentVersion = deployment.Version
-		s.setDeployment(currentEngine, currentBinary, currentVersion, current.Digest)
+		s.setDeployment(currentEngine, currentBinary, currentVersion, current.Digest, deployment.CollectRevision)
 		s.setRunning("")
 		return finish(nil)
 	}
@@ -454,7 +463,8 @@ func (s *Supervisor) handleApply(
 	currentVersion = oldVersion
 	s.setDigest(oldDigest)
 	if len(oldConfig) != 0 {
-		rolledBack, rollbackErr := s.start(runCtx, runCtx, oldEngine, oldBinary, configPath)
+		previous := agentcore.Deployment{Artifact: current, Engine: oldEngine, BinaryPath: oldBinary, Version: oldVersion, CollectRevision: oldRevision}
+		rolledBack, rollbackErr := s.start(runCtx, runCtx, previous, configPath)
 		if rollbackErr != nil {
 			applyErr = errors.Join(applyErr, fmt.Errorf("start rollback core config: %w", rollbackErr))
 		} else {
@@ -515,22 +525,33 @@ func (s *Supervisor) validateCandidate(ctx context.Context, engine, binary, path
 	return nil
 }
 
-func (s *Supervisor) start(runCtx, waitCtx context.Context, engine, binary, configPath string) (*managedProcess, error) {
-	commandSpec, err := resolveCommand(s.options.Commands, engine)
+func (s *Supervisor) start(runCtx, waitCtx context.Context, deployment agentcore.Deployment, configPath string) (*managedProcess, error) {
+	commandSpec, err := resolveCommand(s.options.Commands, deployment.Engine)
 	if err != nil {
 		return nil, err
 	}
 	s.setStarting()
-	command := exec.CommandContext(runCtx, binary, commandSpec.RunArgs(configPath)...)
+	command := exec.CommandContext(runCtx, deployment.BinaryPath, commandSpec.RunArgs(configPath)...)
 	configureCommand(command)
 	command.Stdout = s.options.Stdout
+	var owned io.Closer
+	if s.options.StdoutForDeployment != nil {
+		command.Stdout = s.options.StdoutForDeployment(deployment)
+		if command.Stdout == nil {
+			return nil, errors.New("deployment output is unavailable")
+		}
+		owned, _ = command.Stdout.(io.Closer)
+	}
 	command.Stderr = s.options.Stderr
 	if err := command.Start(); err != nil {
+		if owned != nil {
+			_ = owned.Close()
+		}
 		return nil, err
 	}
 	s.noteStart()
 	child := &managedProcess{command: command, done: make(chan error, 1)}
-	go waitProcess(command, child.done)
+	go waitProcess(command, owned, child.done)
 	timer := time.NewTimer(s.options.StartGrace)
 	defer timer.Stop()
 	select {
@@ -568,13 +589,18 @@ func (s *Supervisor) start(runCtx, waitCtx context.Context, engine, binary, conf
 	}
 }
 
-func waitProcess(command *exec.Cmd, done chan<- error) {
+func waitProcess(command *exec.Cmd, owned io.Closer, done chan<- error) {
+	var result error
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			done <- fmt.Errorf("wait process panic: %v", recovered)
+			result = errors.New("wait process failed unexpectedly")
 		}
+		done <- result
 	}()
-	done <- command.Wait()
+	if owned != nil {
+		defer func() { _ = owned.Close() }()
+	}
+	result = command.Wait()
 }
 
 func (s *Supervisor) stop(child *managedProcess) error {
@@ -629,10 +655,15 @@ func (s *Supervisor) setStopped(lastError string) {
 }
 
 func (s *Supervisor) setDigest(digest string) {
-	s.updateStatus(func(status *agentcore.Status) { status.ConfigDigest = digest })
+	s.updateStatus(func(status *agentcore.Status) {
+		status.ConfigDigest = digest
+		if digest == "" {
+			status.CollectRevision = 0
+		}
+	})
 }
 
-func (s *Supervisor) setDeployment(engine, binary, version, digest string) {
+func (s *Supervisor) setDeployment(engine, binary, version, digest string, revision uint64) {
 	s.mu.Lock()
 	s.activeEngine = engine
 	s.activeBinary = binary
@@ -640,6 +671,7 @@ func (s *Supervisor) setDeployment(engine, binary, version, digest string) {
 	s.status.Version = version
 	s.status.BinaryPath = binary
 	s.status.ConfigDigest = digest
+	s.status.CollectRevision = revision
 	s.status.LastChangedAt = s.options.Now().UTC()
 	s.mu.Unlock()
 }

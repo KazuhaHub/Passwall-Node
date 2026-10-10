@@ -349,10 +349,14 @@ func (r *Runtime) converge(ctx context.Context) error {
 		}
 	}
 	fingerprint := inputs.digest()
+	var collectRevision uint64
+	if selection.Engine == "xray" && config.Policy != nil {
+		collectRevision = config.Policy.CollectRevision
+	}
 	status := r.supervisor.Status()
 	if fingerprint == r.lastFingerprint && r.lastDeployment != nil &&
 		status.State == agentcore.ProcessRunning && status.Engine == selection.Engine &&
-		status.Version == selection.Version && status.ConfigDigest == r.lastDeployment.ConfigDigest {
+		status.Version == selection.Version && status.ConfigDigest == r.lastDeployment.ConfigDigest && status.CollectRevision == collectRevision {
 		return nil
 	}
 	compiler, err := r.compilerFactory(selection)
@@ -371,7 +375,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 		return fmt.Errorf("compiler returned invalid artifact: %w", err)
 	}
 	if status.State == agentcore.ProcessRunning && status.Engine == selection.Engine &&
-		status.Version == selection.Version && status.ConfigDigest == artifact.Digest {
+		status.Version == selection.Version && status.ConfigDigest == artifact.Digest && status.CollectRevision == collectRevision {
 		return r.confirmDeployment(ctx, selection, artifact, &config, roster, fingerprint, snapshot)
 	}
 	installConfig := artifact.Config
@@ -394,6 +398,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 	deployment := agentcore.Deployment{
 		Artifact: artifact, Engine: installed.Engine,
 		BinaryPath: installed.BinaryPath, Version: installed.Version,
+		CollectRevision: collectRevision,
 	}
 	if err := r.supervisor.Deploy(ctx, deployment); err != nil {
 		if config.Policy != nil && errors.Is(err, process.ErrCandidateRejected) {
