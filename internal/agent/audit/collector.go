@@ -194,13 +194,19 @@ func (c *Collector) AddHit(revision uint64, email, destination, tag string) {
 // Its caller must already exclude denied/rejected connections. Keeping this
 // entry does not advertise audit.usage.v1 or enable an access log.
 func (c *Collector) AddUsage(revision uint64, email, destination string) {
+	c.AddUsageAt(revision, email, destination, c.now())
+}
+
+// AddUsageAt retains the receive time across the bounded access-log queue;
+// parsing after an hour boundary must not move a connection into another hour.
+func (c *Collector) AddUsageAt(revision uint64, email, destination string, received time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.acceptRevision(revision) || c.snapshot.Collect != "hits_and_usage" {
 		return
 	}
-	now := c.now().UnixMilli()
-	b := c.currentBucket("usage", now)
+	now := received.UnixMilli()
+	b := c.receivedBucket("usage", now, 1, 1)
 	if b == nil {
 		return
 	}
@@ -241,6 +247,10 @@ func (c *Collector) AddUsage(revision uint64, email, destination string) {
 }
 
 func (c *Collector) AddLoss(kind string, revision, dropped, unmatched uint64) {
+	c.AddLossAt(kind, revision, dropped, unmatched, c.now())
+}
+
+func (c *Collector) AddLossAt(kind string, revision, dropped, unmatched uint64, received time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if dropped == 0 && unmatched == 0 {
@@ -249,10 +259,26 @@ func (c *Collector) AddLoss(kind string, revision, dropped, unmatched uint64) {
 	if !c.acceptRevision(revision) || c.lanes[kind] == nil || kind == "usage" && c.snapshot.Collect != "hits_and_usage" {
 		return
 	}
-	if b := c.currentBucket(kind, c.now().UnixMilli()); b != nil {
+	if b := c.receivedBucket(kind, received.UnixMilli(), 0, add(dropped, unmatched)); b != nil {
 		b.dropped = add(b.dropped, dropped)
 		b.unmatched = add(b.unmatched, unmatched)
 	}
+}
+
+func (c *Collector) receivedBucket(kind string, received int64, rows, events uint64) *bucket {
+	now := c.now().UnixMilli()
+	c.expire(now)
+	hour := received / protocol.AuditHourMS * protocol.AuditHourMS
+	if received > 0 && now > hour && now-hour > protocol.MaxAuditReplayAgeMS {
+		c.stats.ExpiredRows = add(c.stats.ExpiredRows, rows)
+		c.stats.ExpiredEvents = add(c.stats.ExpiredEvents, events)
+		return nil
+	}
+	if received > now && received-now > protocol.MaxAuditFutureSkewMS {
+		c.stats.Unclassified = add(c.stats.Unclassified, events)
+		return nil
+	}
+	return c.bucketAt(kind, received)
 }
 
 func (c *Collector) acceptRevision(revision uint64) bool {
@@ -264,11 +290,15 @@ func (c *Collector) acceptRevision(revision uint64) bool {
 }
 
 func (c *Collector) currentBucket(kind string, now int64) *bucket {
+	c.expire(now)
+	return c.bucketAt(kind, now)
+}
+
+func (c *Collector) bucketAt(kind string, now int64) *bucket {
 	if now <= 0 {
 		c.stats.Unclassified = add(c.stats.Unclassified, 1)
 		return nil
 	}
-	c.expire(now)
 	hour := now / protocol.AuditHourMS * protocol.AuditHourMS
 	if hour == 0 {
 		c.stats.Unclassified = add(c.stats.Unclassified, 1)
