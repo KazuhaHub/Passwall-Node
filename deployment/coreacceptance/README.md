@@ -19,9 +19,15 @@ The fixture enables the existing gated tests and runs them with `-count=1`:
 - A real sing-box VLESS/TCP/REALITY/XTLS-Vision server, local TLS decoy and local
   HTTP target, exercised through Xray, Mihomo and sing-box SOCKS clients. Each
   client must carry HTTP traffic with the expected response body and header.
+- Private usage traffic through the production Xray compiler, process output
+  factory, filter and authenticated hit receiver on all three pinned versions.
+  Direct, observe and trial requests reach a local HTTP target and each count
+  one usage event; deny does not reach it or count usage. Observe/trial/deny
+  also require their separate hit, with anonymous trial fields. Raw access
+  lines and fixture account emails must not appear in forwarded daemon output.
 
-The JSON checker requires all ten executable leaf tests, both parent tests
-and all three packages to run and pass exactly once. Any skip, failure, missing
+The JSON checker requires every executable leaf, parent and all four packages
+to run and pass exactly once. Any skip, failure, missing
 test or pass without a preceding run fails acceptance. Exact source/digest/
 version metadata and `go test -json` execution evidence are retained as CI
 artifacts, including partial evidence on failure. Ordinary unit-test runs still
@@ -46,5 +52,5 @@ go run ./deployment/coreacceptance prepare \
 
 The environment file uses GitHub's `NAME=value` format, not shell quoting. Do
 not source it as a shell script. Export its eight values explicitly or use the
-same GitHub Actions steps, then run the three commands from the workflow and
+same GitHub Actions steps, then run the test commands from the workflow and
 pass their concatenated JSON stream to `coreacceptance check --results FILE`.
