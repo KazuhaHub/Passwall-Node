@@ -32,8 +32,13 @@ const (
 type Compiler struct {
 	APIListen string
 	LogLevel  string
+	// AccessLog is retained for source compatibility; raw access paths are
+	// disabled. Only explicit usage through an installed filter can enable it.
 	AccessLog string
 	ErrorLog  string
+	// Production sets this only after connecting a deployment-bound stdout
+	// filter. Policy alone cannot expose raw connection details to stdout.
+	AccessLogFiltered bool
 	// Set only after the local receiver is listening; token is persistent.
 	AuditSocket string
 	AuditToken  string
@@ -136,7 +141,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 
 	config := xrayConfig{
 		// An absent access field sends connection details to the agent's stdout.
-		// Disable it explicitly unless a caller supplies a local access-log path.
+		// Disable it explicitly unless usage has an installed stdout filter.
 		Log: map[string]any{"loglevel": logLevel, "access": "none"},
 		API: map[string]any{
 			"tag": "psp-api", "listen": apiListen,
@@ -155,8 +160,8 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			{"tag": "blocked", "protocol": "blackhole", "settings": map[string]any{}},
 		},
 	}
-	if c.AccessLog != "" {
-		config.Log["access"] = c.AccessLog
+	if c.AccessLogFiltered && snapshot.DestinationPolicy != nil && snapshot.DestinationPolicy.Collect == protocol.CollectHitsAndUsage {
+		delete(config.Log, "access")
 	}
 	if c.ErrorLog != "" {
 		config.Log["error"] = c.ErrorLog

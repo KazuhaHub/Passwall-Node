@@ -70,7 +70,7 @@ func TestCompilerAccessLogPolicy(t *testing.T) {
 		want   string
 	}{
 		{name: "production default", want: "none"},
-		{name: "explicit file", access: "access.log", want: "access.log"},
+		{name: "unfiltered file is disabled", access: "access.log", want: "none"},
 		{name: "explicit disable", access: "none", want: "none"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
