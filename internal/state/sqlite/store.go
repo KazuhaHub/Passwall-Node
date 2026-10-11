@@ -82,6 +82,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 }
 
 func sqliteDSN(path string) string {
+	volume := filepath.VolumeName(path)
+	path = filepath.ToSlash(path)
+	// A Windows drive must be a URI path component, not its authority. Keep
+	// URL escaping so filename punctuation cannot inject SQLite parameters.
+	if len(volume) == 2 && volume[1] == ':' {
+		path = "/" + path
+	}
 	u := &url.URL{Scheme: "file", Path: path}
 	q := u.Query()
 	q.Add("_pragma", "busy_timeout(5000)")
