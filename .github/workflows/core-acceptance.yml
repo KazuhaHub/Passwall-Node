@@ -74,6 +74,9 @@ jobs:
           go test -json -count=1 -timeout=5m ./internal/core/singbox \
             -run '^(TestCompilerArtifactPassesPinnedSingBoxValidation|TestDaemonAPIWireCompatibilityWithPinnedSingBox|TestRealityHandshakeMatrix)$' \
             | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
+          go test -json -count=1 -timeout=5m ./cmd/node \
+            -run '^TestPinnedXrayPrivateUsageTraffic$' \
+            | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
           go run ./deployment/coreacceptance check \
             --results "$RUNNER_TEMP/core-acceptance-tests.json"
       - name: Keep exact-version and test execution evidence

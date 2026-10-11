@@ -186,7 +186,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	supervisor, err := process.NewSupervisor(process.Options{
+	processOptions := process.Options{
 		Engine: initial.Engine, Binary: initial.BinaryPath, Version: initial.Version,
 		// Preserve the v1 on-disk location across the multi-core upgrade. The
 		// directory name is legacy-only; its contents are core-neutral artifacts.
@@ -196,7 +196,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Events:                     eventRing,
 		RequireInitialConfigDigest: true,
 		InitialConfigDigest:        initial.ConfigDigest,
-	})
+		InitialCollectRevision:     initial.CollectRevision,
+	}
+	if err := auditRuntime.configureOutput(&processOptions); err != nil {
+		return err
+	}
+	supervisor, err := process.NewSupervisor(processOptions)
 	if err != nil {
 		return err
 	}
@@ -368,6 +373,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if service, ok := auditRuntime.service(); ok {
 		services = append(services, service)
 	}
+	if service, ok := auditRuntime.usageService(); ok {
+		services = append(services, service)
+	}
 	err = lifecycle.Run(ctx, services...)
 	if err == nil {
 		logger.Infof("stopped")
@@ -520,10 +528,11 @@ func readPrivateSecret(secretPath string) (string, error) {
 }
 
 type initialCore struct {
-	Engine       string
-	Version      string
-	BinaryPath   string
-	ConfigDigest string
+	Engine          string
+	Version         string
+	BinaryPath      string
+	ConfigDigest    string
+	CollectRevision uint64
 }
 
 func prepareInitialCore(ctx context.Context, store state.Store, installer *install.Installer, root string) (initialCore, error) {
@@ -546,6 +555,10 @@ func prepareInitialCore(ctx context.Context, store state.Store, installer *insta
 	if err != nil {
 		return initialCore{}, fmt.Errorf("read last confirmed core deployment: %w", err)
 	}
+	revision, err := confirmedCollectionRevision(deployment)
+	if err != nil {
+		return initialCore{}, err
+	}
 	release, err := corecatalog.Resolve(deployment.Engine, deployment.Version)
 	if err != nil {
 		return initialCore{}, fmt.Errorf("resolve last confirmed core deployment: %w", err)
@@ -561,7 +574,22 @@ func prepareInitialCore(ctx context.Context, store state.Store, installer *insta
 	return initialCore{
 		Engine: installed.Engine, Version: installed.Version,
 		BinaryPath: installed.BinaryPath, ConfigDigest: deployment.ConfigDigest,
+		CollectRevision: revision,
 	}, nil
+}
+
+func confirmedCollectionRevision(deployment state.CoreDeployment) (uint64, error) {
+	var config protocol.ConfigBody
+	if err := json.Unmarshal(deployment.ConfigBody, &config); err != nil {
+		return 0, errors.New("decode last confirmed collection policy")
+	}
+	if err := protocol.ValidateDestinationPolicy(config.Policy); err != nil {
+		return 0, errors.New("invalid last confirmed collection policy")
+	}
+	if deployment.Engine == "xray" && config.Policy != nil {
+		return config.Policy.CollectRevision, nil
+	}
+	return 0, nil
 }
 
 func coreCommand(engine string) (process.Command, error) {

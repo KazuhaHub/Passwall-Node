@@ -44,24 +44,26 @@ const (
 )
 
 type Status struct {
-	State         ProcessState
-	Engine        string
-	Version       string
-	BinaryPath    string
-	ConfigDigest  string
-	RestartCount  uint64
-	LastError     string
-	LastChangedAt time.Time
+	State           ProcessState
+	Engine          string
+	Version         string
+	BinaryPath      string
+	ConfigDigest    string
+	CollectRevision uint64
+	RestartCount    uint64
+	LastError       string
+	LastChangedAt   time.Time
 }
 
 // Deployment binds one compiled artifact to the exact immutable core binary
 // that must execute it. Keeping the pair together prevents a version switch
 // from validating with one binary and starting another.
 type Deployment struct {
-	Artifact   Artifact
-	Engine     string
-	BinaryPath string
-	Version    string
+	Artifact        Artifact
+	Engine          string
+	BinaryPath      string
+	Version         string
+	CollectRevision uint64
 }
 
 // ObjectError identifies one desired object that a core compiler cannot
@@ -100,8 +102,8 @@ func (e *PolicyError) Error() string {
 func (e *PolicyError) Unwrap() error { return e.Err }
 
 // Supervisor validates, installs, starts, monitors and rolls back one core
-// process. Apply must be content-idempotent: applying an already-running digest
-// performs no restart.
+// process. Apply is content-idempotent; Deploy also binds the collection
+// revision so an unchanged artifact cannot reuse an older log writer.
 type Supervisor interface {
 	Run(context.Context) error
 	Apply(context.Context, Artifact) error

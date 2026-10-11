@@ -56,10 +56,12 @@ recomputing the same bytes mints no new version.
 
 ## Access logs and upgrades
 
-Production Xray configurations explicitly disable access logs (`access: "none"`).
-This prevents per-connection destinations and user emails from appearing in
-systemd journals or Docker logs. An explicit compiler access-log path remains
-available for development; the production daemon does not set one.
+Production Xray configurations disable access logs (`access: "none"`) unless
+PSP explicitly requests website usage and the daemon has installed its private
+stdout filter. Raw access-file overrides are disabled. In usage mode, access
+lines go only to the bounded parser; ordinary diagnostics have a separate
+bounded forwarding queue. Source addresses and account emails in access lines
+are never forwarded to systemd journals or Docker logs.
 
 When upgrading from an older version, the agent initially starts its saved core
 configuration. Access logs stop only after the first successful synchronization
@@ -136,9 +138,29 @@ platform unavailability warns and leaves collection disabled; after capability
 declaration, a receiver failure stops the agent through the shared lifecycle.
 The capability stays fixed across core switches; sing-box does not send audit.
 Real deployment, offline restart and load acceptance remain required before
-stage 2b is delivered. The usage ingestion entry is present for the later
-stage 4 filter; it does not
-enable access logging or advertise `audit.usage.v1`.
+stage 2b is delivered.
+
+### Website usage collection (stage 4 in progress)
+
+When the receiver and process output filter are installed, the daemon also
+advertises `audit.usage.v1`. Collection remains explicitly controlled by PSP.
+Normal direct, observe and trial accepted connections contribute usage once;
+denied and rejected connections do not. The collector maps deployed usernames
+to subjects and reduces destinations to registrable domains or `(ip)`.
+
+The filter bounds lines at 8 KiB and each of its input and ordinary-output
+queues at 4,096 entries. Overflow never blocks the core; usage overflow records
+loss in the original receive-hour bucket. Split and oversized access lines stay
+private, including partial lines at process exit. Parser or output failure stops
+the agent through lifecycle with a fixed error and keeps raw access suppressed.
+
+Each core process owns an immutable collection-revision writer. Revision
+changes restart even when compiled bytes are identical; failed candidates roll
+back with the previous revision. Startup derives the revision from the saved
+confirmed config. Collector changes follow durable deployment confirmation,
+and stale queued lines are discarded rather than relabeled. State schema v9
+is unchanged. Current Linux CI and real traffic/deployment acceptance remain
+required before stage 4 is delivered.
 
 The development dependency is the pullable Protocol stage 2a commit, without a
 module replacement. Protocol v0.3.0 and v0.4.0 must be published separately in

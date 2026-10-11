@@ -28,7 +28,14 @@ func auditNodeFixture(t *testing.T) (*nodeAudit, *bytes.Buffer) {
 		t.Skip("Linux daemon audit wiring")
 	}
 	var log bytes.Buffer
-	a, err := newNodeAudit(t.TempDir(), time.Now, newNodeLogger(&log))
+	// Unix socket paths have a kernel length limit. Full Go test names in
+	// t.TempDir can exceed it, especially under race instrumentation.
+	dir, err := os.MkdirTemp("", "psp-audit-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	a, err := newNodeAudit(dir, time.Now, newNodeLogger(&log))
 	if err != nil {
 		t.Fatal(err)
 	}

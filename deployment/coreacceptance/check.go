@@ -12,8 +12,8 @@ type testIdentity struct{ Package, Test string }
 
 const module = "github.com/KazuhaHub/passwall-node/v4/internal/core/"
 
-// Require the ten executable leaves, plus both parent tests and all three
-// package pass events. A cached, missing, renamed or skipped gate cannot pass.
+// Require compiler/handshake leaves and private usage traffic on every pinned
+// Xray version, plus parent and package passes. Missing/skipped gates fail.
 var requiredTests = []testIdentity{
 	{module + "install", "TestOfficialXrayInstallIntegration"},
 	{module + "install", "TestOfficialSingBoxInstallIntegration"},
@@ -27,6 +27,18 @@ var requiredTests = []testIdentity{
 	{module + "singbox", "TestRealityHandshakeMatrix/xray-26.6.27"},
 	{module + "singbox", "TestRealityHandshakeMatrix/mihomo-1.19.30"},
 	{module + "singbox", "TestRealityHandshakeMatrix/sing-box-1.14.0"},
+}
+
+func init() {
+	const pkg = "github.com/KazuhaHub/passwall-node/v4/cmd/node"
+	const parent = "TestPinnedXrayPrivateUsageTraffic"
+	requiredTests = append(requiredTests, testIdentity{pkg, parent})
+	for _, version := range []string{"26.6.27", "26.7.28", "26.9.9"} {
+		requiredTests = append(requiredTests, testIdentity{pkg, parent + "/" + version})
+		for _, mode := range []string{"direct", "watch", "trial", "deny"} {
+			requiredTests = append(requiredTests, testIdentity{pkg, parent + "/" + version + "/" + mode})
+		}
+	}
 }
 
 type testEvent struct {
