@@ -393,6 +393,7 @@ func TestReleaseVersionAndPrivateRootValidation(t *testing.T) {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	makeSharedUpgradeRootFixture(t, root)
 	f, err := NewReleaseFetcher(ReleaseFetcherOptions{RootDir: root})
 	if err != nil {
 		t.Fatal(err)

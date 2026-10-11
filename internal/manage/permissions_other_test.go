@@ -24,3 +24,5 @@ func makeUnwritableDirectoryFixture(t *testing.T, path string) {
 }
 
 func makeSharedCredentialFixture(_ *testing.T, _ string) {}
+
+func fixtureExecutable(info os.FileInfo) bool { return info.Mode()&0o111 != 0 }

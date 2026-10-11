@@ -16,6 +16,13 @@ func assertPrivateCredentialFixture(t *testing.T, path string) {
 	}
 }
 
+// These internal tests already fake systemctl, UID/GID and chown. Model the
+// POSIX executable fixture too; the public Windows command still refuses all
+// management actions before it can reach this inspection.
+func fixtureExecutable(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Name() == "passwall-node"
+}
+
 // Change only the owned disposable fixture, restoring its original ACL before
 // TempDir cleanup. Directory readonly attributes do not deny file creation.
 func makeUnwritableDirectoryFixture(t *testing.T, path string) {

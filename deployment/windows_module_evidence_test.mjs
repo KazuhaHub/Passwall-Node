@@ -42,6 +42,15 @@ test('existing platform skips are counted and cannot hide failed or contradictor
   for (const event of [{ Action: 'pass', Package: pkg, Test: 'TestLinuxOnly' }, { Action: 'skip', Package: pkg }, { Action: 'skip', Package: pkg, Test: 'TestLinuxOnly' }]) assert.equal(summarizeWindowsModule(inventory, encode([...skipped, event]), 0).status, 'failed')
 })
 
+test('process failure diagnostics retain only fixed classifications', () => {
+  const values = [...events(), { Action: 'output', Output: 'supervisor_test.go:214: apply error = <nil> private-secret' }, { Action: 'output', Output: 'rollback status = private-config-address-and-digest' }]
+  const report = summarizeWindowsModule(inventory, encode(values), 1)
+  assert.equal(report.diagnostics.process_startup_accepted, 1)
+  assert.equal(report.diagnostics.process_rollback_status, 1)
+  for (const privateText of ['supervisor_test.go', 'private-secret', 'private-config-address-and-digest']) assert(!JSON.stringify(report).includes(privateText))
+  assert.equal(report.status, 'failed')
+})
+
 test('default fuzz seeds and examples retain their static root without dynamic cases', () => {
   for (const name of ['FuzzControlPlaneTaskClockBounds', 'Example', 'ExampleReport']) {
     const values = [...events(), { Action: 'run', Package: pkg, Test: name }, { Action: 'run', Package: pkg, Test: name + '/private-seed' }, { Action: 'pass', Package: pkg, Test: name + '/private-seed' }, { Action: 'pass', Package: pkg, Test: name }]

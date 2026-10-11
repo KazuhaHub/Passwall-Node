@@ -315,13 +315,5 @@ func indeterminate(message string) error {
 }
 
 func EnsurePrivateDirectory(dir string) error {
-	if info, err := os.Lstat(dir); err == nil {
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
-			return errors.New("upgrade directory must be a private real directory")
-		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return os.Mkdir(dir, 0700)
+	return ensurePrivateDirectory(dir)
 }

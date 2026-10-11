@@ -4,6 +4,7 @@ package privatefs
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"unsafe"
 
@@ -12,6 +13,52 @@ import (
 
 // ErrPrivacy does not disclose paths, descriptors or account identities.
 var ErrPrivacy = errors.New("Windows object must have a private ACL and no reparse points")
+
+// Mkdir protects a new directory at creation and only inspects an existing
+// one. It never rewrites an existing operator directory's ACL.
+func Mkdir(path string) error { return makeDirectory(path, false) }
+
+// MkdirAll also creates missing parents with the same protected private ACL.
+func MkdirAll(path string) error { return makeDirectory(path, true) }
+
+func makeDirectory(path string, parents bool) error {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return ErrPrivacy
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		return ErrPrivacy
+	}
+	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	var create func(string) error
+	create = func(path string) error {
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return err
+		}
+		err = windows.CreateDirectory(name, sa)
+		if parents && errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			parent := filepath.Dir(path)
+			if parent == path {
+				return err
+			}
+			if err := create(parent); err != nil {
+				return err
+			}
+			err = windows.CreateDirectory(name, sa)
+		}
+		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return nil
+		}
+		return err
+	}
+	if err := create(path); err != nil {
+		return ErrPrivacy
+	}
+	runtime.KeepAlive(sd)
+	return Check(path, true)
+}
 
 // Check inspects metadata without reading file contents or changing ACLs.
 func Check(path string, directory bool) error {

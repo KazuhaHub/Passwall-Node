@@ -10,6 +10,8 @@ const diagnosticPatterns = {
   directory_sync: /sync .*: (?:Incorrect function|The handle is invalid)/,
   private_mode: /(?:credential|token|lock file|lock) mode =|want (?:0?600|0?700)/,
   private_directory: /directory must be private|directory permissions|directory is not private/,
+  process_startup_accepted: /apply error = <nil>/,
+  process_rollback_status: /rollback status =/,
 }
 
 // Keep source-owned package/top-level test names and counts. Test output,
