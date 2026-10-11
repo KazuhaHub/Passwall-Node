@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url'
 
 const modulePath = 'github.com/KazuhaHub/passwall-node/v4'
 const packagePattern = /^github\.com\/KazuhaHub\/passwall-node\/v4(?:\/[A-Za-z0-9_-]+)*$/
-const testPattern = /^Test[A-Za-z0-9_]+$/
+const testPattern = /^(?:Test|Fuzz)[A-Za-z0-9_]+$|^Example[A-Za-z0-9_]*$/
 const actions = ['run', 'pass', 'skip', 'fail']
 const counts = () => ({ run: 0, pass: 0, skip: 0, fail: 0 })
 const diagnosticPatterns = {

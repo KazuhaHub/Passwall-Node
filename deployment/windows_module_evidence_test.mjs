@@ -42,6 +42,16 @@ test('existing platform skips are counted and cannot hide failed or contradictor
   for (const event of [{ Action: 'pass', Package: pkg, Test: 'TestLinuxOnly' }, { Action: 'skip', Package: pkg }, { Action: 'skip', Package: pkg, Test: 'TestLinuxOnly' }]) assert.equal(summarizeWindowsModule(inventory, encode([...skipped, event]), 0).status, 'failed')
 })
 
+test('default fuzz seeds and examples retain their static root without dynamic cases', () => {
+  for (const name of ['FuzzControlPlaneTaskClockBounds', 'Example', 'ExampleReport']) {
+    const values = [...events(), { Action: 'run', Package: pkg, Test: name }, { Action: 'run', Package: pkg, Test: name + '/private-seed' }, { Action: 'pass', Package: pkg, Test: name + '/private-seed' }, { Action: 'pass', Package: pkg, Test: name }]
+    const report = summarizeWindowsModule(inventory, encode(values), 0)
+    assert.equal(report.status, 'passed')
+    assert(report.packages[0].tests.some(test => test.name === name && test.pass === 1))
+    assert(!JSON.stringify(report).includes('private-seed'))
+  }
+})
+
 test('Windows full-module job runs every package and participates in the verification gate', () => {
   const workflow = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
   const job = workflow.slice(workflow.indexOf('  windows-module:'), workflow.indexOf('  verify:'))

@@ -28,7 +28,7 @@ func TestImageEntrypointAndHelperCommandArePermanent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(raw)
+		return strings.ReplaceAll(string(raw), "\r\n", "\n")
 	}
 	const entrypoint = "/usr/local/bin/docker-entrypoint.sh"
 	if dockerHelperCommand != "--run-docker-upgrade-helper" || dockerTargetContainerEnv != "PSP_NODE_UPGRADE_TARGET_CONTAINER" ||
