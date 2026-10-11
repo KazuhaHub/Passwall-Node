@@ -166,7 +166,18 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, options BuildOpt
 	if err != nil {
 		return BuiltReport{}, fmt.Errorf("build report outbox: %w", err)
 	}
-	report.Issues = batch.Issues
+	// Different observation episodes can enqueue the same wire issue. Keep all
+	// durable IDs for acknowledgement, but send each exact issue only once so
+	// report validation cannot block unrelated task results in the same batch.
+	seenIssues := make(map[[3]string]struct{}, len(batch.Issues))
+	for _, issue := range batch.Issues {
+		identity := [3]string{issue.Code, issue.Key, issue.Detail}
+		if _, seen := seenIssues[identity]; seen {
+			continue
+		}
+		seenIssues[identity] = struct{}{}
+		report.Issues = append(report.Issues, issue)
+	}
 	report.TaskResults = batch.TaskResults
 	// Optional observations are attached after control content is settled, so
 	// fitting measures the exact report that would go onto the wire.
