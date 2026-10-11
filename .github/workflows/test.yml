@@ -131,10 +131,33 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
+  windows-release-cli:
+    name: Windows release CLI checks
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact preferred compiler
+        shell: pwsh
+        run: |
+          $expected = (Select-String -LiteralPath go.mod -Pattern '^toolchain\s+(\S+)$').Matches[0].Groups[1].Value
+          if ((go env GOVERSION) -ne $expected) { throw 'Unexpected Go toolchain' }
+          $compiler = (go tool compile -V) -split '\s+'
+          if ($compiler[-1] -ne $expected) { throw 'Unexpected Go compiler' }
+      - name: Execute release tools through their real Windows binaries
+        shell: pwsh
+        run: go test -count=1 ./deployment/cmd/allocate-release-tag ./deployment/cmd/release-tag ./deployment/cmd/publish-core-catalog ./deployment/cmd/sign-release
+
   verify:
     name: test, vet, format
     if: ${{ always() }}
-    needs: [checks, race]
+    needs: [checks, race, windows-release-cli]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -142,9 +165,11 @@ jobs:
         env:
           CHECKS_RESULT: ${{ needs.checks.result }}
           RACE_RESULT: ${{ needs.race.result }}
+          WINDOWS_CLI_RESULT: ${{ needs.windows-release-cli.result }}
         run: |
           test "$CHECKS_RESULT" = success
           test "$RACE_RESULT" = success
+          test "$WINDOWS_CLI_RESULT" = success
 
   cross-compile:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}

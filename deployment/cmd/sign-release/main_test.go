@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	signBinary = filepath.Join(dir, "sign-release")
+	if runtime.GOOS == "windows" {
+		signBinary += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", signBinary, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
