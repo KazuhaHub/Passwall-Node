@@ -473,7 +473,7 @@ func readRegularPrivateFile(path string, limit int64, private bool) ([]byte, err
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s must be a regular file, not a symlink", path)
 	}
-	if private && info.Mode().Perm()&0o077 != 0 {
+	if private && !hasPrivatePermissions(path, info) {
 		return nil, fmt.Errorf("%s must not be accessible by group or others", path)
 	}
 	if info.Size() > limit {
@@ -1222,7 +1222,7 @@ func ensureRealPrivateDirectory(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s must be a real directory", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if !hasPrivatePermissions(path, info) {
 		return fmt.Errorf("%s must not be accessible by group or others", path)
 	}
 	return nil

@@ -107,9 +107,7 @@ func TestConnectWritesPrivateConfigurationAndStartsService(t *testing.T) {
 	if string(credential) != secret+"\n" {
 		t.Fatal("credential was not saved exactly")
 	}
-	if info, _ := os.Stat(a.paths.credential); info.Mode().Perm() != 0o600 {
-		t.Fatalf("credential mode = %o", info.Mode().Perm())
-	}
+	assertPrivateCredentialFixture(t, a.paths.credential)
 	if strings.Contains(output.String(), secret) {
 		t.Fatal("credential appeared in interactive output")
 	}

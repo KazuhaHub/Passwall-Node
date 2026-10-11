@@ -68,10 +68,7 @@ func TestEnvironmentAppendDoesNotTruncateOrInjectEntries(t *testing.T) {
 	if err != nil || string(content) != "EXISTING=kept\nPSP_TEST_SING_BOX_BIN=/tmp/a binary=exact\n" {
 		t.Fatalf("environment = %q, %v", content, err)
 	}
-	info, err := os.Stat(filename)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("environment permissions = %v, %v", info, err)
-	}
+	assertPrivateAcceptanceFile(t, filename, 0o600)
 }
 
 func gzipClient(t *testing.T, content []byte) ([]byte, string) {
@@ -105,10 +102,7 @@ func TestClientExtractionRequiresDigestAndOneBoundedPrivateBinary(t *testing.T) 
 	if err != nil || string(content) != "test-only-binary" {
 		t.Fatalf("binary = %q, %v", content, err)
 	}
-	info, err := os.Stat(destination)
-	if err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("binary permissions = %v, %v", info, err)
-	}
+	assertPrivateAcceptanceFile(t, destination, 0o700)
 	if err := unpackClient(archive, digest, destination); err == nil {
 		t.Fatal("existing client binary overwritten")
 	}
