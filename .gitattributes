@@ -1,0 +1,5 @@
+# Linux scripts and units are distributed or embedded verbatim, even by builds
+# made on Windows. Their checked-out bytes must remain valid Linux text.
+*.sh text eol=lf
+*.service text eol=lf
+*.path text eol=lf

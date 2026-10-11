@@ -16,7 +16,7 @@ import (
 // while the script decided "testing" for every tag, because the variable was
 // empty.
 func TestTheReleaseChannelResolution(t *testing.T) {
-	workflow, err := os.ReadFile("../.github/workflows/release.yml")
+	workflow, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestTheReleaseChannelResolution(t *testing.T) {
 // tag text: a product-scheme tag has no hyphen, so that rule calls every testing
 // candidate stable and tags no image at all.
 func TestTheReleaseChannelIsNotReadFromTheTagText(t *testing.T) {
-	workflow, err := os.ReadFile("../.github/workflows/release.yml")
+	workflow, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

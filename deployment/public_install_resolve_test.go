@@ -19,7 +19,7 @@ import (
 // it deliberately does not get to drift from it.
 func resolveFunctions(t *testing.T) string {
 	t.Helper()
-	script, err := os.ReadFile("../install.sh")
+	script, err := readSourceTextFile("../install.sh")
 	if err != nil {
 		t.Fatal(err)
 	}

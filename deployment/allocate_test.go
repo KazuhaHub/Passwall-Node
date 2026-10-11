@@ -310,6 +310,9 @@ func TestALostRaceReReadsRatherThanOverwriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The shim runs in sh, whose quoting and path separators differ from Windows.
+	realGit = "'" + strings.ReplaceAll(filepath.ToSlash(realGit), "'", "'\"'\"'") + "'"
+	sentinel = filepath.ToSlash(sentinel)
 	// The refspec is not a fixed argument position, so the shim scans for it
 	// rather than assuming one: an earlier version read $3 and matched nothing,
 	// and the test passed because the push it meant to fail simply succeeded.

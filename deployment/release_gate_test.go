@@ -14,7 +14,7 @@ import (
 // rather than modelled: a string-presence check passes on a script that asks the
 // right question and misreads the answer.
 func TestTheReleasePublishesOnlyATestedCommitOnMain(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ printf '%s\n' "$response"
 // 11h46m before v4.0.1.3's approval, and a rejected approval would have left it
 // there.
 func TestTheImagePublishesAfterTheSignedRelease(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

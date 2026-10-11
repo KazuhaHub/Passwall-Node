@@ -10,7 +10,7 @@ import (
 // The promotion workflow's invariants, pinned because every one of them is a
 // promise a YAML edit breaks silently.
 func TestPromotionReusesArtefactsRatherThanBuilding(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/promote.yml")
+	raw, err := readSourceTextFile("../.github/workflows/promote.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestPromotionReusesArtefactsRatherThanBuilding(t *testing.T) {
 // an event a workflow produced, which is the opposite of the deliberate act V06
 // describes — and it would run on every pre-release the publication path creates.
 func TestPromotionIsOnlyEverDispatchedByHand(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/promote.yml")
+	raw, err := readSourceTextFile("../.github/workflows/promote.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestPromotionIsOnlyEverDispatchedByHand(t *testing.T) {
 // before the flip, which then never runs; the report is RUN with each outcome the
 // flip can have, and says "pending" only once the flip was attempted.
 func TestAPartialPromotionIsRepeatableAndSaysSo(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/promote.yml")
+	raw, err := readSourceTextFile("../.github/workflows/promote.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

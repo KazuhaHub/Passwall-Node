@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -137,7 +138,7 @@ func (s *promotionStub) run(t *testing.T, script, dir string, base []string, ext
 
 func promotionStep(t *testing.T, name string) string {
 	t.Helper()
-	raw, err := os.ReadFile("../.github/workflows/promote.yml")
+	raw, err := readSourceTextFile("../.github/workflows/promote.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +153,9 @@ func promotionStep(t *testing.T, name string) string {
 func TestThePromotionTakesOnlyASignedManifestAndTheAssetsItDescribes(t *testing.T) {
 	script := promotionStep(t, "Verify the published assets against the signed manifest")
 	verify := filepath.Join(t.TempDir(), "verify-release")
+	if runtime.GOOS == "windows" {
+		verify += ".exe"
+	}
 	if out, err := exec.Command("go", "build", "-o", verify, "./cmd/verify-release").CombinedOutput(); err != nil {
 		t.Fatalf("building verify-release: %v\n%s", err, out)
 	}
@@ -370,7 +374,7 @@ func TestAReleaseIsPromotedOnlyAfterBothAcceptancesPassed(t *testing.T) {
 	title := map[string]string{}
 	name := map[string]string{}
 	for _, workflow := range []string{"container-acceptance.yml", "installation-acceptance.yml"} {
-		raw, err := os.ReadFile("../.github/workflows/" + workflow)
+		raw, err := readSourceTextFile("../.github/workflows/" + workflow)
 		if err != nil {
 			t.Fatal(err)
 		}

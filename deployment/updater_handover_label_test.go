@@ -46,7 +46,7 @@ func TestImagesDeclareTheUpdaterHandoverProtocol(t *testing.T) {
 	}
 	key := regexp.QuoteMeta(upgrade.DockerLabelUpdaterHandover)
 	for _, path := range []string{"Dockerfile", "Dockerfile.release"} {
-		raw, err := os.ReadFile("../" + path)
+		raw, err := readSourceTextFile("../" + path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +62,7 @@ func TestImagesDeclareTheUpdaterHandoverProtocol(t *testing.T) {
 			t.Errorf("%s names the updater handover label more than once", path)
 		}
 	}
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func (f *labelStepFixture) run(script string, env ...string) (string, error) {
 // LABEL instruction that stopped applying — a stage moved, a line lost its
 // continuation — fails a test.yml job rather than a handover in the field.
 func TestTheContainerJobChecksTheUpdaterHandoverLabel(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/test.yml")
+	raw, err := readSourceTextFile("../.github/workflows/test.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestTheContainerJobChecksTheUpdaterHandoverLabel(t *testing.T) {
 // workspace is the tag's tree by then, so a release from before the label has a
 // recipe without it and an image without it, and both agree.
 func TestPublishedContainerAcceptanceChecksTheUpdaterHandoverLabel(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/container-acceptance.yml")
+	raw, err := readSourceTextFile("../.github/workflows/container-acceptance.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
