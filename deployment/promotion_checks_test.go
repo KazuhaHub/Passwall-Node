@@ -26,7 +26,8 @@ type promotionStub struct{ dir, bin string }
 
 func newPromotionStub(t *testing.T) *promotionStub {
 	t.Helper()
-	if _, err := exec.LookPath("jq"); err != nil {
+	realJQ, err := exec.LookPath("jq")
+	if err != nil {
 		t.Skip("jq stands in for gh's --jq and is what the steps read JSON with")
 	}
 	s := &promotionStub{dir: t.TempDir()}
@@ -86,12 +87,29 @@ if [ -f "$STUB/latest.next" ]; then mv "$STUB/latest.next" "$STUB/latest"; fi
 echo "unexpected go $*" >&2; exit 97
 `,
 	}
+	if runtime.GOOS == "windows" {
+		// Native jq.exe otherwise adds CR to every output line in Git Bash.
+		// --binary preserves actual JSON string values while matching gh's LF output.
+		quoted := "'" + strings.ReplaceAll(filepath.ToSlash(realJQ), "'", "'\"'\"'") + "'"
+		stubs["jq"] = "exec " + quoted + " --binary \"$@\"\n"
+	}
 	for name, body := range stubs {
 		if err := os.WriteFile(filepath.Join(s.bin, name), []byte(prelude+body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return s
+}
+
+func TestPromotionJSONOutputKeepsLFAndPreservesValues(t *testing.T) {
+	stub := newPromotionStub(t)
+	out, err := stub.run(t, `printf '%s' '["first\rvalue","second"]' | jq -r '.[]'`, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("query actual JSON helper: %v\n%s", err, out)
+	}
+	if out != "first\rvalue\nsecond\n" {
+		t.Fatalf("JSON output changed separators or values: %q", out)
+	}
 }
 
 func (s *promotionStub) file(t *testing.T, name, content string) {

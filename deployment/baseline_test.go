@@ -126,6 +126,7 @@ func TestVersionStampsNameTheModulePath(t *testing.T) {
 	stamp := regexp.MustCompile(`-X[=\s]+(\S+/internal/version)\.\w+=`)
 	stamps := map[string]int{}
 	for _, path := range append([]string{"../Dockerfile", "../Dockerfile.release"}, workflows...) {
+		path = filepath.ToSlash(path)
 		text, err := readSourceTextFile(path)
 		if errors.Is(err, fs.ErrNotExist) && path == "../Dockerfile.release" {
 			continue
