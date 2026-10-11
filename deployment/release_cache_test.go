@@ -1,7 +1,6 @@
 package deployment
 
 import (
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,7 +21,7 @@ const minSetupGoMajor = 6
 func TestTheReleaseCompilesNothingFromASharedCache(t *testing.T) {
 	for _, name := range []string{"release.yml", "promote.yml"} {
 		t.Run(name, func(t *testing.T) {
-			raw, err := os.ReadFile("../.github/workflows/" + name)
+			raw, err := readSourceTextFile("../.github/workflows/" + name)
 			if err != nil {
 				t.Fatal(err)
 			}

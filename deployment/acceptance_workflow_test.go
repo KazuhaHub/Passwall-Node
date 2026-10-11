@@ -1,7 +1,6 @@
 package deployment
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -19,7 +18,7 @@ import (
 func TestTheAcceptancesRunAfterEveryRelease(t *testing.T) {
 	read := func(name string) string {
 		t.Helper()
-		raw, err := os.ReadFile("../.github/workflows/" + name)
+		raw, err := readSourceTextFile("../.github/workflows/" + name)
 		if err != nil {
 			t.Fatal(err)
 		}

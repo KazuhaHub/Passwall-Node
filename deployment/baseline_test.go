@@ -12,7 +12,7 @@ import (
 )
 
 func TestDockerEntrypointTimestampsAndDiagnosesPermanentMountErrors(t *testing.T) {
-	entrypoint, err := os.ReadFile("../docker-entrypoint.sh")
+	entrypoint, err := readSourceTextFile("../docker-entrypoint.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestDockerEntrypointTimestampsAndDiagnosesPermanentMountErrors(t *testing.T
 }
 
 func TestComposeExampleUsesOnlyExplicitProjectDirectoryMounts(t *testing.T) {
-	compose, err := os.ReadFile("../compose.example.yaml")
+	compose, err := readSourceTextFile("../compose.example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestComposeExampleUsesOnlyExplicitProjectDirectoryMounts(t *testing.T) {
 func TestBuildBaselinesStayAligned(t *testing.T) {
 	read := func(path string) string {
 		t.Helper()
-		b, err := os.ReadFile("../" + path)
+		b, err := readSourceTextFile("../" + path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,7 +110,7 @@ func TestBuildBaselinesStayAligned(t *testing.T) {
 // naming the release. Every stamp, in every file that builds the daemon, must
 // name the version package under go.mod's module path.
 func TestVersionStampsNameTheModulePath(t *testing.T) {
-	mod, err := os.ReadFile("../go.mod")
+	mod, err := readSourceTextFile("../go.mod")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,8 @@ func TestVersionStampsNameTheModulePath(t *testing.T) {
 	stamp := regexp.MustCompile(`-X[=\s]+(\S+/internal/version)\.\w+=`)
 	stamps := map[string]int{}
 	for _, path := range append([]string{"../Dockerfile", "../Dockerfile.release"}, workflows...) {
-		text, err := os.ReadFile(path)
+		path = filepath.ToSlash(path)
+		text, err := readSourceTextFile(path)
 		if errors.Is(err, fs.ErrNotExist) && path == "../Dockerfile.release" {
 			continue
 		}
@@ -156,7 +157,7 @@ func TestVersionStampsNameTheModulePath(t *testing.T) {
 // binary reports whatever the case says: a line that compared the wrong string,
 // or ran on no leg, would pass a string check and publish "dev".
 func TestTheReleaseRunsTheVersionStampItBuilt(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +226,7 @@ func TestToolPinsAgreeAcrossWorkflows(t *testing.T) {
 	pin := regexp.MustCompile(`go run ([^@\s]+)@(\S+)`)
 	pinned := map[string]map[string][]string{}
 	for _, path := range workflows {
-		text, err := os.ReadFile(path)
+		text, err := readSourceTextFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -248,7 +249,7 @@ func TestToolPinsAgreeAcrossWorkflows(t *testing.T) {
 }
 
 func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
-	workflow, err := os.ReadFile("../.github/workflows/release.yml")
+	workflow, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

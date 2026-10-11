@@ -24,7 +24,7 @@ import (
 // on which the whole Test workflow succeeded, and a probe of how one runner image's
 // Docker behaves is not a fact about the commit being released.
 func TestTheDockerUpdaterWorkflowRunsItsProbesOnBothArchitectures(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/docker-updater.yml")
+	raw, err := readSourceTextFile("../.github/workflows/docker-updater.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestTheDockerUpdaterWorkflowRunsItsProbesOnBothArchitectures(t *testing.T) 
 	}
 	// THE PATTERN NAMES A TEST THAT EXISTS. A renamed test matches nothing, and
 	// `go test` then reports "no tests to run" and passes.
-	source, err := os.ReadFile("../internal/upgrade/docker_e2e_linux_test.go")
+	source, err := readSourceTextFile("../internal/upgrade/docker_e2e_linux_test.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestTheDockerUpdaterWorkflowRunsItsProbesOnBothArchitectures(t *testing.T) 
 // check, where `!` exempted it from `set -e`: a log with a skipped probe and a
 // passing test passed the step.
 func TestTheDockerUpdaterProbeStepRefusesASkipOrAMissingPass(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/docker-updater.yml")
+	raw, err := readSourceTextFile("../.github/workflows/docker-updater.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestTheDockerUpdaterProbeStepRefusesASkipOrAMissingPass(t *testing.T) {
 // at two never-published versions so no registry is involved, and its step names a
 // test that exists and refuses a log in which anything skipped.
 func TestTheDockerUpdaterWorkflowRunsTheHandoverEndToEnd(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/docker-updater.yml")
+	raw, err := readSourceTextFile("../.github/workflows/docker-updater.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestTheDockerUpdaterWorkflowRunsTheHandoverEndToEnd(t *testing.T) {
 	} else if !strings.Contains(job[pull:build], "Dockerfile.release") {
 		t.Error("the base pull does not read its image from Dockerfile.release")
 	}
-	source, err := os.ReadFile("../internal/upgrade/docker_handover_e2e_linux_test.go")
+	source, err := readSourceTextFile("../internal/upgrade/docker_handover_e2e_linux_test.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestTheDockerUpdaterWorkflowRunsTheHandoverEndToEnd(t *testing.T) {
 func TestTheHandoverEndToEndRunsThePanelsComposeUnchanged(t *testing.T) {
 	read := func(path string) string {
 		t.Helper()
-		raw, err := os.ReadFile("../internal/upgrade/testdata/e2e/" + path)
+		raw, err := readSourceTextFile("../internal/upgrade/testdata/e2e/" + path)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -30,7 +30,7 @@ func TestTheReleasePackagingIsReproducible(t *testing.T) {
 	if _, err := exec.LookPath("zip"); err != nil {
 		t.Skip("zip packages the Windows archives")
 	}
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestTheReleasePackagingIsReproducible(t *testing.T) {
 // read rather than run: a clock reading here is what made two builds of one tag
 // differ.
 func TestTheReleaseStampsTheCommitTimeNotTheClock(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

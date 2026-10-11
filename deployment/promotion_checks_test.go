@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,7 +26,8 @@ type promotionStub struct{ dir, bin string }
 
 func newPromotionStub(t *testing.T) *promotionStub {
 	t.Helper()
-	if _, err := exec.LookPath("jq"); err != nil {
+	realJQ, err := exec.LookPath("jq")
+	if err != nil {
 		t.Skip("jq stands in for gh's --jq and is what the steps read JSON with")
 	}
 	s := &promotionStub{dir: t.TempDir()}
@@ -85,12 +87,29 @@ if [ -f "$STUB/latest.next" ]; then mv "$STUB/latest.next" "$STUB/latest"; fi
 echo "unexpected go $*" >&2; exit 97
 `,
 	}
+	if runtime.GOOS == "windows" {
+		// Native jq.exe otherwise adds CR to every output line in Git Bash.
+		// --binary preserves actual JSON string values while matching gh's LF output.
+		quoted := "'" + strings.ReplaceAll(filepath.ToSlash(realJQ), "'", "'\"'\"'") + "'"
+		stubs["jq"] = "exec " + quoted + " --binary \"$@\"\n"
+	}
 	for name, body := range stubs {
 		if err := os.WriteFile(filepath.Join(s.bin, name), []byte(prelude+body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return s
+}
+
+func TestPromotionJSONOutputKeepsLFAndPreservesValues(t *testing.T) {
+	stub := newPromotionStub(t)
+	out, err := stub.run(t, `printf '%s' '["first\rvalue","second"]' | jq -r '.[]'`, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("query actual JSON helper: %v\n%s", err, out)
+	}
+	if out != "first\rvalue\nsecond\n" {
+		t.Fatalf("JSON output changed separators or values: %q", out)
+	}
 }
 
 func (s *promotionStub) file(t *testing.T, name, content string) {
@@ -137,7 +156,7 @@ func (s *promotionStub) run(t *testing.T, script, dir string, base []string, ext
 
 func promotionStep(t *testing.T, name string) string {
 	t.Helper()
-	raw, err := os.ReadFile("../.github/workflows/promote.yml")
+	raw, err := readSourceTextFile("../.github/workflows/promote.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +171,9 @@ func promotionStep(t *testing.T, name string) string {
 func TestThePromotionTakesOnlyASignedManifestAndTheAssetsItDescribes(t *testing.T) {
 	script := promotionStep(t, "Verify the published assets against the signed manifest")
 	verify := filepath.Join(t.TempDir(), "verify-release")
+	if runtime.GOOS == "windows" {
+		verify += ".exe"
+	}
 	if out, err := exec.Command("go", "build", "-o", verify, "./cmd/verify-release").CombinedOutput(); err != nil {
 		t.Fatalf("building verify-release: %v\n%s", err, out)
 	}
@@ -370,7 +392,7 @@ func TestAReleaseIsPromotedOnlyAfterBothAcceptancesPassed(t *testing.T) {
 	title := map[string]string{}
 	name := map[string]string{}
 	for _, workflow := range []string{"container-acceptance.yml", "installation-acceptance.yml"} {
-		raw, err := os.ReadFile("../.github/workflows/" + workflow)
+		raw, err := readSourceTextFile("../.github/workflows/" + workflow)
 		if err != nil {
 			t.Fatal(err)
 		}

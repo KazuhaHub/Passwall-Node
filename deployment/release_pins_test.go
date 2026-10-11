@@ -1,7 +1,6 @@
 package deployment
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,7 +12,7 @@ import (
 // pointer its owner can move, so anything outside actions/* is pinned to a full
 // commit, with the version beside it for Dependabot and for a reader.
 func TestTheReleaseRunsThirdPartyActionsOnlyByCommit(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

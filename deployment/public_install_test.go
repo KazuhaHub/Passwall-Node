@@ -2,14 +2,13 @@ package deployment
 
 import (
 	"encoding/json"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
 
 func TestPublicInstallerSyntaxAndSecurityBoundary(t *testing.T) {
-	script, err := os.ReadFile("../install.sh")
+	script, err := readSourceTextFile("../install.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +80,7 @@ func TestPublicInstallerArgumentsBeforePrivilegedPreflight(t *testing.T) {
 // run against the vectors releaseid itself is held to, rather than a list written
 // here that could agree with the installer and disagree with the release.
 func TestPublicInstallerAcceptsEveryPublishedVersionShape(t *testing.T) {
-	script, err := os.ReadFile("../install.sh")
+	script, err := readSourceTextFile("../install.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +96,7 @@ func TestPublicInstallerAcceptsEveryPublishedVersionShape(t *testing.T) {
 	}
 	program := text[start+len(opening) : start+end+len(closing)-1]
 
-	raw, err := os.ReadFile("../releaseid/testdata/vectors.json")
+	raw, err := readSourceTextFile("../releaseid/testdata/vectors.json")
 	if err != nil {
 		t.Fatal(err)
 	}

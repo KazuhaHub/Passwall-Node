@@ -1,7 +1,6 @@
 package deployment
 
 import (
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -18,11 +17,11 @@ import (
 // restarts forever — which is how this was found, on a host running a compose the
 // panel generated with the same list.
 func TestTheExampleComposeGrantsWhatItsEntrypointNeeds(t *testing.T) {
-	entrypoint, err := os.ReadFile("../docker-entrypoint.sh")
+	entrypoint, err := readSourceTextFile("../docker-entrypoint.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	example, err := os.ReadFile("../compose.example.yaml")
+	example, err := readSourceTextFile("../compose.example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +92,7 @@ func TestTheExampleComposeGrantsWhatItsEntrypointNeeds(t *testing.T) {
 // a directory; the daemon, not the updater, is what fetches an image. The README
 // already calls it network-disabled, and the service is what makes that true.
 func TestTheExampleUpdaterGrantsWhatTheHelperNeeds(t *testing.T) {
-	example, err := os.ReadFile("../compose.example.yaml")
+	example, err := readSourceTextFile("../compose.example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +176,7 @@ func composeList(compose, key string) []string {
 // file: once it belongs to the service account, root cannot overwrite it either, so it
 // has to be removed rather than written over.
 func TestTheEntrypointDoesNotGiveAwayAPathItStillHasToWrite(t *testing.T) {
-	entrypoint, err := os.ReadFile("../docker-entrypoint.sh")
+	entrypoint, err := readSourceTextFile("../docker-entrypoint.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +219,7 @@ func TestTheEntrypointDoesNotGiveAwayAPathItStillHasToWrite(t *testing.T) {
 // example's own and proves the example no longer. So the override may name the
 // image and the stand-in binary's mount, and nothing else.
 func TestTheContainerJobStartsTheExampleCompose(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/test.yml")
+	raw, err := readSourceTextFile("../.github/workflows/test.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

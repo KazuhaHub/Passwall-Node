@@ -1,7 +1,6 @@
 package deployment
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -22,7 +21,7 @@ import (
 // downloadable, and unverifiable by the one consumer that needs to verify it —
 // which is worse than not publishing it, because it looks like it worked.
 func TestTheReleasePublishesEveryConsumedAssetUnderItsOwnSignature(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	raw, err := readSourceTextFile("../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
