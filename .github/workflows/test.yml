@@ -98,7 +98,7 @@ jobs:
       - name: Shellcheck the standalone shell scripts
         run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
       - name: Validate immutable image publishing check
-        run: node --test deployment/check_image_test.mjs deployment/windows_module_evidence_test.mjs
+        run: node --test deployment/check_image_test.mjs deployment/windows_module_evidence_test.mjs deployment/windows_process_evidence_test.mjs
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
@@ -214,12 +214,21 @@ jobs:
           $testExit = $LASTEXITCODE
           node deployment/windows-module-evidence.mjs "$env:RUNNER_TEMP/windows-module-packages.txt" "$env:RUNNER_TEMP/windows-module-raw.jsonl" $testExit "$env:RUNNER_TEMP/windows-module-evidence.json"
           if ($LASTEXITCODE -ne 0) { throw 'Windows full module failed; private output withheld' }
+      - name: Repeat actual Windows startup rollback identities ten times
+        shell: pwsh
+        run: |
+          go test -json -count=10 -timeout=4m ./internal/core/process -run '^(TestSupervisorRollsBackCandidateThatExitsDuringStartup|TestSupervisorSwitchesVersionAndRollsBackBinaryIdentity|TestSupervisorSwitchesEngineAndRollsBackDeploymentIdentity)$' > "$env:RUNNER_TEMP/windows-process-raw.jsonl" 2> "$env:RUNNER_TEMP/windows-process-raw.stderr"
+          $testExit = $LASTEXITCODE
+          node deployment/windows-process-evidence.mjs "$env:RUNNER_TEMP/windows-process-raw.jsonl" $testExit "$env:RUNNER_TEMP/windows-process-evidence.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows rollback replay failed; private output withheld' }
       - name: Keep package and top-level execution counts
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: windows-module-${{ github.sha }}
-          path: ${{ runner.temp }}/windows-module-evidence.json
+          path: |
+            ${{ runner.temp }}/windows-module-evidence.json
+            ${{ runner.temp }}/windows-process-evidence.json
           if-no-files-found: error
           retention-days: 7
 
