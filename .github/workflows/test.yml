@@ -178,7 +178,9 @@ jobs:
           $gitShell | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Run deployment tests on a Windows checkout
         shell: pwsh
-        run: go test -count=1 -timeout=10m ./deployment
+        run: |
+          Get-Command -Name sh, bash, git, jq -ErrorAction Stop | Select-Object Name, Source
+          go test -v -count=1 -timeout=10m ./deployment
 
   verify:
     name: test, vet, format

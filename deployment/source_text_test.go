@@ -55,7 +55,7 @@ func TestWindowsDeploymentJobProtectsCheckoutCompatibility(t *testing.T) {
 	}
 	workflow := string(raw)
 	job := workflowJob(t, workflow, "windows-deployment")
-	for _, required := range []string{"runs-on: windows-latest", "go-version-file: go.mod", "go tool compile -V", "Git/usr/bin", "go test -count=1 -timeout=10m ./deployment"} {
+	for _, required := range []string{"runs-on: windows-latest", "go-version-file: go.mod", "go tool compile -V", "Git/usr/bin", "Get-Command -Name sh, bash, git, jq -ErrorAction Stop", "go test -v -count=1 -timeout=10m ./deployment"} {
 		if !strings.Contains(job, required) {
 			t.Errorf("Windows deployment job lacks %s", required)
 		}
