@@ -27,6 +27,10 @@ var requiredTests = []testIdentity{
 	{module + "singbox", "TestRealityHandshakeMatrix/xray-26.6.27"},
 	{module + "singbox", "TestRealityHandshakeMatrix/mihomo-1.19.30"},
 	{module + "singbox", "TestRealityHandshakeMatrix/sing-box-1.14.0"},
+	{module + "singbox", "TestPinnedSingBoxPrivateGuardTraffic"},
+	{module + "singbox", "TestPinnedSingBoxPrivateGuardTraffic/nil_policy"},
+	{module + "singbox", "TestPinnedSingBoxPrivateGuardTraffic/allow_and_exempt"},
+	{module + "singbox", "TestPinnedSingBoxPrivateGuardTraffic/paused"},
 }
 
 func init() {

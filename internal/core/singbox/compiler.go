@@ -161,6 +161,10 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	if err := compileDestinationPolicy(&result, snapshot); err != nil {
 		return agentcore.Artifact{}, err
 	}
+	// Reject visible private IPs before every policy action, including allow and
+	// exemption rules. Domain resolution remains the direct outbound's behavior.
+	rules, _ := result.Route["rules"].([]map[string]any)
+	result.Route["rules"] = append([]map[string]any{{"ip_is_private": true, "action": "reject"}}, rules...)
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return agentcore.Artifact{}, fmt.Errorf("encode sing-box config: %w", err)

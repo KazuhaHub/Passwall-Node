@@ -45,7 +45,7 @@ func TestRealityHandshakeMatrix(t *testing.T) {
 	if !singBoxOK || !xrayOK || !mihomoOK {
 		t.Skip("set PSP_TEST_SING_BOX_BIN, PSP_TEST_XRAY_CLIENT_BIN, and PSP_TEST_MIHOMO_CLIENT_BIN")
 	}
-	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	target := ownedCoreHTTPServer(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("X-PSP-Matrix", "pass")
 		_, _ = io.WriteString(response, "passwall-node-sing-box-matrix")
 	}))

@@ -90,6 +90,20 @@ policy rejection. Startup restores status from the last confirmed deployment.
 This capability alone does not enable audit collection: hit/usage capabilities
 require their respective collectors. sing-box currently executes rules only.
 
+Newly compiled sing-box configurations reject a destination IP classified as
+private before every PSP allow, exemption, sniffing or catch-all rule. This also
+applies when PSP supplies no destination policy or pauses it. Private IP access
+that previously succeeded will be rejected; Xray behavior is unchanged.
+
+This guard does not insert domain resolution. A hostname that later resolves
+to a private address can still reach that address when its IP was unavailable
+at the first routing rule. It is not a complete private-network isolation
+boundary. An offline restart can restore an older persisted core configuration
+without this guard; normal synchronization and successful recompilation are
+required to replace that configuration. Real-core CI records both the rejected
+private literal and the reachable `localhost` boundary, alongside successful
+traffic to an owned documentation address on Linux amd64 and arm64.
+
 ### Audit hit collection (stage 2b in progress)
 
 `internal/agent/audit` contains independently bounded block (20,000 keys),
