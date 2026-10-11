@@ -31,6 +31,62 @@ func TestReportUsesLiveCoreStatus(t *testing.T) {
 	}
 }
 
+func TestReportCoalescesRepeatedIssueEpisodesWithoutLosingFailedTaskReceipt(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(map[bool]string{false: "full", true: "partial"}[partial], func(t *testing.T) {
+			ctx := t.Context()
+			store := openAgentTestStore(t)
+			issue := protocol.Issue{Code: "core_telemetry_failed", Key: "xray/26.6.27", Detail: "telemetry unavailable"}
+			for _, key := range []string{"before-restart", "after-restart"} {
+				if inserted, err := store.EnqueueIssue(ctx, key, issue, 1); err != nil || !inserted {
+					t.Fatalf("enqueue repeated episode: %v", err)
+				}
+			}
+			different := issue
+			different.Detail = "a different failure"
+			if _, err := store.EnqueueIssue(ctx, "different", different, 1); err != nil {
+				t.Fatal(err)
+			}
+			task := protocol.Task{ID: "task-health-restore", Kind: "test.v1"}
+			task.InputSHA256 = protocol.ComputeTaskInputSHA256(task.Kind, nil)
+			if _, err := store.AcceptTasks(ctx, []protocol.Task{task}, 2); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ClaimNextTask(ctx, 3); err != nil {
+				t.Fatal(err)
+			}
+			result := protocol.TaskResult{ID: task.ID, Kind: task.Kind, InputSHA256: task.InputSHA256, ErrorCode: "agent_upgrade_failed", Error: "previous managed release restored"}
+			if err := store.CompleteTask(ctx, task.ID, state.TaskFailed, result, 4); err != nil {
+				t.Fatal(err)
+			}
+			builder := ReportBuilder{AgentID: "agent-1", Store: store}
+			built, err := builder.Build(ctx, partial, BuildOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := protocol.ValidateNodeReport(built.Report); err != nil {
+				t.Fatalf("repeated episodes blocked the failed task receipt: %v", err)
+			}
+			if len(built.Report.Issues) != 2 || built.Report.Issues[0] != issue || built.Report.Issues[1] != different || len(built.OutboxIDs) != 4 || len(built.Report.TaskResults) != 1 || built.Report.TaskResults[0].ID != task.ID || built.Report.TaskResults[0].OK {
+				t.Fatal("coalescing lost a distinct issue, source row or failed task result")
+			}
+			// A lost response must retain every original row and replay the same
+			// valid report. Only a successful receipt may acknowledge all four IDs.
+			replay, err := builder.Build(ctx, partial, BuildOptions{})
+			if err != nil || len(replay.OutboxIDs) != 4 || protocol.ValidateNodeReport(replay.Report) != nil {
+				t.Fatal("coalescing prematurely acknowledged the original outbox")
+			}
+			if err := store.AckOutbox(ctx, replay.OutboxIDs); err != nil {
+				t.Fatal(err)
+			}
+			pending, err := store.PendingOutbox(ctx, 10)
+			if err != nil || len(pending.IDs) != 0 {
+				t.Fatal("acknowledgement left a repeated episode or task pending")
+			}
+		})
+	}
+}
+
 func TestReportBuilderFlushesTaskResultAsPartialWhenFullCombinationExceedsWireBudget(t *testing.T) {
 	ctx := context.Background()
 	store := openAgentTestStore(t)

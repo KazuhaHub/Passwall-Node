@@ -97,7 +97,7 @@ const handoverAgentID = "agt_atFiCPk1qbb1e5UgLl9rNzWfyXy35HbtEbZSivwUKDM"
 
 var (
 	// psp-compose.yaml is renderNodeInstallationFiles(7, ...) of Passwall-Sub-Panel
-	// d2168f86, for a Docker node on the beta channel with remote upgrade on, an
+	// 327340c42df7fcaa97b7845a859e6ef5ab51976e, on beta with remote upgrade on, an
 	// agent ID of handoverAgentID and the endpoint https://panel.example/v1/node/sync:
 	// the bytes the panel offers for download, unchanged.
 	handoverComposePSP = handoverCompose{
