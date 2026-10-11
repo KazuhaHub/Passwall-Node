@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -64,13 +63,7 @@ func TestOpenCreatesPrivateMigratedDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "agent.db")
 	store := openTestStore(t, path)
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat database: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("database permissions = %o, want 600", got)
-	}
+	assertPrivateDatabase(t, path)
 	var version int
 	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
