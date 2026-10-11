@@ -61,6 +61,20 @@ func TestCheckRequiresEveryExecutableLeafAndPackage(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresUnconditionalPrivateGuardTraffic(t *testing.T) {
+	for _, name := range []string{"TestPinnedSingBoxPrivateGuardTraffic", "TestPinnedSingBoxPrivateGuardTraffic/nil_policy", "TestPinnedSingBoxPrivateGuardTraffic/allow_and_exempt", "TestPinnedSingBoxPrivateGuardTraffic/paused"} {
+		found := false
+		for _, identity := range requiredTests {
+			if identity.Package == module+"singbox" && identity.Test == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("private guard executable gate is missing")
+		}
+	}
+}
+
 func TestCheckRejectsRecommendedOnlyXrayEvidence(t *testing.T) {
 	var events []testEvent
 	for _, event := range passingEvents() {

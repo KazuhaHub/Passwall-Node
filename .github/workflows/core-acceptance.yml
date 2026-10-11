@@ -71,8 +71,12 @@ jobs:
           go test -json -count=1 -timeout=5m ./internal/core/xray \
             -run '^TestCompilerArtifactPassesPinnedXrayValidation$' \
             | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
-          go test -json -count=1 -timeout=5m ./internal/core/singbox \
-            -run '^(TestCompilerArtifactPassesPinnedSingBoxValidation|TestDaemonAPIWireCompatibilityWithPinnedSingBox|TestRealityHandshakeMatrix)$' \
+          # Only this package needs an owned local documentation /128. Root is
+          # confined to the disposable hosted runner; no routing guard exception.
+          sudo --preserve-env=PSP_TEST_SING_BOX_BIN,PSP_TEST_XRAY_CLIENT_BIN,PSP_TEST_MIHOMO_CLIENT_BIN,GITHUB_ACTIONS,GITHUB_REPOSITORY,RUNNER_ENVIRONMENT,GOTOOLCHAIN,GOWORK \
+            env GOPATH="$(go env GOPATH)" GOCACHE="$(go env GOCACHE)" \
+            "$(command -v go)" test -json -count=1 -timeout=5m ./internal/core/singbox \
+            -run '^(TestCompilerArtifactPassesPinnedSingBoxValidation|TestDaemonAPIWireCompatibilityWithPinnedSingBox|TestRealityHandshakeMatrix|TestPinnedSingBoxPrivateGuardTraffic)$' \
             | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
           go test -json -count=1 -timeout=5m ./cmd/node \
             -run '^TestPinnedXrayPrivateUsageTraffic$' \

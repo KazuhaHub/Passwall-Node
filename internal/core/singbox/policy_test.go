@@ -29,17 +29,17 @@ func TestDestinationPolicyNativeRuleOrderAndDomainIPUnion(t *testing.T) {
 	if err := json.Unmarshal(artifact.Config, &config); err != nil {
 		t.Fatal(err)
 	}
-	if config.Route.Final != "direct" || config.Outbounds[0]["tag"] != "direct" || len(config.Route.Rules) != 4 || config.Route.Rules[0]["action"] != "sniff" {
+	if config.Route.Final != "direct" || config.Outbounds[0]["tag"] != "direct" || len(config.Route.Rules) != 5 || config.Route.Rules[1]["action"] != "sniff" {
 		t.Fatalf("unexpected rules: %s", artifact.Config)
 	}
-	block := config.Route.Rules[2]
+	block := config.Route.Rules[3]
 	if block["action"] != "reject" || block["domain_suffix"] == nil || block["ip_cidr"] == nil || block["ip_is_private"] != true {
 		t.Fatalf("domain/IP union was lost or split: %#v", block)
 	}
 	if block["port_range"].([]any)[0] != "80:90" || len(block["auth_user"].([]any)) != 1 {
 		t.Fatal("ports or username scope compiled incorrectly")
 	}
-	if config.Route.Rules[3]["outbound"] != "psp-watch-p2" {
+	if config.Route.Rules[4]["outbound"] != "psp-watch-p2" {
 		t.Fatal("observe must route normally through a distinct direct outbound")
 	}
 }
