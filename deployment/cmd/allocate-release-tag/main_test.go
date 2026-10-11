@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	allocateBinary = filepath.Join(dir, "allocate-release-tag")
+	if runtime.GOOS == "windows" {
+		allocateBinary += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", allocateBinary, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {

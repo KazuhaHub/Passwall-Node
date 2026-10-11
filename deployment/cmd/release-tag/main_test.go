@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	releaseTagBinary = filepath.Join(dir, "release-tag")
+	if runtime.GOOS == "windows" {
+		releaseTagBinary += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", releaseTagBinary, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -24,6 +25,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	publishBinary = filepath.Join(dir, "publish-core-catalog")
+	if runtime.GOOS == "windows" {
+		publishBinary += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", publishBinary, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
