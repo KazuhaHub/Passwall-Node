@@ -26,6 +26,48 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  collector-pressure:
+    name: four full collectors and frozen pending pressure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify exact preferred Node compiler
+        run: |
+          set -euo pipefail
+          toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$toolchain"
+          test "$(go env GOVERSION)" = "$toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$toolchain"
+      - name: Check closed evidence and compile the production collector pressure driver
+        run: |
+          set -euo pipefail
+          node --test deployment/collector_pressure_evidence_test.mjs
+          go test -c -tags audit_pressure -o "$RUNNER_TEMP/audit-collector-pressure.test" ./internal/agent/audit
+      - name: Fill all real collectors and pending subtrees without acknowledging retries
+        run: |
+          set -euo pipefail
+          NODE_COLLECTOR_PRESSURE_METRICS="$RUNNER_TEMP/audit-collector-pressure-metrics.json" \
+            "$RUNNER_TEMP/audit-collector-pressure.test" \
+              -test.v=test2json -test.run '^TestNativeCollectorPressure$' -test.benchtime=1x -test.timeout=5m 2>&1 \
+            | go tool test2json -t -p github.com/KazuhaHub/passwall-node/v4/internal/agent/audit \
+            | node deployment/collector-pressure-evidence.mjs sanitize > "$RUNNER_TEMP/audit-collector-pressure-tests.json"
+          node deployment/collector-pressure-evidence.mjs "$RUNNER_TEMP/audit-collector-pressure-tests.json" "$RUNNER_TEMP/audit-collector-pressure-metrics.json"
+      - name: Keep bounded collector and heap evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-collector-pressure-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/audit-collector-pressure-tests.json
+            ${{ runner.temp }}/audit-collector-pressure-metrics.json
+          if-no-files-found: error
+          retention-days: 7
   checks:
     name: regular tests and static checks
     runs-on: ubuntu-latest
@@ -67,6 +109,8 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Vet
         run: go vet ./...
+      - name: Vet tagged collector pressure
+        run: go vet -tags audit_pressure ./internal/agent/audit
       - name: Verify pinned build toolchain
         run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
       # THE FULL SUITE RUNS ONCE, in the race job. No file in this module is built
@@ -98,7 +142,7 @@ jobs:
       - name: Shellcheck the standalone shell scripts
         run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
       - name: Validate immutable image publishing check
-        run: node --test deployment/check_image_test.mjs deployment/windows_module_evidence_test.mjs deployment/windows_process_evidence_test.mjs
+        run: node --test deployment/check_image_test.mjs deployment/windows_module_evidence_test.mjs deployment/windows_process_evidence_test.mjs deployment/collector_pressure_evidence_test.mjs
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
