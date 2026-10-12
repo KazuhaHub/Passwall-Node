@@ -26,7 +26,8 @@ type collection struct {
 	enabled  bool
 	// Packed receive-hour/count slots keep overflow accounting nonblocking.
 	// A collision is at least 74 hours apart, beyond the 48-hour replay limit.
-	loss [74]atomic.Uint64
+	loss      [74]atomic.Uint64
+	unmatched [74]atomic.Uint64
 }
 
 type accessEvent struct {
@@ -51,7 +52,8 @@ type Filter struct {
 	fatal   chan error
 	done    chan struct{}
 
-	processed, stale, forwardDropped atomic.Uint64
+	processed, stale, forwardDropped                                        atomic.Uint64
+	privateLines, usageEvents, deniedEvents, unmatchedEvents, droppedEvents atomic.Uint64
 }
 
 func New(sink Sink, stdout io.Writer, now func() time.Time) (*Filter, error) {
@@ -146,6 +148,7 @@ func (w *deploymentWriter) emit(newline bool) {
 	}
 	line := strings.TrimSuffix(string(w.line), "\r")
 	if privatePrefix.MatchString(line) {
+		f.privateLines.Add(1)
 		epoch := f.active.Load()
 		if !epoch.enabled || epoch.revision != w.revision {
 			f.stale.Add(1)
@@ -155,7 +158,19 @@ func (w *deploymentWriter) emit(newline bool) {
 		select {
 		case f.input <- event:
 		default:
-			epoch.drop(event.at)
+			// A denied connection is never a missing usage event. Classify
+			// only on overflow so the ordinary writer keeps its short path.
+			parsed := parseLine(line)
+			switch {
+			case !event.truncated && parsed.kind == lineIgnored:
+				f.deniedEvents.Add(1)
+			case event.truncated || parsed.kind != lineUsage:
+				epoch.drop(event.at, true)
+				f.unmatchedEvents.Add(1)
+			default:
+				epoch.drop(event.at, false)
+				f.droppedEvents.Add(1)
+			}
 		}
 		return
 	}
@@ -170,12 +185,16 @@ func (w *deploymentWriter) emit(newline bool) {
 	}
 }
 
-func (c *collection) drop(at time.Time) {
+func (c *collection) drop(at time.Time, unmatched bool) {
 	hour := at.UnixMilli() / protocol.AuditHourMS
 	if hour <= 0 || hour > math.MaxUint32 {
 		return
 	}
-	slot := &c.loss[hour%int64(len(c.loss))]
+	slots := &c.loss
+	if unmatched {
+		slots = &c.unmatched
+	}
+	slot := &slots[hour%int64(len(slots))]
 	for {
 		old := slot.Load()
 		previous, count := old>>32, old&math.MaxUint32
@@ -196,14 +215,20 @@ func (c *collection) drop(at time.Time) {
 
 func (f *Filter) flushLosses() {
 	epoch := f.active.Load()
-	for i := range epoch.loss {
-		slot := &epoch.loss[i]
-		word := slot.Load()
-		count := word & math.MaxUint32
-		if count == 0 || !slot.CompareAndSwap(word, word&^uint64(math.MaxUint32)) {
-			continue
+	for group, slots := range []*[74]atomic.Uint64{&epoch.loss, &epoch.unmatched} {
+		for i := range slots {
+			slot := &slots[i]
+			word := slot.Load()
+			count := word & math.MaxUint32
+			if count == 0 || !slot.CompareAndSwap(word, word&^uint64(math.MaxUint32)) {
+				continue
+			}
+			dropped, unmatched := count, uint64(0)
+			if group == 1 {
+				dropped, unmatched = 0, count
+			}
+			f.sink.AddLossAt("usage", epoch.revision, dropped, unmatched, time.UnixMilli(int64(word>>32)*protocol.AuditHourMS))
 		}
-		f.sink.AddLossAt("usage", epoch.revision, count, 0, time.UnixMilli(int64(word>>32)*protocol.AuditHourMS))
 	}
 }
 
@@ -217,8 +242,12 @@ func (f *Filter) consume(event accessEvent) {
 	parsed := parseLine(event.line)
 	if event.truncated || parsed.kind == lineOrdinary || parsed.kind == lineUnmatched {
 		f.sink.AddLossAt("usage", event.collection.revision, 0, 1, event.at)
+		f.unmatchedEvents.Add(1)
 	} else if parsed.kind == lineUsage {
 		f.sink.AddUsageAt(event.collection.revision, parsed.email, parsed.destination, event.at)
+		f.usageEvents.Add(1)
+	} else if parsed.kind == lineIgnored {
+		f.deniedEvents.Add(1)
 	}
 }
 

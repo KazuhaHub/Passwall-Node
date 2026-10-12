@@ -50,6 +50,7 @@ jobs:
           node --test deployment/collector_pressure_evidence_test.mjs deployment/audit_pressure_observation_test.mjs
           go test -v -count=1 ./internal/agent/audit -run '^TestPressure'
           go test -v -count=1 ./cmd/node -run '^TestAuditMetrics'
+          go test -race -v -count=1 ./internal/agent/auditlog -run '^TestFilter'
           go test -c -tags audit_pressure -o "$RUNNER_TEMP/audit-collector-pressure.test" ./internal/agent/audit
       - name: Fill all real collectors and pending subtrees without acknowledging retries
         run: |

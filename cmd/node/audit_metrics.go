@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/KazuhaHub/passwall-node/v4/internal/agent/audit"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent/auditlog"
 	"runtime"
 	"time"
 )
@@ -15,6 +16,7 @@ type auditMetrics struct {
 	HeapObjects uint64                `json:"go_heap_objects"`
 	Goroutines  int                   `json:"go_goroutines"`
 	Lanes       [4]audit.LanePressure `json:"lanes"`
+	AccessLog   auditlog.Pressure     `json:"access_log"`
 }
 
 // This optional observer measures the running daemon's whole Go heap. It never
@@ -28,7 +30,10 @@ func (a *nodeAudit) runMetrics(ctx context.Context) error {
 		}
 		var memory runtime.MemStats
 		runtime.ReadMemStats(&memory)
-		value := auditMetrics{Schema: 1, HeapAlloc: memory.HeapAlloc, HeapInuse: memory.HeapInuse, HeapObjects: memory.HeapObjects, Goroutines: runtime.NumGoroutine(), Lanes: a.collector.Pressure()}
+		value := auditMetrics{Schema: 2, HeapAlloc: memory.HeapAlloc, HeapInuse: memory.HeapInuse, HeapObjects: memory.HeapObjects, Goroutines: runtime.NumGoroutine(), Lanes: a.collector.Pressure()}
+		if a.filter != nil {
+			value.AccessLog = a.filter.Pressure()
+		}
 		data, err := json.Marshal(value)
 		if err != nil {
 			return err

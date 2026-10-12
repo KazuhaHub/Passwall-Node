@@ -21,6 +21,33 @@ This enables subsequent same-run integration; it is not itself proof that the
 four classes, PSP queue, SQL and control/poll pressure have been exercised together.
 It keeps the wall clock and every production capacity unchanged.
 
+Observer schema 2 additionally includes `access_log`: availability, private
+input lines, usage/denied/unmatched/queue-dropped/stale event counters, parse
+queue occupancy/limit, and unflushed dropped/unmatched counts. These are
+process-lifetime numeric observations; no raw line or identity is exported.
+Unavailable filtering is explicit, rather than a zero-traffic assertion.
+Reads do not flush losses or consume input. Concurrent atomic loads may straddle
+a writer, so exact category reconciliation requires a quiescent snapshot.
+
+The bounded filter's overflow path now distinguishes recognized denied lines
+from usage. A full parser queue must not turn a denied connection into a usage
+drop. Malformed or truncated overflow input contributes unmatched counts in
+its original receive hour, using separate bounded counters; valid allowed
+overflow contributes dropped counts. The original 4096-entry queue, revision
+fences, nonblocking producer and private-output suppression remain in place.
+
+The first actual PSP mixed run at `2616824e` delivered all four traffic classes,
+preserved all four canonical retries and drained both retained states, but
+usage storage plus observed loss counters did not explain 29046 allowed events.
+Its failed originals remain retained; this is not a successful mixed proof.
+Pinned Xray 26.6.27's `common/log/logger.go` uses a 128-message queue whose
+full path discards messages without a counter. The new filter observations
+locate received versus missing input; they cannot measure inside that upstream
+queue or turn upstream omissions into fabricated persisted Node loss counts.
+An acceptance fixture with independently counted real connections must keep
+that before-filter difference separate from the Node-observed/persisted ledger.
+The observer change still needs hosted runtime verification and a new mixed run.
+
 | Kind | Aggregate key limit | Separate frozen pending bound | Slots per cycle |
 |---|---:|---:|---:|
 | block | 20000 | 4096 rows and 1 MiB | 4 |

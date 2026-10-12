@@ -9,8 +9,8 @@ export function readAuditPressureObservation(line) {
   if (!match) return undefined
   let value
   try { value = JSON.parse(match[1]) } catch { require(false) }
-  fields(value, ['schema_version', 'go_heap_alloc_bytes', 'go_heap_inuse_bytes', 'go_heap_objects', 'go_goroutines', 'lanes'])
-  require(value.schema_version === 1 && ['go_heap_alloc_bytes', 'go_heap_inuse_bytes', 'go_heap_objects', 'go_goroutines'].every(k => count(value[k]) && value[k] > 0))
+  fields(value, ['schema_version', 'go_heap_alloc_bytes', 'go_heap_inuse_bytes', 'go_heap_objects', 'go_goroutines', 'lanes', 'access_log'])
+  require(value.schema_version === 2 && ['go_heap_alloc_bytes', 'go_heap_inuse_bytes', 'go_heap_objects', 'go_goroutines'].every(k => count(value[k]) && value[k] > 0))
   require(value.go_heap_inuse_bytes >= value.go_heap_alloc_bytes)
   require(Array.isArray(value.lanes) && value.lanes.length === 4)
   for (const [i, lane] of value.lanes.entries()) {
@@ -21,5 +21,9 @@ export function readAuditPressureObservation(line) {
     require(lane.pending_rows <= (i === 3 ? 8192 : 4096))
     require(lane.pending ? lane.pending_bytes > 0 : lane.pending_bytes === 0 && lane.pending_rows === 0)
   }
+  fields(value.access_log, ['available', 'private_lines', 'usage_events', 'denied_events', 'unmatched_events', 'dropped_events', 'stale_events', 'parse_queued', 'parse_limit', 'pending_dropped', 'pending_unmatched'])
+  require(Object.values(value.access_log).every(count) && value.access_log.available <= 1)
+  if (value.access_log.available) require(value.access_log.parse_limit === 4096 && value.access_log.parse_queued <= 4096)
+  else require(Object.values(value.access_log).every(n => n === 0))
   return value
 }
