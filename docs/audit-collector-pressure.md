@@ -2,6 +2,23 @@
 
 The `collector-pressure` job in the Test workflow measures the production audit
 collector on the hosted Linux runner with Node's exact preferred Go compiler.
+
+The running daemon can additionally opt into `--audit-metrics`. It emits one
+`audit_pressure` journal record per second with four fixed kinds, current aggregate
+keys/limits/hour buckets, separate frozen pending row/canonical byte counts,
+retained dropped/unmatched counters, and the agent process's actual Go heap and
+goroutine counts. It exports no accounts, destinations, rules, revision or batch
+IDs. These retained counters disappear when their batch is acknowledged; they
+are not lifetime loss totals. The observer is disabled by default.
+
+Pressure reads lock only the bounded state and use the wire size already computed
+at freeze time; they never clone/serialize private rows or expire/acknowledge state.
+The heap observer does not force GC. Its samples describe the whole running agent
+and do not establish a continuous peak or collector-only retained heap. Opt-in
+sampling has a cost and must be recorded with the workload. The strict journal
+reader discards other lines and rejects unknown/private fields or changed limits.
+This enables subsequent same-run integration; it is not itself proof that the
+four classes, PSP queue, SQL and control/poll pressure have been exercised together.
 It keeps the wall clock and every production capacity unchanged.
 
 | Kind | Aggregate key limit | Separate frozen pending bound | Slots per cycle |
