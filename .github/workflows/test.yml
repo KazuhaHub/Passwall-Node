@@ -279,7 +279,7 @@ jobs:
   verify:
     name: test, vet, format
     if: ${{ always() }}
-    needs: [checks, race, windows-release-cli, windows-deployment, windows-module]
+    needs: [checks, race, windows-release-cli, windows-deployment, windows-module, collector-pressure]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -290,12 +290,14 @@ jobs:
           WINDOWS_CLI_RESULT: ${{ needs.windows-release-cli.result }}
           WINDOWS_DEPLOYMENT_RESULT: ${{ needs.windows-deployment.result }}
           WINDOWS_MODULE_RESULT: ${{ needs.windows-module.result }}
+          COLLECTOR_PRESSURE_RESULT: ${{ needs.collector-pressure.result }}
         run: |
           test "$CHECKS_RESULT" = success
           test "$RACE_RESULT" = success
           test "$WINDOWS_CLI_RESULT" = success
           test "$WINDOWS_DEPLOYMENT_RESULT" = success
           test "$WINDOWS_MODULE_RESULT" = success
+          test "$COLLECTOR_PRESSURE_RESULT" = success
 
   cross-compile:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}

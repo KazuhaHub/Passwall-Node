@@ -29,7 +29,27 @@ test RUN/PASS and package PASS; destinations, subjects, batch IDs and hashes
 are not retained. Negative verifier tests reject missing, duplicate, skipped,
 failed, unknown and private evidence, changed capacities, and false accounting.
 
-This component is awaiting its first actual hosted evidence. It exercises
-production collector retention and scheduling, not live Xray, a running Node
-daemon, PSP ingestion, SQL waits, control latency, or long-running cleanup.
-Those remain separate requirements of the full mixed-pressure acceptance.
+The first actual hosted run passed at source
+`c28a0cbbb011813eb6771acac27b5579be6b2f91`, PR merge
+`e7d6c2598f74106e3d8a890c5c87908619d67b71`:
+[collector pressure job](https://github.com/KazuhaHub/Passwall-Node/actions/runs/38222606789/job/114722250229).
+Both original artifact files were retained with their nonexpired, exact-source
+metadata. The immutable source verifier and a separate checker both confirmed
+the complete unique execution, closed fields, original limits and accounting.
+
+| Kind | Aggregate keys | Pending rows | Pending wire bytes |
+|---|---:|---:|---:|
+| block | 20000 | 2674 | 1048347 |
+| observe | 10000 | 2647 | 1048353 |
+| trial | 10000 | 4096 | 868491 |
+| usage | 50000 | 8192 | 1024140 |
+
+The four frozen subtrees totaled 3989331 bytes while all 90000 aggregate keys
+remained full. GC-retained heap was 47438944 bytes and sampled maximum heap was
+79324136 bytes. Each kind recorded exactly two overflow events, zero unmatched
+events, and its original 4/1/1/1 scheduling opportunities; all 4096 trial rows
+were anonymous. These are measurements from one complete benchmark iteration,
+not long-running memory guarantees. The run exercises production collector
+retention and scheduling, not live Xray, a running Node daemon, PSP ingestion,
+SQL waits, control latency, or long-running cleanup. Those remain separate
+requirements of the full mixed-pressure acceptance.

@@ -48,6 +48,7 @@ test('collector identity must execute once and private or unknown identities can
 test('hosted collector pressure gate keeps its tagged source checked and measures a single actual iteration', () => {
   const workflow = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
   for (const required of ['  collector-pressure:', 'go vet -tags audit_pressure ./internal/agent/audit', '-test.benchtime=1x', '^TestNativeCollectorPressure$', 'NODE_COLLECTOR_PRESSURE_METRICS', 'deployment/collector-pressure-evidence.mjs sanitize', 'native-collector-pressure-${{ github.sha }}', 'audit-collector-pressure-tests.json', 'audit-collector-pressure-metrics.json']) assert(workflow.includes(required), required)
+  for (const required of ['needs: [checks, race, windows-release-cli, windows-deployment, windows-module, collector-pressure]', 'COLLECTOR_PRESSURE_RESULT: ${{ needs.collector-pressure.result }}', 'test "$COLLECTOR_PRESSURE_RESULT" = success']) assert(workflow.includes(required), required)
   const source = readFileSync(new URL('../internal/agent/audit/collector_pressure_benchmark_test.go', import.meta.url), 'utf8')
   for (const required of ['New(nil)', '20_000', '10_000', '50_000', 'c.Next(protocol.MaxAuditObservationBytes)', 'sha256.Sum256(wire)', 'l.keys != definition.limit', 'dropped != 2', 'runtime.GC()']) assert(source.includes(required), required)
   assert(!source.includes('.limit ='))

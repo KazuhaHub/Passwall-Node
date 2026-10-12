@@ -67,6 +67,6 @@ test('Windows full-module job runs every package and participates in the verific
   for (const required of ['runs-on: windows-latest', 'go tool compile -V', 'Git/usr/bin', 'go list -f', 'go test -json -count=1 -timeout=12m ./...', '$testExit = $LASTEXITCODE', 'windows-module-evidence.mjs', 'if: always()', 'windows-module-evidence.json']) assert(job.includes(required), required)
   assert(!job.includes('continue-on-error'))
   assert(!job.includes('path: ${{ runner.temp }}/windows-module-raw'))
-  assert(workflow.includes('needs: [checks, race, windows-release-cli, windows-deployment, windows-module]'))
+  assert(workflow.includes('needs: [checks, race, windows-release-cli, windows-deployment, windows-module, collector-pressure]'))
   assert(workflow.includes('test "$WINDOWS_MODULE_RESULT" = success'))
 })
