@@ -68,10 +68,18 @@ func readDocumentBytes(root, name string) ([]byte, error) {
 }
 
 // AtomicDocument is only called with owned, checked private directories and a
-// canonical basename. Sync the containing directory as well as the file.
+// canonical basename. Sync the file and complete the platform's durable move:
+// POSIX rename plus directory sync, or a Windows move with write-through.
 func AtomicDocument(dir, name string, document any, mode os.FileMode) error {
 	if filepath.Base(name) != name {
 		return errors.New("upgrade document name is not canonical")
+	}
+	release, err := checkDocumentDirectory(dir, mode)
+	if err != nil {
+		return err
+	}
+	if release != nil {
+		defer release()
 	}
 	data, err := json.Marshal(document)
 	if err != nil {
@@ -98,15 +106,7 @@ func AtomicDocument(dir, name string, document any, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return replaceDocumentFile(tmp, filepath.Join(dir, name), dir)
 }
 
 func BinaryDigest(path string) (string, error) {

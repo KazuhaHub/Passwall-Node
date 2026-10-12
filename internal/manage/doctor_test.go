@@ -132,10 +132,7 @@ func TestAnUnwritableDataDirectoryFailsTheAccessCheck(t *testing.T) {
 		t.Skip("root can write to a read-only directory")
 	}
 	dataDir := t.TempDir()
-	if err := os.Chmod(dataDir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+	makeUnwritableDirectoryFixture(t, dataDir)
 
 	report := RunDoctor(t.Context(), DoctorOptions{DataDir: dataDir})
 	if status := statusOf(report, CheckDataDirAccess); status != DoctorFailed {
@@ -218,6 +215,7 @@ func TestCredentialPermissionsInspectsTypeAndModeWithoutReading(t *testing.T) {
 	if err := os.WriteFile(worldReadable, []byte("pspn_x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	makeSharedCredentialFixture(t, worldReadable)
 	symlink := filepath.Join(directory, "link")
 	if err := os.Symlink(private, symlink); err != nil {
 		t.Fatal(err)

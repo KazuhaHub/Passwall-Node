@@ -51,9 +51,10 @@ type bucket struct {
 	dropped, unmatched uint64
 }
 type lane struct {
-	buckets     map[int64]*bucket
-	pending     *protocol.AuditObservation
-	keys, limit int
+	buckets      map[int64]*bucket
+	pending      *protocol.AuditObservation
+	pendingBytes int
+	keys, limit  int
 }
 
 // The key limit covers all retained hours in a class. Pending is separately
@@ -455,6 +456,7 @@ func (c *Collector) Next(maxBytes int) (Batch, error) {
 		delete(l.buckets, hour)
 	}
 	l.pending = o
+	l.pendingBytes = size
 	return result, nil
 }
 
@@ -468,6 +470,7 @@ func (c *Collector) Acknowledge(kind, id string) bool {
 		return false
 	}
 	l.pending = nil
+	l.pendingBytes = 0
 	return true
 }
 
@@ -484,6 +487,7 @@ func (c *Collector) DiscardInvalid(kind, id string) {
 	c.stats.InvalidRows = add(c.stats.InvalidRows, rows)
 	c.stats.InvalidEvents = add(c.stats.InvalidEvents, events)
 	l.pending = nil
+	l.pendingBytes = 0
 }
 
 func (c *Collector) Stats() Stats { c.mu.Lock(); defer c.mu.Unlock(); return c.stats }
@@ -503,6 +507,7 @@ func (c *Collector) expire(now int64) {
 			c.stats.ExpiredRows = add(c.stats.ExpiredRows, rows)
 			c.stats.ExpiredEvents = add(c.stats.ExpiredEvents, events)
 			l.pending = nil
+			l.pendingBytes = 0
 		}
 	}
 }

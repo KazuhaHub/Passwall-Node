@@ -239,6 +239,16 @@ by group or others. On restart it launches a prior configuration only when its
 bytes match the last durably confirmed digest. A stale, orphaned or modified
 configuration degrades closed instead of being executed.
 
+On Windows, SQLite state requires native ACL protection for the data directory,
+database, WAL and SHM files. A newly created data directory receives a protected
+ACL for the running identity, SYSTEM and Administrators before any state is
+written. An existing directory must already exclude other identities and pass
+private file permissions to new children. Shared directories, shared existing
+database or sidecar files, unsupported ACLs and reparse points are refused;
+startup does not rewrite an existing operator directory or file ACL. Use a
+dedicated private data directory rather than a shared folder. POSIX state file
+permissions and SQLite WAL/FULL durability remain unchanged.
+
 ## Docker Compose
 
 The container image is Linux `amd64` + `arm64`. Native release archives also

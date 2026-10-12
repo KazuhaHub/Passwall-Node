@@ -7,10 +7,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -30,7 +30,8 @@ const SupportedSchema = schemaVersion
 // writer and modest data volume; this makes transaction behaviour predictable
 // while WAL still gives crash recovery and tooling-friendly reads.
 type Store struct {
-	db *sql.DB
+	db           *sql.DB
+	releaseState func() error
 	// Production uses crypto/rand.Reader. This per-store seam lets tests prove
 	// entropy failure cannot turn received into an executable running claim.
 	taskClaimEntropy io.Reader
@@ -46,19 +47,16 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve state database path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
-		return nil, fmt.Errorf("create state directory: %w", err)
-	}
-	f, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR, 0o600)
+	release, err := prepareStateFile(abs)
 	if err != nil {
-		return nil, fmt.Errorf("create state database: %w", err)
+		return nil, err
 	}
-	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("close state database bootstrap handle: %w", err)
-	}
-	if err := os.Chmod(abs, 0o600); err != nil {
-		return nil, fmt.Errorf("protect state database: %w", err)
-	}
+	keepState := false
+	defer func() {
+		if !keepState && release != nil {
+			_ = release()
+		}
+	}()
 
 	dsn := sqliteDSN(abs)
 	db, err := sql.Open("sqlite", dsn)
@@ -73,11 +71,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("ping state database: %w", err)
 	}
 
-	store := &Store{db: db}
+	store := &Store{db: db, releaseState: release}
 	if err := store.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
+	keepState = true
 	return store, nil
 }
 
@@ -103,7 +102,11 @@ func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	err := s.db.Close()
+	if s.releaseState != nil {
+		err = errors.Join(err, s.releaseState())
+	}
+	return err
 }
 
 func (s *Store) migrate(ctx context.Context) error {

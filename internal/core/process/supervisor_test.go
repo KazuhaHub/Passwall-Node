@@ -204,7 +204,7 @@ func TestSupervisorValidationFailureLeavesCurrentProcessUntouched(t *testing.T) 
 }
 
 func TestSupervisorRollsBackCandidateThatExitsDuringStartup(t *testing.T) {
-	supervisor, cancel, runDone := startTestSupervisor(t)
+	supervisor, cancel, runDone := startStartupRollbackSupervisor(t)
 	good := testArtifact("good")
 	if err := supervisor.Apply(t.Context(), good); err != nil {
 		t.Fatal(err)
@@ -225,7 +225,7 @@ func TestSupervisorRollsBackCandidateThatExitsDuringStartup(t *testing.T) {
 }
 
 func TestSupervisorSwitchesVersionAndRollsBackBinaryIdentity(t *testing.T) {
-	supervisor, cancel, runDone := startTestSupervisor(t)
+	supervisor, cancel, runDone := startStartupRollbackSupervisor(t)
 	first := testArtifact("good-one")
 	if err := supervisor.Apply(t.Context(), first); err != nil {
 		t.Fatal(err)
@@ -262,7 +262,7 @@ func TestSupervisorSwitchesVersionAndRollsBackBinaryIdentity(t *testing.T) {
 }
 
 func TestSupervisorSwitchesEngineAndRollsBackDeploymentIdentity(t *testing.T) {
-	supervisor, cancel, runDone := startTestSupervisor(t)
+	supervisor, cancel, runDone := startStartupRollbackSupervisor(t)
 	first := testArtifact("good-one")
 	if err := supervisor.Apply(t.Context(), first); err != nil {
 		t.Fatal(err)
@@ -362,7 +362,20 @@ func TestSupervisorRestartsOnlyConfirmedInitialConfig(t *testing.T) {
 
 func startTestSupervisor(t *testing.T) (*Supervisor, context.CancelFunc, <-chan error) {
 	t.Helper()
-	supervisor := newTestSupervisor(t)
+	return startTestSupervisorWithOptions(t, nil)
+}
+
+func startStartupRollbackSupervisor(t *testing.T) (*Supervisor, context.CancelFunc, <-chan error) {
+	t.Helper()
+	// A fresh Go helper can take longer than the accelerated 40ms fixture
+	// grace to initialize on a shared runner. Exercise the production startup
+	// grace for assertions that require a crash to be caught during startup.
+	return startTestSupervisorWithOptions(t, func(options *Options) { options.StartGrace = 0 })
+}
+
+func startTestSupervisorWithOptions(t *testing.T, customize func(*Options)) (*Supervisor, context.CancelFunc, <-chan error) {
+	t.Helper()
+	supervisor := newTestSupervisorWithOptions(t, customize)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- supervisor.Run(ctx) }()

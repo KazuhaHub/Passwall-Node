@@ -181,12 +181,8 @@ func (f *ReleaseFetcher) Fetch(ctx context.Context, version string) (candidate C
 	if _, err := releaseid.TagForVersion(version); err != nil {
 		return Candidate{}, errors.New("upgrade requires an exact canonical PN release version")
 	}
-	if err := os.MkdirAll(f.rootDir, 0o700); err != nil {
-		return Candidate{}, fmt.Errorf("create upgrade staging root: %w", err)
-	}
-	info, err := os.Lstat(f.rootDir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
-		return Candidate{}, errors.New("upgrade staging root must be a private non-linked directory")
+	if err := ensureReleaseStagingRoot(f.rootDir); err != nil {
+		return Candidate{}, err
 	}
 	dir, err := os.MkdirTemp(f.rootDir, ".candidate-")
 	if err != nil {

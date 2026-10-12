@@ -26,6 +26,51 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  collector-pressure:
+    name: four full collectors and frozen pending pressure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify exact preferred Node compiler
+        run: |
+          set -euo pipefail
+          toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$toolchain"
+          test "$(go env GOVERSION)" = "$toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$toolchain"
+      - name: Check closed evidence and compile the production collector pressure driver
+        run: |
+          set -euo pipefail
+          node --test deployment/collector_pressure_evidence_test.mjs deployment/audit_pressure_observation_test.mjs
+          go test -v -count=1 ./internal/agent/audit -run '^TestPressure'
+          go test -v -count=1 ./cmd/node -run '^TestAuditMetrics'
+          go test -race -v -count=1 ./internal/agent/auditlog -run '^TestFilter'
+          go test -c -tags audit_pressure -o "$RUNNER_TEMP/audit-collector-pressure.test" ./internal/agent/audit
+      - name: Fill all real collectors and pending subtrees without acknowledging retries
+        run: |
+          set -euo pipefail
+          NODE_COLLECTOR_PRESSURE_METRICS="$RUNNER_TEMP/audit-collector-pressure-metrics.json" \
+            "$RUNNER_TEMP/audit-collector-pressure.test" \
+              -test.v=test2json -test.run '^TestNativeCollectorPressure$' -test.benchtime=1x -test.timeout=5m 2>&1 \
+            | go tool test2json -t -p github.com/KazuhaHub/passwall-node/v4/internal/agent/audit \
+            | node deployment/collector-pressure-evidence.mjs sanitize > "$RUNNER_TEMP/audit-collector-pressure-tests.json"
+          node deployment/collector-pressure-evidence.mjs "$RUNNER_TEMP/audit-collector-pressure-tests.json" "$RUNNER_TEMP/audit-collector-pressure-metrics.json"
+      - name: Keep bounded collector and heap evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-collector-pressure-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/audit-collector-pressure-tests.json
+            ${{ runner.temp }}/audit-collector-pressure-metrics.json
+          if-no-files-found: error
+          retention-days: 7
   checks:
     name: regular tests and static checks
     runs-on: ubuntu-latest
@@ -67,6 +112,8 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Vet
         run: go vet ./...
+      - name: Vet tagged collector pressure
+        run: go vet -tags audit_pressure ./internal/agent/audit
       - name: Verify pinned build toolchain
         run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
       # THE FULL SUITE RUNS ONCE, in the race job. No file in this module is built
@@ -98,7 +145,7 @@ jobs:
       - name: Shellcheck the standalone shell scripts
         run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
       - name: Validate immutable image publishing check
-        run: node --test deployment/check_image_test.mjs
+        run: node --test deployment/check_image_test.mjs deployment/windows_module_evidence_test.mjs deployment/windows_process_evidence_test.mjs deployment/collector_pressure_evidence_test.mjs
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
@@ -182,10 +229,60 @@ jobs:
           Get-Command -Name sh, bash, git, jq -ErrorAction Stop | Select-Object Name, Source
           go test -v -count=1 -timeout=10m ./deployment
 
+  windows-module:
+    name: Windows full module execution
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact preferred compiler and shell dependencies
+        shell: pwsh
+        run: |
+          $expected = (Select-String -LiteralPath go.mod -Pattern '^toolchain\s+(\S+)$').Matches[0].Groups[1].Value
+          if ((go env GOVERSION) -ne $expected) { throw 'Unexpected Go toolchain' }
+          $compiler = (go tool compile -V) -split '\s+'
+          if ($compiler[-1] -ne $expected) { throw 'Unexpected Go compiler' }
+          $gitShell = Join-Path $env:ProgramFiles 'Git/usr/bin'
+          if (-not (Test-Path -LiteralPath $gitShell)) { throw 'Git shell tools missing' }
+          $gitShell | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Execute every Windows package and retain private diagnostics only on the runner
+        shell: pwsh
+        run: |
+          Get-Command -Name sh, bash, git, jq -ErrorAction Stop | Select-Object Name, Source
+          go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}test{{else}}none{{end}}' ./... > "$env:RUNNER_TEMP/windows-module-packages.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows module inventory failed' }
+          go test -json -count=1 -timeout=12m ./... > "$env:RUNNER_TEMP/windows-module-raw.jsonl" 2> "$env:RUNNER_TEMP/windows-module-raw.stderr"
+          $testExit = $LASTEXITCODE
+          node deployment/windows-module-evidence.mjs "$env:RUNNER_TEMP/windows-module-packages.txt" "$env:RUNNER_TEMP/windows-module-raw.jsonl" $testExit "$env:RUNNER_TEMP/windows-module-evidence.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows full module failed; private output withheld' }
+      - name: Repeat actual Windows startup rollback identities ten times
+        shell: pwsh
+        run: |
+          go test -json -count=10 -timeout=4m ./internal/core/process -run '^(TestSupervisorRollsBackCandidateThatExitsDuringStartup|TestSupervisorSwitchesVersionAndRollsBackBinaryIdentity|TestSupervisorSwitchesEngineAndRollsBackDeploymentIdentity)$' > "$env:RUNNER_TEMP/windows-process-raw.jsonl" 2> "$env:RUNNER_TEMP/windows-process-raw.stderr"
+          $testExit = $LASTEXITCODE
+          node deployment/windows-process-evidence.mjs "$env:RUNNER_TEMP/windows-process-raw.jsonl" $testExit "$env:RUNNER_TEMP/windows-process-evidence.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows rollback replay failed; private output withheld' }
+      - name: Keep package and top-level execution counts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-module-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/windows-module-evidence.json
+            ${{ runner.temp }}/windows-process-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+
   verify:
     name: test, vet, format
     if: ${{ always() }}
-    needs: [checks, race, windows-release-cli, windows-deployment]
+    needs: [checks, race, windows-release-cli, windows-deployment, windows-module, collector-pressure]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -195,11 +292,15 @@ jobs:
           RACE_RESULT: ${{ needs.race.result }}
           WINDOWS_CLI_RESULT: ${{ needs.windows-release-cli.result }}
           WINDOWS_DEPLOYMENT_RESULT: ${{ needs.windows-deployment.result }}
+          WINDOWS_MODULE_RESULT: ${{ needs.windows-module.result }}
+          COLLECTOR_PRESSURE_RESULT: ${{ needs.collector-pressure.result }}
         run: |
           test "$CHECKS_RESULT" = success
           test "$RACE_RESULT" = success
           test "$WINDOWS_CLI_RESULT" = success
           test "$WINDOWS_DEPLOYMENT_RESULT" = success
+          test "$WINDOWS_MODULE_RESULT" = success
+          test "$COLLECTOR_PRESSURE_RESULT" = success
 
   cross-compile:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}

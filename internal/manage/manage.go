@@ -76,26 +76,28 @@ func (osRunner) Output(ctx context.Context, name string, args ...string) ([]byte
 }
 
 type app struct {
-	in      io.Reader
-	out     io.Writer
-	errOut  io.Writer
-	reader  *bufio.Reader
-	paths   paths
-	runner  commandRunner
-	now     func() time.Time
-	euid    func() int
-	chown   func(string, int, int) error
-	owner   func() (int, int, error)
-	secret  func(string) (string, error)
-	systemd string
-	journal string
-	context func() (context.Context, context.CancelFunc)
+	in         io.Reader
+	out        io.Writer
+	errOut     io.Writer
+	reader     *bufio.Reader
+	paths      paths
+	runner     commandRunner
+	now        func() time.Time
+	euid       func() int
+	executable func(os.FileInfo) bool
+	chown      func(string, int, int) error
+	owner      func() (int, int, error)
+	secret     func(string) (string, error)
+	systemd    string
+	journal    string
+	context    func() (context.Context, context.CancelFunc)
 }
 
 func newApp(in io.Reader, out, errOut io.Writer) *app {
 	a := &app{
 		in: in, out: out, errOut: errOut, reader: bufio.NewReader(in), paths: productionPaths(),
 		runner: osRunner{}, now: time.Now, euid: effectiveUID, chown: os.Chown,
+		executable: func(info os.FileInfo) bool { return info.Mode()&0o111 != 0 },
 		context: func() (context.Context, context.CancelFunc) {
 			return context.WithTimeout(context.Background(), 30*time.Second)
 		},
@@ -473,7 +475,7 @@ func readRegularPrivateFile(path string, limit int64, private bool) ([]byte, err
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s must be a regular file, not a symlink", path)
 	}
-	if private && info.Mode().Perm()&0o077 != 0 {
+	if private && !hasPrivatePermissions(path, info) {
 		return nil, fmt.Errorf("%s must not be accessible by group or others", path)
 	}
 	if info.Size() > limit {
@@ -900,7 +902,7 @@ func (a *app) validateInstallSkeleton() error {
 		if info.Mode()&os.ModeSymlink != 0 || check.directory != info.IsDir() || (!check.directory && !info.Mode().IsRegular()) {
 			return fmt.Errorf("installation path has an unsafe type: %s", check.path)
 		}
-		if check.executable && info.Mode()&0o111 == 0 {
+		if check.executable && !a.executable(info) {
 			return fmt.Errorf("installation binary is not executable: %s", check.path)
 		}
 	}
@@ -1222,7 +1224,7 @@ func ensureRealPrivateDirectory(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s must be a real directory", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if !hasPrivatePermissions(path, info) {
 		return fmt.Errorf("%s must not be accessible by group or others", path)
 	}
 	return nil

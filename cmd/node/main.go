@@ -50,6 +50,7 @@ type options struct {
 	XrayAPIListen     string
 	SingBoxAPIListen  string
 	AllowInsecureHTTP bool
+	AuditMetrics      bool
 	ShowVersion       bool
 }
 
@@ -376,6 +377,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if service, ok := auditRuntime.usageService(); ok {
 		services = append(services, service)
 	}
+	if parsed.AuditMetrics {
+		services = append(services, lifecycle.Service{Name: "audit observation", Run: auditRuntime.runMetrics})
+	}
 	err = lifecycle.Run(ctx, services...)
 	if err == nil {
 		logger.Infof("stopped")
@@ -414,6 +418,7 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	flags.StringVar(&parsed.XrayAPIListen, "xray-api-listen", defaultXrayAPIListen, "loopback Xray statistics endpoint")
 	flags.StringVar(&parsed.SingBoxAPIListen, "sing-box-api-listen", defaultSingBoxAPIListen, "loopback sing-box telemetry endpoint")
 	flags.BoolVar(&parsed.AllowInsecureHTTP, "allow-insecure-http", false, "allow plain HTTP (development only)")
+	flags.BoolVar(&parsed.AuditMetrics, "audit-metrics", false, "emit numeric audit state and agent Go memory to the journal (opt-in)")
 	flags.BoolVar(&parsed.ShowVersion, "version", false, "print build version and exit")
 	if err := flags.Parse(arguments); err != nil {
 		return options{}, err

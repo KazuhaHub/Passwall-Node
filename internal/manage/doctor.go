@@ -286,9 +286,9 @@ func checkCredentialPermissions(options DoctorOptions) DoctorCheck {
 	if !info.Mode().IsRegular() {
 		return DoctorCheck{Code: code, Status: DoctorFailed, Summary: "the credential is not a regular file"}
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if !hasPrivatePermissions(options.CredentialFile, info) {
 		return DoctorCheck{Code: code, Status: DoctorFailed,
-			Summary: fmt.Sprintf("the credential is readable beyond its owner (mode %04o)", info.Mode().Perm())}
+			Summary: credentialPrivacyFailure(info)}
 	}
 	return DoctorCheck{Code: code, Status: DoctorOK, Summary: "the credential is a private regular file"}
 }

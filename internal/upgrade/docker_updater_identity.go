@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"slices"
 	"strings"
 )
@@ -97,13 +97,13 @@ func (c *dockerHelperController) isUpdaterContainer(container, agent dockerConta
 	return nil
 }
 
-// pathsOverlap reports whether one host path is, or contains, the other. An
-// empty source — a tmpfs, say — overlaps nothing.
+// Docker's Linux daemon reports Linux host paths, independently of the client
+// build host. An empty source (for example tmpfs) overlaps nothing.
 func pathsOverlap(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	a, b = filepath.Clean(a), filepath.Clean(b)
+	a, b = path.Clean(a), path.Clean(b)
 	within := func(inner, outer string) bool {
 		return inner == outer || outer == "/" || strings.HasPrefix(inner, outer+"/")
 	}

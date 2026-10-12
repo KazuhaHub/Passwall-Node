@@ -81,6 +81,7 @@ func newTestApp(t *testing.T, input string) (*app, *bytes.Buffer, *fakeRunner) {
 	a.euid = func() int { return 0 }
 	a.owner = func() (int, int, error) { return 10001, 10001, nil }
 	a.chown = func(string, int, int) error { return nil }
+	a.executable = fixtureExecutable
 	a.now = func() time.Time { return time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC) }
 	a.context = func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }
 	return a, output, runner
@@ -107,9 +108,7 @@ func TestConnectWritesPrivateConfigurationAndStartsService(t *testing.T) {
 	if string(credential) != secret+"\n" {
 		t.Fatal("credential was not saved exactly")
 	}
-	if info, _ := os.Stat(a.paths.credential); info.Mode().Perm() != 0o600 {
-		t.Fatalf("credential mode = %o", info.Mode().Perm())
-	}
+	assertPrivateCredentialFixture(t, a.paths.credential)
 	if strings.Contains(output.String(), secret) {
 		t.Fatal("credential appeared in interactive output")
 	}
