@@ -100,29 +100,34 @@ func TestPreparedCounterBatchRecoversFromLateScanFailureAndCancellation(t *testi
 	store := openTestStore(t, filepath.Join(t.TempDir(), "recovery.db"))
 	ctx := t.Context()
 	key, listener := protocol.NewClientKey(1), protocol.NewListenerKey(1)
+	other := protocol.NewClientKey(2)
 	if err := store.EnsureClient(ctx, state.ClientIdentity{Key: key, Subject: protocol.NewSubjectKey(1)}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.EnsureListener(ctx, listener, 1); err != nil {
 		t.Fatal(err)
 	}
-	batch := state.CounterBatch{Clients: []state.CounterUpdate{{Key: key, Present: true, UpBytes: 10, CounterEpoch: 1}}, Listeners: []state.ListenerCounterUpdate{{Key: listener, Present: true, UpBytes: 20, CounterEpoch: 1}}}
+	if err := store.EnsureClient(ctx, state.ClientIdentity{Key: other, Subject: protocol.NewSubjectKey(2)}, 1); err != nil {
+		t.Fatal(err)
+	}
+	batch := state.CounterBatch{Clients: []state.CounterUpdate{{Key: key, Present: true, UpBytes: 10, CounterEpoch: 1}, {Key: other, Present: true, UpBytes: 12, CounterEpoch: 1}}, Listeners: []state.ListenerCounterUpdate{{Key: listener, Present: true, UpBytes: 20, CounterEpoch: 1}}}
 	if _, err := store.ApplyCounterBatch(ctx, batch, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.ExecContext(ctx, `UPDATE listener_runtime SET counter_epoch=? WHERE listener_key=?`, "invalid-epoch", listener); err != nil {
+	if _, err := store.db.ExecContext(ctx, `UPDATE client_runtime SET live_ips_json=? WHERE client_key=?`, "invalid-json", other); err != nil {
 		t.Fatal(err)
 	}
 	batch.Clients[0].UpBytes = 11
+	batch.Clients[1].UpBytes = 13
 	batch.Listeners[0].UpBytes = 21
 	if _, err := store.ApplyCounterBatch(ctx, batch, 3); err == nil {
-		t.Fatal("late listener corruption was hidden")
+		t.Fatal("late client scan corruption was hidden")
 	}
 	row, err := store.Client(ctx, key)
 	if err != nil || row.UpBytes != 10 || row.UpdatedAtMS != 2 || store.db.Stats().InUse != 0 {
 		t.Fatal("late scan failure leaked a transaction or partial client write")
 	}
-	if _, err := store.db.ExecContext(ctx, `UPDATE listener_runtime SET counter_epoch=? WHERE listener_key=?`, encodeUint64(1), listener); err != nil {
+	if _, err := store.db.ExecContext(ctx, `UPDATE client_runtime SET live_ips_json=? WHERE client_key=?`, "[]", other); err != nil {
 		t.Fatal(err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
