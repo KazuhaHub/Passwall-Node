@@ -13,6 +13,50 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
+  telemetry-cli:
+    name: Real Xray telemetry command CPU with 200 idle clients
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify immutable source and exact preferred compiler
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+      - name: Prepare exact official core binaries through the existing verifier
+        run: |
+          set -euo pipefail
+          go run ./deployment/coreacceptance prepare \
+            --directory "$RUNNER_TEMP/core-acceptance" --env-file "$GITHUB_ENV" \
+            > "$RUNNER_TEMP/telemetry-core-versions.private.json"
+      - name: Attribute selected-binary telemetry CLI CPU without restarting the core
+        env:
+          PSP_TELEMETRY_COST_METRICS: ${{ runner.temp }}/xray-telemetry-cost.json
+        run: |
+          set -euo pipefail
+          if ! go test -tags telemetry_profile -count=1 -timeout=3m ./internal/core/xray \
+            -run '^TestRealXrayTelemetryCommandCost200$' \
+            > "$RUNNER_TEMP/telemetry-cost.private.log" 2>&1; then
+            printf '%s\n' 'Real telemetry profile failed; private output withheld'
+            exit 1
+          fi
+          test -s "$PSP_TELEMETRY_COST_METRICS"
+          cat "$PSP_TELEMETRY_COST_METRICS"
+          printf '%s\n' 'Isolated idle telemetry measurement; active core CPU, traffic, controller work and the 65-node fleet are not measured.'
+          printf '%s\n' 'Parent CPU includes probe and validation overhead; per-command CPU counts only reaped CLI children while the original core stays live.'
+      - name: Keep only closed source-bound numeric telemetry evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-telemetry-cost-${{ github.sha }}
+          path: ${{ runner.temp }}/xray-telemetry-cost.json
+          if-no-files-found: error
+          retention-days: 7
   processor-state:
     name: Current 200-client processor and real SQLite state
     runs-on: ubuntu-24.04
