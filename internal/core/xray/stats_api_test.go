@@ -285,12 +285,21 @@ func TestStatsWireUsesFreshTimeoutForSecondReadAndClosesFailedDial(t *testing.T)
 		return statsInvokeFunc(func(ctx context.Context, method string, _, _ any, _ ...grpc.CallOption) error {
 			if method == queryStatsMethod {
 				first = ctx
+				// Give the first RPC an observable duration even with a coarse
+				// Windows clock; equal instantaneous deadlines prove nothing.
+				timer := time.NewTimer(25 * time.Millisecond)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 				return nil
 			}
 			before, _ := first.Deadline()
 			after, _ := ctx.Deadline()
 			if first.Err() != context.Canceled || ctx.Err() != nil || !after.After(before) {
-				t.Error("second wire call reused the first timeout budget")
+				t.Errorf("second wire call reused the first timeout budget: first_canceled=%t second_live=%t deadline_advanced=%t", first.Err() == context.Canceled, ctx.Err() == nil, after.After(before))
 			}
 			return nil
 		}), statsCloseFunc(func() error { f.closed.Add(1); return nil }), nil
