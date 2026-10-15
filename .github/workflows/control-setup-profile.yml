@@ -65,9 +65,17 @@ jobs:
                          'dual-stack source fixture requires the owned disposable hosted runner': 'wire_source_runner_invalid',
                          'IPv6 source fixture is already owned': 'wire_source_already_owned',
                          'add exclusive IPv6 source fixture': 'wire_source_setup_failed',
-                         'remove exclusive IPv6 source fixture': 'wire_source_cleanup_failed'}
+                         'remove exclusive IPv6 source fixture': 'wire_source_cleanup_failed',
+                         'allocate profile port': 'wire_listener_bind_failed',
+                         'connect real VLESS client': 'wire_client_connect_failed',
+                         'send real VLESS payload': 'wire_client_write_failed',
+                         'read real VLESS response': 'wire_client_header_failed',
+                         'read VLESS response addons': 'wire_client_addons_failed',
+                         'read owned VLESS HTTP response': 'wire_client_http_failed',
+                         'real traffic did not reach owned target': 'wire_client_payload_failed',
+                         'wire lost actual listener traffic': 'wire_listener_counters_missing'}
           safe = []
-          fact_names = {'equal', 'clients_equal', 'listeners_equal', 'v4', 'v6', 'first_key', 'cli_ips', 'wire_ips', 'cli_up', 'cli_down', 'wire_up', 'wire_down'}
+          fact_names = {'equal', 'clients_equal', 'listeners_equal', 'v4', 'v6', 'first_key', 'cli_ips', 'wire_ips', 'cli_up', 'cli_down', 'wire_up', 'wire_down', 'connect_family', 'dial_errno'}
           fact_names |= {f'{mode}_{field}' for mode in ['cli', 'wire'] for field in ['wall_ns', 'parent_cpu_ns', 'child_cpu_ns']}
           for line in (root / 'telemetry-cost.private.jsonl').read_text().splitlines():
               event = json.loads(line)

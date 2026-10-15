@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -162,7 +163,7 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 	if err != nil {
 		t.Fatal("bind owned wire target port")
 	}
-	f := newTelemetryProfileCore(t, binary, version, targetPort, true)
+	f := newTelemetryProfileCore(t, binary, version, targetPort, sourceIPv6)
 	queries, online, closed := 0, 0, 0
 	wire, err := NewTelemetry(TelemetryOptions{Store: f.store, Status: f.supervisor.Status, APIListen: f.apiListen, Dial: func(ctx context.Context, endpoint string) (grpc.ClientConnInterface, io.Closer, error) {
 		connection, closer, err := dialStats(ctx, endpoint)
@@ -257,12 +258,17 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 	// Keep one real connection through each IP family open after its payload is
 	// received. Counters are then quiescent, while online IPs remain observable.
 	for i, inbound := range f.inbounds {
+		t.Logf("wire fact: connect_family=%d", i+1)
 		source := sourceIPv4
 		if i == 1 {
 			source = sourceIPv6
 		}
 		connection, err := (&net.Dialer{Timeout: 3 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP(source)}}).DialContext(t.Context(), "tcp", inbound)
 		if err != nil {
+			var errno syscall.Errno
+			if errors.As(err, &errno) {
+				t.Logf("wire fact: dial_errno=%d", uint64(errno))
+			}
 			t.Fatal("connect real VLESS client")
 		}
 		t.Cleanup(func() { _ = connection.Close() })

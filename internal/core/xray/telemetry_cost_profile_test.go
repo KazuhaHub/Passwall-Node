@@ -53,7 +53,7 @@ func TestRealXrayTelemetryCommandCost200(t *testing.T) {
 	if err != nil || root != dir || filepath.Base(evidence) != "xray-telemetry-cost.json" {
 		t.Fatal("profile evidence must stay in owned temporary storage")
 	}
-	fixture := newTelemetryProfileCore(t, binary, version, 0, false)
+	fixture := newTelemetryProfileCore(t, binary, version, 0, "")
 	store, supervisor, apiListen := fixture.store, fixture.supervisor, fixture.apiListen
 	type commandCost struct {
 		Command string `json:"command"`
@@ -174,7 +174,7 @@ type telemetryProfileCore struct {
 	clients    []protocol.Client
 }
 
-func newTelemetryProfileCore(t *testing.T, binary, version string, targetPort int, ipv6 bool) *telemetryProfileCore {
+func newTelemetryProfileCore(t *testing.T, binary, version string, targetPort int, ipv6 string) *telemetryProfileCore {
 	t.Helper()
 	const clients = 200
 	port := func(host string) int {
@@ -196,11 +196,11 @@ func newTelemetryProfileCore(t *testing.T, binary, version string, targetPort in
 	listener, _ := json.Marshal(map[string]any{"enabled": true, "listen": "127.0.0.1", "port": inbound, "protocol": "vless", "settings": `{"decryption":"none"}`, "stream_settings": `{"network":"tcp","security":"none"}`})
 	snapshot := agentcore.Snapshot{Now: time.Now(), Listeners: []protocol.Listener{{Key: "lst_1", Config: listener}}}
 	inbounds := []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(inbound))}
-	if ipv6 {
-		v6 := port("::1")
-		listener6, _ := json.Marshal(map[string]any{"enabled": true, "listen": "::1", "port": v6, "protocol": "vless", "settings": `{"decryption":"none"}`, "stream_settings": `{"network":"tcp","security":"none"}`})
+	if ipv6 != "" {
+		v6 := port(ipv6)
+		listener6, _ := json.Marshal(map[string]any{"enabled": true, "listen": ipv6, "port": v6, "protocol": "vless", "settings": `{"decryption":"none"}`, "stream_settings": `{"network":"tcp","security":"none"}`})
 		snapshot.Listeners = append(snapshot.Listeners, protocol.Listener{Key: "lst_2", Config: listener6})
-		inbounds = append(inbounds, net.JoinHostPort("::1", strconv.Itoa(v6)))
+		inbounds = append(inbounds, net.JoinHostPort(ipv6, strconv.Itoa(v6)))
 	}
 	var listenerKeys []protocol.ListenerKey
 	for _, listener := range snapshot.Listeners {
