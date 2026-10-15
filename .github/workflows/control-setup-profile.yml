@@ -42,9 +42,14 @@ jobs:
         run: |
           set -euo pipefail
           code=0
-          go test -json -tags telemetry_profile -count=1 -timeout=5m ./internal/core/xray \
+          sudo --preserve-env=PSP_TEST_XRAY_26627_BIN,PSP_TEST_XRAY_26728_BIN,PSP_TEST_XRAY_2699_BIN,PSP_TELEMETRY_COST_METRICS,PSP_STATS_WIRE_METRICS,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_ENVIRONMENT,RUNNER_TEMP,GOWORK,GOTOOLCHAIN \
+            env GOPATH="$(go env GOPATH)" GOCACHE="$(go env GOCACHE)" \
+            "$(command -v go)" test -json -tags telemetry_profile -count=1 -timeout=5m ./internal/core/xray \
             -run '^(TestRealXrayTelemetryCommandCost200|TestRealXrayStatsWireCompatibility)$' \
             > "$RUNNER_TEMP/telemetry-cost.private.jsonl" 2> "$RUNNER_TEMP/telemetry-cost.private.log" || code=$?
+          for evidence in "$PSP_TELEMETRY_COST_METRICS" "$PSP_STATS_WIRE_METRICS"; do
+            if sudo test -f "$evidence"; then sudo chown "$(id -u):$(id -g)" -- "$evidence"; fi
+          done
           python3 - <<'PY'
           import json, os, re
           from pathlib import Path
@@ -56,7 +61,11 @@ jobs:
                          'real idle CLI and wire disagree': 'wire_idle_mismatch',
                          'CLI and wire differ for real counters or dual-stack online IPs': 'wire_traffic_mismatch',
                          'core changed during paired comparison': 'wire_core_changed',
-                         'wire comparison skipped a query, leaked or spawned a child': 'wire_command_accounting_failed'}
+                         'wire comparison skipped a query, leaked or spawned a child': 'wire_command_accounting_failed',
+                         'dual-stack source fixture requires the owned disposable hosted runner': 'wire_source_runner_invalid',
+                         'IPv6 source fixture is already owned': 'wire_source_already_owned',
+                         'add exclusive IPv6 source fixture': 'wire_source_setup_failed',
+                         'remove exclusive IPv6 source fixture': 'wire_source_cleanup_failed'}
           safe = []
           fact_names = {'equal', 'clients_equal', 'listeners_equal', 'v4', 'v6', 'first_key', 'cli_ips', 'wire_ips', 'cli_up', 'cli_down', 'wire_up', 'wire_down'}
           fact_names |= {f'{mode}_{field}' for mode in ['cli', 'wire'] for field in ['wall_ns', 'parent_cpu_ns', 'child_cpu_ns']}
@@ -68,7 +77,7 @@ jobs:
               if action in ['start', 'run', 'pass', 'fail', 'skip'] and (name in names or name is None):
                   safe.append({k: event[k] for k in ['Action', 'Package', 'Test', 'Elapsed'] if k in event})
               if action == 'output':
-                  fact = re.search(r'wire fact: ([a-z_]+)=([0-9]{1,13})\s*$', event.get('Output', ''))
+                  fact = re.search(r'wire fact: ([a-z0-9_]+)=([0-9]{1,13})\s*$', event.get('Output', ''))
                   if name in names and fact and fact[1] in fact_names and int(fact[2]) <= 1000000000000:
                       safe.append({'Action': 'output', 'Package': package, 'Test': name, 'Diagnostic': 'wire_fact_' + fact[1], 'Observed': int(fact[2])})
                   for message, diagnostic in diagnostics.items():

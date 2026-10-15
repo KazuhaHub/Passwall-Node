@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -106,6 +107,41 @@ func TestRealXrayStatsWireCompatibility(t *testing.T) {
 
 func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireResult {
 	t.Helper()
+	// Xray deliberately excludes 127.0.0.1 and [::1] from its online map.
+	// Keep both actual families observable using exclusively owned local sources.
+	const sourceIPv4, sourceIPv6 = "127.0.0.2", "2001:db8:7073:74::2"
+	if os.Geteuid() != 0 || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("GITHUB_REPOSITORY") != "KazuhaHub/Passwall-Node" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Fatal("dual-stack source fixture requires the owned disposable hosted runner")
+	}
+	addresses, err := exec.CommandContext(t.Context(), "ip", "-j", "-6", "addr", "show", "dev", "lo").Output()
+	if err != nil {
+		t.Fatal("inspect owned IPv6 source fixture")
+	}
+	var devices []struct {
+		Addresses []struct {
+			Local string `json:"local"`
+		} `json:"addr_info"`
+	}
+	if json.Unmarshal(addresses, &devices) != nil {
+		t.Fatal("decode owned IPv6 source fixture")
+	}
+	for _, device := range devices {
+		for _, address := range device.Addresses {
+			if net.ParseIP(address.Local).Equal(net.ParseIP(sourceIPv6)) {
+				t.Fatal("IPv6 source fixture is already owned")
+			}
+		}
+	}
+	if exec.CommandContext(t.Context(), "ip", "-6", "addr", "add", sourceIPv6+"/128", "dev", "lo", "scope", "host", "nodad").Run() != nil {
+		t.Fatal("add exclusive IPv6 source fixture")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if exec.CommandContext(ctx, "ip", "-6", "addr", "del", sourceIPv6+"/128", "dev", "lo").Run() != nil {
+			t.Error("remove exclusive IPv6 source fixture")
+		}
+	})
 	const payload = "owned-wire-traffic"
 	hold := make(chan struct{})
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,8 +256,12 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 	}
 	// Keep one real connection through each IP family open after its payload is
 	// received. Counters are then quiescent, while online IPs remain observable.
-	for _, inbound := range f.inbounds {
-		connection, err := net.DialTimeout("tcp", inbound, 3*time.Second)
+	for i, inbound := range f.inbounds {
+		source := sourceIPv4
+		if i == 1 {
+			source = sourceIPv6
+		}
+		connection, err := (&net.Dialer{Timeout: 3 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP(source)}}).DialContext(t.Context(), "tcp", inbound)
 		if err != nil {
 			t.Fatal("connect real VLESS client")
 		}
@@ -260,12 +300,20 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 		return value
 	}
 	deadline := time.Now().Add(5 * time.Second)
+	hasSource := func(ips []string, source string) bool {
+		for _, ip := range ips {
+			if net.ParseIP(strings.Trim(ip, "[]")).Equal(net.ParseIP(source)) {
+				return true
+			}
+		}
+		return false
+	}
 	for {
 		cliValue, wireValue := canonical(collect(cli)), canonical(collect(wire))
 		stable()
 		first := wireValue.Clients[0]
 		ips := first.LiveIPs
-		if reflect.DeepEqual(cliValue, wireValue) && first.UpBytes > 0 && first.DownBytes > 0 && slices.Contains(ips, "127.0.0.1") && slices.Contains(ips, "::1") {
+		if reflect.DeepEqual(cliValue, wireValue) && first.UpBytes > 0 && first.DownBytes > 0 && hasSource(ips, sourceIPv4) && hasSource(ips, sourceIPv6) {
 			for _, listener := range wireValue.Listeners {
 				if listener.UpBytes <= 0 || listener.DownBytes <= 0 {
 					t.Fatal("wire lost actual listener traffic")
@@ -288,7 +336,7 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 			}
 			for name, value := range map[string]uint64{
 				"equal": boolean(reflect.DeepEqual(cliValue, wireValue)), "clients_equal": boolean(reflect.DeepEqual(cliValue.Clients, wireValue.Clients)), "listeners_equal": boolean(reflect.DeepEqual(cliValue.Listeners, wireValue.Listeners)),
-				"v4": boolean(slices.Contains(ips, "127.0.0.1")), "v6": boolean(slices.Contains(ips, "::1")), "first_key": boolean(first.Key == f.clients[0].Key),
+				"v4": boolean(hasSource(ips, sourceIPv4)), "v6": boolean(hasSource(ips, sourceIPv6)), "first_key": boolean(first.Key == f.clients[0].Key),
 				"cli_ips": uint64(len(cliValue.Clients[0].LiveIPs)), "wire_ips": uint64(len(ips)),
 				"cli_up": uint64(cliValue.Clients[0].UpBytes), "cli_down": uint64(cliValue.Clients[0].DownBytes), "wire_up": uint64(first.UpBytes), "wire_down": uint64(first.DownBytes),
 			} {
