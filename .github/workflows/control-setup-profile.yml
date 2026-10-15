@@ -35,26 +35,66 @@ jobs:
           go run ./deployment/coreacceptance prepare \
             --directory "$RUNNER_TEMP/core-acceptance" --env-file "$GITHUB_ENV" \
             > "$RUNNER_TEMP/telemetry-core-versions.private.json"
-      - name: Attribute selected-binary telemetry CLI CPU without restarting the core
+      - name: Compare CLI and Stats wire on all three official cores
         env:
           PSP_TELEMETRY_COST_METRICS: ${{ runner.temp }}/xray-telemetry-cost.json
+          PSP_STATS_WIRE_METRICS: ${{ runner.temp }}/xray-stats-wire.json
         run: |
           set -euo pipefail
-          if ! go test -tags telemetry_profile -count=1 -timeout=3m ./internal/core/xray \
-            -run '^TestRealXrayTelemetryCommandCost200$' \
-            > "$RUNNER_TEMP/telemetry-cost.private.log" 2>&1; then
-            printf '%s\n' 'Real telemetry profile failed; private output withheld'
-            exit 1
-          fi
+          code=0
+          go test -json -tags telemetry_profile -count=1 -timeout=5m ./internal/core/xray \
+            -run '^(TestRealXrayTelemetryCommandCost200|TestRealXrayStatsWireCompatibility)$' \
+            > "$RUNNER_TEMP/telemetry-cost.private.jsonl" 2> "$RUNNER_TEMP/telemetry-cost.private.log" || code=$?
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          package = 'github.com/KazuhaHub/passwall-node/v4/internal/core/xray'
+          names = {'TestRealXrayTelemetryCommandCost200', 'TestRealXrayStatsWireCompatibility'}
+          names |= {f'TestRealXrayStatsWireCompatibility/{v}' for v in ['26.6.27', '26.7.28', '26.9.9']}
+          diagnostics = {'real wire conformance query failed; private details withheld': 'wire_query_failed',
+                         'real idle CLI and wire disagree': 'wire_idle_mismatch',
+                         'CLI and wire differ for real counters or dual-stack online IPs': 'wire_traffic_mismatch',
+                         'core changed during paired comparison': 'wire_core_changed',
+                         'wire comparison skipped a query, leaked or spawned a child': 'wire_command_accounting_failed'}
+          safe = []
+          for line in (root / 'telemetry-cost.private.jsonl').read_text().splitlines():
+              event = json.loads(line)
+              if event.get('Package') != package:
+                  continue
+              action, name = event.get('Action'), event.get('Test')
+              if action in ['start', 'run', 'pass', 'fail', 'skip'] and (name in names or name is None):
+                  safe.append({k: event[k] for k in ['Action', 'Package', 'Test', 'Elapsed'] if k in event})
+              if action == 'output':
+                  for message, diagnostic in diagnostics.items():
+                      if event.get('Output', '').strip().endswith(message):
+                          safe.append({'Action': 'output', 'Package': package, 'Diagnostic': diagnostic})
+          (root / 'xray-telemetry-tests.json').write_text(''.join(json.dumps(e) + '\n' for e in safe))
+          for event in safe:
+              if event['Action'] in ['fail', 'skip', 'output']:
+                  print(json.dumps(event))
+          for name in names:
+              assert sum(e['Action'] == 'run' and e.get('Test') == name for e in safe) == 1
+              assert sum(e['Action'] == 'pass' and e.get('Test') == name for e in safe) == 1
+              assert not any(e['Action'] in ['fail', 'skip'] and e.get('Test') == name for e in safe)
+          assert sum(e['Action'] == 'pass' and 'Test' not in e for e in safe) == 1
+          PY
+          test "$code" -eq 0
           test -s "$PSP_TELEMETRY_COST_METRICS"
+          test -s "$PSP_STATS_WIRE_METRICS"
           cat "$PSP_TELEMETRY_COST_METRICS"
+          cat "$PSP_STATS_WIRE_METRICS"
           printf '%s\n' 'Isolated idle telemetry measurement; active core CPU, traffic, controller work and the 65-node fleet are not measured.'
           printf '%s\n' 'Parent CPU includes probe and validation overhead; per-command CPU counts only reaped CLI children while the original core stays live.'
       - name: Keep only closed source-bound numeric telemetry evidence
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: xray-telemetry-cost-${{ github.sha }}
-          path: ${{ runner.temp }}/xray-telemetry-cost.json
+          path: |
+            ${{ runner.temp }}/xray-telemetry-cost.json
+            ${{ runner.temp }}/xray-stats-wire.json
+            ${{ runner.temp }}/xray-telemetry-tests.json
           if-no-files-found: error
           retention-days: 7
   processor-state:
