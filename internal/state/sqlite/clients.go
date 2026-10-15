@@ -144,7 +144,7 @@ func (s *Store) UpdateCounters(ctx context.Context, update state.CounterUpdate, 
 		return fmt.Errorf("begin counter update for %s: %w", update.Key, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := s.applyClientCounter(ctx, tx, update, atMS); err != nil {
+	if _, err := applyClientCounter(ctx, s.bindClientCounters(ctx, tx), update, atMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -153,11 +153,11 @@ func (s *Store) UpdateCounters(ctx context.Context, update state.CounterUpdate, 
 	return nil
 }
 
-func (s *Store) applyClientCounter(ctx context.Context, tx *sql.Tx, update state.CounterUpdate, atMS int64) (bool, error) {
+func applyClientCounter(ctx context.Context, programs counterProgramPair, update state.CounterUpdate, atMS int64) (bool, error) {
 	if update.Key == "" || update.UpBytes < 0 || update.DownBytes < 0 || atMS < 0 {
 		return false, fmt.Errorf("counter update has invalid key, bytes, or timestamp")
 	}
-	current, err := scanClient(tx.StmtContext(ctx, s.control.client).QueryRowContext(ctx, update.Key))
+	current, err := scanClient(programs.read.QueryRowContext(ctx, update.Key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("client %s: %w", update.Key, state.ErrNotFound)
 	}
@@ -185,7 +185,7 @@ func (s *Store) applyClientCounter(ctx context.Context, tx *sql.Tx, update state
 	if err != nil {
 		return false, fmt.Errorf("encode client %s live IPs: %w", update.Key, err)
 	}
-	if _, err := tx.StmtContext(ctx, s.control.clientCounters).ExecContext(ctx,
+	if _, err := programs.write.ExecContext(ctx,
 		present, update.UpBytes, update.DownBytes, encodeUint64(update.CounterEpoch), gate, atMS, string(liveIPsJSON), update.Key,
 	); err != nil {
 		return false, fmt.Errorf("update client %s counters: %w", update.Key, err)

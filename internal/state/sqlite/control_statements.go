@@ -50,6 +50,21 @@ type controlStatements struct {
 	clientCounters, listener, listenerCounters   *sql.Stmt
 }
 
+type counterProgramPair struct {
+	read, write *sql.Stmt
+}
+
+// Bind once per transaction. Tx.StmtContext creates a wrapper retained until
+// commit/rollback, so binding for every row needlessly retains hundreds of them.
+// Both programs still execute against current rows on the original connection.
+func (s *Store) bindClientCounters(ctx context.Context, tx *sql.Tx) counterProgramPair {
+	return counterProgramPair{tx.StmtContext(ctx, s.control.client), tx.StmtContext(ctx, s.control.clientCounters)}
+}
+
+func (s *Store) bindListenerCounters(ctx context.Context, tx *sql.Tx) counterProgramPair {
+	return counterProgramPair{tx.StmtContext(ctx, s.control.listener), tx.StmtContext(ctx, s.control.listenerCounters)}
+}
+
 func (s *Store) prepareControlStatements(ctx context.Context) error {
 	for _, entry := range []struct {
 		name string

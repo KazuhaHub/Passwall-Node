@@ -24,15 +24,22 @@ func (s *Store) ApplyCounterBatch(ctx context.Context, batch state.CounterBatch,
 	}
 	defer func() { _ = tx.Rollback() }()
 	result := state.CounterBatchResult{}
+	var clients, listeners counterProgramPair
+	if len(batch.Clients) != 0 {
+		clients = s.bindClientCounters(ctx, tx)
+	}
+	if len(batch.Listeners) != 0 {
+		listeners = s.bindListenerCounters(ctx, tx)
+	}
 	for _, update := range batch.Clients {
-		changed, err := s.applyClientCounter(ctx, tx, update, atMS)
+		changed, err := applyClientCounter(ctx, clients, update, atMS)
 		if err != nil {
 			return state.CounterBatchResult{}, fmt.Errorf("apply counter batch client %s: %w", update.Key, err)
 		}
 		result.GateChanged = result.GateChanged || changed
 	}
 	for _, update := range batch.Listeners {
-		if err := s.applyListenerCounter(ctx, tx, update, atMS); err != nil {
+		if err := applyListenerCounter(ctx, listeners, update, atMS); err != nil {
 			return state.CounterBatchResult{}, fmt.Errorf("apply counter batch listener %s: %w", update.Key, err)
 		}
 	}
