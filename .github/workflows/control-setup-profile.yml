@@ -13,6 +13,83 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
+  observation-state:
+    name: Real Xray observation and atomic SQLite counters for 200 clients
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify immutable source and exact preferred compiler
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+      - name: Prepare exact official core binaries through the existing verifier
+        run: |
+          set -euo pipefail
+          go run ./deployment/coreacceptance prepare \
+            --directory "$RUNNER_TEMP/core-acceptance" --env-file "$GITHUB_ENV" \
+            > "$RUNNER_TEMP/observation-core-versions.private.json"
+      - name: Measure real Observe with current complete atomic samples
+        run: |
+          set -euo pipefail
+          set +e
+          go test -json -count=1 -tags telemetry_profile ./internal/core/xray \
+            -run '^TestRealXrayObservationPersistenceCost200$' -timeout=3m \
+            > "$RUNNER_TEMP/observation-cost.private.jsonl" 2>&1
+          code=$?
+          set -e
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          package = 'github.com/KazuhaHub/passwall-node/v4/internal/core/xray'
+          name = 'TestRealXrayObservationPersistenceCost200'
+          safe = []
+          for line in (root / 'observation-cost.private.jsonl').read_text().splitlines():
+              try:
+                  e = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if e.get('Package') == package and e.get('Action') in ['start','run','pass','fail','skip'] and e.get('Test') in [None,name]:
+                  safe.append({k:e[k] for k in ['Action','Package','Test','Elapsed'] if k in e})
+          (root / 'xray-observation-tests.json').write_text(''.join(json.dumps(e)+'\n' for e in safe))
+          assert sum(e['Action']=='run' and e.get('Test')==name for e in safe)==1
+          assert sum(e['Action']=='pass' and e.get('Test')==name for e in safe)==1
+          assert sum(e['Action']=='pass' and 'Test' not in e for e in safe)==1
+          assert not any(e['Action'] in ['fail','skip'] for e in safe)
+          m = json.loads((root / 'xray-observation-cost.json').read_text())
+          assert set(m)=={'schema_version','node_source','run_id','clients','rounds','logical_cpus','wall_ns','cpu_ns','allocated_bytes','collect','persist','complete'}
+          assert m['schema_version']==1 and m['node_source']==os.environ['GITHUB_SHA'] and str(m['run_id'])==os.environ['GITHUB_RUN_ID']
+          assert m['clients']==200 and m['rounds']==200 and m['complete']==1
+          for field in ['logical_cpus','wall_ns','cpu_ns','allocated_bytes']:
+              assert type(m[field]) is int and 0<m[field]<=1000000000000000
+          for phase in ['collect','persist']:
+              assert set(m[phase])=={'calls','wall_ns','cpu_ns'} and m[phase]['calls']==200
+              assert all(type(m[phase][k]) is int and 0<m[phase][k]<=m[k] for k in ['wall_ns','cpu_ns'])
+          print(json.dumps(m))
+          PY
+          test "$code" -eq 0
+          go tool pprof -top -nodecount=25 "$RUNNER_TEMP/xray-observation.cpu.pprof"
+          go tool pprof -top -cum -nodecount=25 \
+            -show='^github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/xray-observation.cpu.pprof"
+          printf '%s\n' 'Observation includes real read-only Stats API and atomic SQLite counters; parent CPU includes probes. Core CPU, controller and complete fleet are excluded.'
+          # Raw profiles, state, test output and binaries stay private to this job.
+      - name: Keep only closed source-bound numeric observation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-observation-cost-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/xray-observation-cost.json
+            ${{ runner.temp }}/xray-observation-tests.json
+          if-no-files-found: error
+          retention-days: 7
   telemetry-cli:
     name: Real Xray telemetry command CPU with 200 idle clients
     runs-on: ubuntu-24.04
