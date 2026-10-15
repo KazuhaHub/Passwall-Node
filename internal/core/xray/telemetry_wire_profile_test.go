@@ -214,6 +214,9 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 			t.Fatal("wire comparison skipped a query, leaked or spawned a child")
 		}
 		result.Modes = append(result.Modes, cost)
+		for name, value := range map[string]uint64{mode.name + "_wall_ns": uint64(cost.WallNS), mode.name + "_parent_cpu_ns": cost.ParentCPUNS, mode.name + "_child_cpu_ns": cost.ChildCPUNS} {
+			t.Logf("wire fact: %s=%d", name, value)
+		}
 	}
 	// Keep one real connection through each IP family open after its payload is
 	// received. Counters are then quiescent, while online IPs remain observable.
@@ -277,6 +280,20 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 			break
 		}
 		if time.Now().After(deadline) {
+			boolean := func(value bool) uint64 {
+				if value {
+					return 1
+				}
+				return 0
+			}
+			for name, value := range map[string]uint64{
+				"equal": boolean(reflect.DeepEqual(cliValue, wireValue)), "clients_equal": boolean(reflect.DeepEqual(cliValue.Clients, wireValue.Clients)), "listeners_equal": boolean(reflect.DeepEqual(cliValue.Listeners, wireValue.Listeners)),
+				"v4": boolean(slices.Contains(ips, "127.0.0.1")), "v6": boolean(slices.Contains(ips, "::1")), "first_key": boolean(first.Key == f.clients[0].Key),
+				"cli_ips": uint64(len(cliValue.Clients[0].LiveIPs)), "wire_ips": uint64(len(ips)),
+				"cli_up": uint64(cliValue.Clients[0].UpBytes), "cli_down": uint64(cliValue.Clients[0].DownBytes), "wire_up": uint64(first.UpBytes), "wire_down": uint64(first.DownBytes),
+			} {
+				t.Logf("wire fact: %s=%d", name, value)
+			}
 			t.Fatal("CLI and wire differ for real counters or dual-stack online IPs")
 		}
 		time.Sleep(10 * time.Millisecond)

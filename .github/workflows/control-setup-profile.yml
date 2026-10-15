@@ -46,7 +46,7 @@ jobs:
             -run '^(TestRealXrayTelemetryCommandCost200|TestRealXrayStatsWireCompatibility)$' \
             > "$RUNNER_TEMP/telemetry-cost.private.jsonl" 2> "$RUNNER_TEMP/telemetry-cost.private.log" || code=$?
           python3 - <<'PY'
-          import json, os
+          import json, os, re
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
           package = 'github.com/KazuhaHub/passwall-node/v4/internal/core/xray'
@@ -58,6 +58,8 @@ jobs:
                          'core changed during paired comparison': 'wire_core_changed',
                          'wire comparison skipped a query, leaked or spawned a child': 'wire_command_accounting_failed'}
           safe = []
+          fact_names = {'equal', 'clients_equal', 'listeners_equal', 'v4', 'v6', 'first_key', 'cli_ips', 'wire_ips', 'cli_up', 'cli_down', 'wire_up', 'wire_down'}
+          fact_names |= {f'{mode}_{field}' for mode in ['cli', 'wire'] for field in ['wall_ns', 'parent_cpu_ns', 'child_cpu_ns']}
           for line in (root / 'telemetry-cost.private.jsonl').read_text().splitlines():
               event = json.loads(line)
               if event.get('Package') != package:
@@ -66,6 +68,9 @@ jobs:
               if action in ['start', 'run', 'pass', 'fail', 'skip'] and (name in names or name is None):
                   safe.append({k: event[k] for k in ['Action', 'Package', 'Test', 'Elapsed'] if k in event})
               if action == 'output':
+                  fact = re.search(r'wire fact: ([a-z_]+)=([0-9]{1,13})\s*$', event.get('Output', ''))
+                  if name in names and fact and fact[1] in fact_names and int(fact[2]) <= 1000000000000:
+                      safe.append({'Action': 'output', 'Package': package, 'Test': name, 'Diagnostic': 'wire_fact_' + fact[1], 'Observed': int(fact[2])})
                   for message, diagnostic in diagnostics.items():
                       if event.get('Output', '').strip().endswith(message):
                           safe.append({'Action': 'output', 'Package': package, 'Diagnostic': diagnostic})
