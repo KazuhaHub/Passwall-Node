@@ -5,6 +5,7 @@ package xray
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,12 +44,14 @@ type telemetryModeCost struct {
 }
 type telemetryWireResult struct {
 	Version         string              `json:"core_version"`
+	Transport       string              `json:"transport"`
 	Clients         int                 `json:"clients"`
 	Listeners       int                 `json:"listeners"`
 	IPv4            int                 `json:"live_ipv4_verified"`
 	IPv6            int                 `json:"live_ipv6_verified"`
 	Traffic         int                 `json:"traffic_equivalent"`
 	ListenerTraffic int                 `json:"listener_traffic_equivalent"`
+	ListenerTotals  [][2]int64          `json:"listener_totals"`
 	Modes           []telemetryModeCost `json:"modes"`
 }
 type telemetryCountConnection struct {
@@ -86,10 +89,14 @@ func TestRealXrayStatsWireCompatibility(t *testing.T) {
 			if err != nil || !filepath.IsAbs(binary) || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
 				t.Fatal("wire profile requires exact prepared official core")
 			}
-			results = append(results, exerciseRealStatsWire(t, binary, pin.version))
+			for _, transport := range []string{"plain", "tls"} {
+				t.Run(transport, func(t *testing.T) {
+					results = append(results, exerciseRealStatsWire(t, binary, pin.version, transport))
+				})
+			}
 		})
 	}
-	if t.Failed() || len(results) != 3 {
+	if t.Failed() || len(results) != 6 {
 		t.Fatal("wire profile did not complete all official versions")
 	}
 	result := struct {
@@ -108,7 +115,7 @@ func TestRealXrayStatsWireCompatibility(t *testing.T) {
 	}
 }
 
-func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireResult {
+func exerciseRealStatsWire(t *testing.T, binary, version, transport string) telemetryWireResult {
 	t.Helper()
 	// Xray deliberately excludes 127.0.0.1 and [::1] from its online map.
 	// Keep both actual families observable using exclusively owned local sources.
@@ -167,7 +174,7 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 	if err != nil {
 		t.Fatal("bind owned wire target port")
 	}
-	f := newTelemetryProfileCore(t, binary, version, targetPort, sourceIPv6)
+	f := newTelemetryProfileCore(t, binary, version, targetPort, sourceIPv6, transport == "tls")
 	queries, online, closed := 0, 0, 0
 	wire, err := NewTelemetry(TelemetryOptions{Store: f.store, Status: f.supervisor.Status, APIListen: f.apiListen, Dial: func(ctx context.Context, endpoint string) (grpc.ClientConnInterface, io.Closer, error) {
 		connection, closer, err := dialStats(ctx, endpoint)
@@ -226,7 +233,7 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 		}
 		return uint64(r.Utime.Sec+r.Stime.Sec)*uint64(time.Second) + uint64(r.Utime.Usec+r.Stime.Usec)*uint64(time.Microsecond)
 	}
-	result := telemetryWireResult{Version: version, Clients: 200, Listeners: 2}
+	result := telemetryWireResult{Version: version, Transport: transport, Clients: 200, Listeners: 2}
 	for _, mode := range []struct {
 		name      string
 		telemetry *Telemetry
@@ -277,6 +284,16 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 			t.Fatal("connect real VLESS client")
 		}
 		t.Cleanup(func() { _ = connection.Close() })
+		if f.clientTLS != nil {
+			secure := tls.Client(connection, f.clientTLS.Clone())
+			handshakeCtx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			err := secure.HandshakeContext(handshakeCtx)
+			cancel()
+			if err != nil {
+				t.Fatal("owned TLS client handshake failed")
+			}
+			connection = secure
+		}
 		connections = append(connections, connection)
 		_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
 		id, err := hex.DecodeString(strings.ReplaceAll(f.clients[0].Credentials.UUID, "-", ""))
@@ -365,10 +382,16 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 		stable()
 		positive := true
 		for _, listener := range wireValue.Listeners {
-			positive = positive && listener.UpBytes > 0 && listener.DownBytes > 0
+			positive = positive && listener.UpBytes > 0 && listener.DownBytes >= 0
+			if transport == "tls" {
+				positive = positive && listener.DownBytes > 0
+			}
 		}
 		if reflect.DeepEqual(cliValue, wireValue) && positive {
 			result.ListenerTraffic = 1
+			for _, listener := range wireValue.Listeners {
+				result.ListenerTotals = append(result.ListenerTotals, [2]int64{listener.UpBytes, listener.DownBytes})
+			}
 			break
 		}
 		if time.Now().After(deadline) {

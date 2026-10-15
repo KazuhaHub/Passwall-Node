@@ -4,16 +4,24 @@ package xray
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -53,7 +61,7 @@ func TestRealXrayTelemetryCommandCost200(t *testing.T) {
 	if err != nil || root != dir || filepath.Base(evidence) != "xray-telemetry-cost.json" {
 		t.Fatal("profile evidence must stay in owned temporary storage")
 	}
-	fixture := newTelemetryProfileCore(t, binary, version, 0, "")
+	fixture := newTelemetryProfileCore(t, binary, version, 0, "", false)
 	store, supervisor, apiListen := fixture.store, fixture.supervisor, fixture.apiListen
 	type commandCost struct {
 		Command string `json:"command"`
@@ -172,9 +180,10 @@ type telemetryProfileCore struct {
 	apiListen  string
 	inbounds   []string
 	clients    []protocol.Client
+	clientTLS  *tls.Config
 }
 
-func newTelemetryProfileCore(t *testing.T, binary, version string, targetPort int, ipv6 string) *telemetryProfileCore {
+func newTelemetryProfileCore(t *testing.T, binary, version string, targetPort int, ipv6 string, encrypted bool) *telemetryProfileCore {
 	t.Helper()
 	const clients = 200
 	port := func(host string) int {
@@ -193,12 +202,13 @@ func newTelemetryProfileCore(t *testing.T, binary, version string, targetPort in
 		t.Fatal("profile ports collided")
 	}
 	apiListen := net.JoinHostPort("127.0.0.1", strconv.Itoa(api))
-	listener, _ := json.Marshal(map[string]any{"enabled": true, "listen": "127.0.0.1", "port": inbound, "protocol": "vless", "settings": `{"decryption":"none"}`, "stream_settings": `{"network":"tcp","security":"none"}`})
+	streamSettings, clientTLS := telemetryProfileTLS(t, encrypted)
+	listener, _ := json.Marshal(map[string]any{"enabled": true, "listen": "127.0.0.1", "port": inbound, "protocol": "vless", "settings": `{"decryption":"none"}`, "stream_settings": streamSettings})
 	snapshot := agentcore.Snapshot{Now: time.Now(), Listeners: []protocol.Listener{{Key: "lst_1", Config: listener}}}
 	inbounds := []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(inbound))}
 	if ipv6 != "" {
 		v6 := port(ipv6)
-		listener6, _ := json.Marshal(map[string]any{"enabled": true, "listen": ipv6, "port": v6, "protocol": "vless", "settings": `{"decryption":"none"}`, "stream_settings": `{"network":"tcp","security":"none"}`})
+		listener6, _ := json.Marshal(map[string]any{"enabled": true, "listen": ipv6, "port": v6, "protocol": "vless", "settings": `{"decryption":"none"}`, "stream_settings": streamSettings})
 		snapshot.Listeners = append(snapshot.Listeners, protocol.Listener{Key: "lst_2", Config: listener6})
 		inbounds = append(inbounds, net.JoinHostPort(ipv6, strconv.Itoa(v6)))
 	}
@@ -281,5 +291,38 @@ func newTelemetryProfileCore(t *testing.T, binary, version string, targetPort in
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return &telemetryProfileCore{store: store, supervisor: supervisor, apiListen: apiListen, inbounds: inbounds, clients: snapshot.Clients}
+	return &telemetryProfileCore{store: store, supervisor: supervisor, apiListen: apiListen, inbounds: inbounds, clients: snapshot.Clients, clientTLS: clientTLS}
+}
+
+func telemetryProfileTLS(t *testing.T, enabled bool) (string, *tls.Config) {
+	t.Helper()
+	if !enabled {
+		return `{"network":"tcp","security":"none"}`, nil
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal("generate owned TLS profile key")
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"telemetry.invalid"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal("generate owned TLS profile certificate")
+	}
+	private, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal("encode owned TLS profile key")
+	}
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: private})
+	settings, err := json.Marshal(map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{"alpn": []string{"http/1.1"}, "certificates": []any{map[string]any{"certificate": strings.Split(strings.TrimSpace(string(certificate)), "\n"), "key": strings.Split(strings.TrimSpace(string(privatePEM)), "\n")}}}})
+	if err != nil {
+		t.Fatal("encode owned TLS profile settings")
+	}
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal("parse owned TLS profile certificate")
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(parsed)
+	return string(settings), &tls.Config{RootCAs: roots, ServerName: "telemetry.invalid", MinVersion: tls.VersionTLS12}
 }

@@ -57,6 +57,7 @@ jobs:
           package = 'github.com/KazuhaHub/passwall-node/v4/internal/core/xray'
           names = {'TestRealXrayTelemetryCommandCost200', 'TestRealXrayStatsWireCompatibility'}
           names |= {f'TestRealXrayStatsWireCompatibility/{v}' for v in ['26.6.27', '26.7.28', '26.9.9']}
+          names |= {f'TestRealXrayStatsWireCompatibility/{v}/{mode}' for v in ['26.6.27', '26.7.28', '26.9.9'] for mode in ['plain', 'tls']}
           diagnostics = {'real wire conformance query failed; private details withheld': 'wire_query_failed',
                          'real idle CLI and wire disagree': 'wire_idle_mismatch',
                          'CLI and wire differ for real counters or dual-stack online IPs': 'wire_traffic_mismatch',
@@ -73,7 +74,8 @@ jobs:
                          'read VLESS response addons': 'wire_client_addons_failed',
                          'read owned VLESS HTTP response': 'wire_client_http_failed',
                          'real traffic did not reach owned target': 'wire_client_payload_failed',
-                         'wire lost actual listener traffic': 'wire_listener_counters_missing'}
+                         'wire lost actual listener traffic': 'wire_listener_counters_missing',
+                         'owned TLS client handshake failed': 'wire_client_tls_failed'}
           safe = []
           fact_names = {'equal', 'clients_equal', 'listeners_equal', 'v4', 'v6', 'first_key', 'cli_ips', 'wire_ips', 'cli_up', 'cli_down', 'wire_up', 'wire_down', 'connect_family', 'dial_errno'}
           fact_names |= {f'{mode}_{field}' for mode in ['cli', 'wire'] for field in ['wall_ns', 'parent_cpu_ns', 'child_cpu_ns']}
