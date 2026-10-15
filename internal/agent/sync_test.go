@@ -433,6 +433,72 @@ func TestCadenceDefaultsAndBackoffBounds(t *testing.T) {
 	}
 }
 
+func TestRunnerEventsCannotStarveDueOrRequestedFullReports(t *testing.T) {
+	for _, wake := range []bool{false, true} {
+		for _, tc := range []struct {
+			name        string
+			envelope    protocol.Envelope
+			wantPartial []bool
+		}{
+			{"due", protocol.Envelope{FullReportSeconds: 2}, []bool{false, true, true, true, false, true}},
+			{"requested", protocol.Envelope{FullReportSeconds: 60, WantFullReport: true}, []bool{false, false, false, false, false, false}},
+			{"unset", protocol.Envelope{}, []bool{false, false, false, false, false, false}},
+			{"negative", protocol.Envelope{FullReportSeconds: -1}, []bool{false, false, false, false, false, false}},
+		} {
+			name := tc.name + "/processor"
+			if wake {
+				name = tc.name + "/wake"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				store := openAgentTestStore(t)
+				var reports []bool
+				var runner *Runner
+				synchronizer := Synchronizer{
+					Reports: ReportBuilder{AgentID: "agent-1", Store: store}, Store: store,
+					Syncer: syncerFunc(func(_ context.Context, report protocol.NodeReport) (protocol.SyncResponse, error) {
+						reports = append(reports, report.Partial)
+						envelope := tc.envelope
+						envelope.NextPollSeconds = 3600
+						return protocol.SyncResponse{Envelope: envelope}, nil
+					}),
+					Processor: processorFunc(func(context.Context, protocol.SyncResponse) (ProcessResult, error) {
+						if len(reports) == len(tc.wantPartial) {
+							cancel()
+							return ProcessResult{}, nil
+						}
+						if wake {
+							runner.Wake()
+							return ProcessResult{}, nil
+						}
+						return ProcessResult{ReportImmediately: true}, nil
+					}),
+				}
+				var err error
+				runner, err = NewRunner(synchronizer, RunnerOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Advance only the cadence clock. The real store, report builder,
+				// sync and event paths execute without a wall-clock sleep.
+				runner.now = func() time.Time { return time.Unix(1000, 0).Add(time.Duration(len(reports)) * 500 * time.Millisecond) }
+				if err := runner.Run(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if len(reports) != len(tc.wantPartial) {
+					t.Fatalf("report count = %d", len(reports))
+				}
+				for i, partial := range reports {
+					if partial != tc.wantPartial[i] {
+						t.Fatalf("report %d partial=%v want %v", i, partial, tc.wantPartial[i])
+					}
+				}
+			})
+		}
+	}
+}
+
 func openAgentTestStore(t *testing.T) state.Store {
 	t.Helper()
 	store, err := statesqlite.Open(context.Background(), filepath.Join(t.TempDir(), "agent.db"))
