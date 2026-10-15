@@ -1,0 +1,49 @@
+name: Node control setup profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [Kazuha/access-control-node-setup-profile]
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: 'off'
+  GOTOOLCHAIN: local
+
+jobs:
+  processor-state:
+    name: Current 200-client processor and real SQLite state
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify immutable source and exact preferred compiler
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          toolchain=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          test "$(go env GOVERSION)" = "$toolchain"
+          test "$(go tool compile -V | awk '{print $3}')" = "$toolchain"
+      - name: Profile the real processor with 200 current durable grants
+        run: |
+          set -euo pipefail
+          if ! go test ./internal/agent -run '^TestProcessorScaleKeepsAll200CurrentGrantsWithoutRuntimeMutation$' \
+            -bench '^BenchmarkProcessorCurrentQuota200$' -benchtime=10s -count=1 \
+            -cpuprofile="$RUNNER_TEMP/processor-scale.cpu" -memprofile="$RUNNER_TEMP/processor-scale.heap" \
+            > "$RUNNER_TEMP/processor-scale.private.log" 2>&1; then
+            printf '%s\n' 'Processor profile failed; private output withheld'
+            exit 1
+          fi
+          grep -E '^BenchmarkProcessorCurrentQuota200-[0-9]+[[:space:]]+[0-9]+[[:space:]]' "$RUNNER_TEMP/processor-scale.private.log"
+          go tool pprof -top -nodecount=25 "$RUNNER_TEMP/processor-scale.cpu"
+          go tool pprof -top -nodecount=25 -focus='github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.cpu"
+          go tool pprof -top -nodecount=25 -sample_index=alloc_space -focus='github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.heap"
+          printf '%s\n' 'Profiles isolate processor/SQLite cost; runtime, network and the complete fleet are not measured.'
+          # Raw profiles, state, test output and binaries stay private to this job.
