@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -41,13 +42,14 @@ type telemetryModeCost struct {
 	Closed        int    `json:"agent_connections_closed"`
 }
 type telemetryWireResult struct {
-	Version   string              `json:"core_version"`
-	Clients   int                 `json:"clients"`
-	Listeners int                 `json:"listeners"`
-	IPv4      int                 `json:"live_ipv4_verified"`
-	IPv6      int                 `json:"live_ipv6_verified"`
-	Traffic   int                 `json:"traffic_equivalent"`
-	Modes     []telemetryModeCost `json:"modes"`
+	Version         string              `json:"core_version"`
+	Clients         int                 `json:"clients"`
+	Listeners       int                 `json:"listeners"`
+	IPv4            int                 `json:"live_ipv4_verified"`
+	IPv6            int                 `json:"live_ipv6_verified"`
+	Traffic         int                 `json:"traffic_equivalent"`
+	ListenerTraffic int                 `json:"listener_traffic_equivalent"`
+	Modes           []telemetryModeCost `json:"modes"`
 }
 type telemetryCountConnection struct {
 	grpc.ClientConnInterface
@@ -145,6 +147,8 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 	})
 	const payload = "owned-wire-traffic"
 	hold := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTarget := func() { releaseOnce.Do(func() { close(hold) }) }
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 		_, _ = io.WriteString(w, payload)
@@ -154,7 +158,7 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 		case <-r.Context().Done():
 		}
 	}))
-	t.Cleanup(func() { close(hold); target.Close() })
+	t.Cleanup(func() { releaseTarget(); target.Close() })
 	_, targetPortText, err := net.SplitHostPort(strings.TrimPrefix(target.URL, "http://"))
 	if err != nil {
 		t.Fatal("bind owned wire target")
@@ -257,6 +261,7 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 	}
 	// Keep one real connection through each IP family open after its payload is
 	// received. Counters are then quiescent, while online IPs remain observable.
+	var connections []net.Conn
 	for i, inbound := range f.inbounds {
 		t.Logf("wire fact: connect_family=%d", i+1)
 		source := sourceIPv4
@@ -272,6 +277,7 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 			t.Fatal("connect real VLESS client")
 		}
 		t.Cleanup(func() { _ = connection.Close() })
+		connections = append(connections, connection)
 		_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
 		id, err := hex.DecodeString(strings.ReplaceAll(f.clients[0].Credentials.UUID, "-", ""))
 		if err != nil {
@@ -320,11 +326,6 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 		first := wireValue.Clients[0]
 		ips := first.LiveIPs
 		if reflect.DeepEqual(cliValue, wireValue) && first.UpBytes > 0 && first.DownBytes > 0 && hasSource(ips, sourceIPv4) && hasSource(ips, sourceIPv6) {
-			for _, listener := range wireValue.Listeners {
-				if listener.UpBytes <= 0 || listener.DownBytes <= 0 {
-					t.Fatal("wire lost actual listener traffic")
-				}
-			}
 			for i := range wireValue.Clients {
 				if wireValue.Clients[i].CounterEpoch != baseline.Clients[i].CounterEpoch {
 					t.Fatal("read-only queries changed counter epoch")
@@ -349,6 +350,33 @@ func exerciseRealStatsWire(t *testing.T, binary, version string) telemetryWireRe
 				t.Logf("wire fact: %s=%d", name, value)
 			}
 			t.Fatal("CLI and wire differ for real counters or dual-stack online IPs")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Transport-level byte accounting may finish when the socket closes. Keep
+	// the live-IP proof above and require positive settled listener totals too.
+	releaseTarget()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		cliValue, wireValue := canonical(collect(cli)), canonical(collect(wire))
+		stable()
+		positive := true
+		for _, listener := range wireValue.Listeners {
+			positive = positive && listener.UpBytes > 0 && listener.DownBytes > 0
+		}
+		if reflect.DeepEqual(cliValue, wireValue) && positive {
+			result.ListenerTraffic = 1
+			break
+		}
+		if time.Now().After(deadline) {
+			for i, listener := range wireValue.Listeners {
+				t.Logf("wire fact: listener_%d_up=%d", i+1, listener.UpBytes)
+				t.Logf("wire fact: listener_%d_down=%d", i+1, listener.DownBytes)
+			}
+			t.Fatal("wire lost actual listener traffic")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

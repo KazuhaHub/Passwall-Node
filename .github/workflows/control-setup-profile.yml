@@ -77,6 +77,7 @@ jobs:
           safe = []
           fact_names = {'equal', 'clients_equal', 'listeners_equal', 'v4', 'v6', 'first_key', 'cli_ips', 'wire_ips', 'cli_up', 'cli_down', 'wire_up', 'wire_down', 'connect_family', 'dial_errno'}
           fact_names |= {f'{mode}_{field}' for mode in ['cli', 'wire'] for field in ['wall_ns', 'parent_cpu_ns', 'child_cpu_ns']}
+          fact_names |= {f'listener_{i}_{field}' for i in [1, 2] for field in ['up', 'down']}
           for line in (root / 'telemetry-cost.private.jsonl').read_text().splitlines():
               event = json.loads(line)
               if event.get('Package') != package:
