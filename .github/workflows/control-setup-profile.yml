@@ -46,7 +46,7 @@ jobs:
             env GOPATH="$(go env GOPATH)" GOCACHE="$(go env GOCACHE)" \
             "$(command -v go)" test -json -tags telemetry_profile -count=1 -timeout=5m ./internal/core/xray \
             -run '^(TestRealXrayTelemetryCommandCost200|TestRealXrayStatsWireCompatibility)$' \
-            > "$RUNNER_TEMP/telemetry-cost.private.jsonl" 2> "$RUNNER_TEMP/telemetry-cost.private.log" || code=$?
+            2>&1 | tee "$RUNNER_TEMP/telemetry-cost.private.jsonl" > /dev/null || code=$?
           for evidence in "$PSP_TELEMETRY_COST_METRICS" "$PSP_STATS_WIRE_METRICS"; do
             if sudo test -f "$evidence"; then sudo chown "$(id -u):$(id -g)" -- "$evidence"; fi
           done
@@ -81,7 +81,10 @@ jobs:
           fact_names |= {f'{mode}_{field}' for mode in ['cli', 'wire'] for field in ['wall_ns', 'parent_cpu_ns', 'child_cpu_ns']}
           fact_names |= {f'listener_{i}_{field}' for i in [1, 2] for field in ['up', 'down']}
           for line in (root / 'telemetry-cost.private.jsonl').read_text().splitlines():
-              event = json.loads(line)
+              try:
+                  event = json.loads(line)
+              except json.JSONDecodeError:
+                  continue  # Compiler/sudo stderr stays private; exit status and all required passes are still mandatory.
               if event.get('Package') != package:
                   continue
               action, name = event.get('Action'), event.get('Test')
