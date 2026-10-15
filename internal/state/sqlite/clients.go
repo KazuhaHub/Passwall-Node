@@ -24,11 +24,7 @@ func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity,
 	if atMS < 0 {
 		return fmt.Errorf("client timestamp must be non-negative")
 	}
-	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO client_runtime
-			(client_key, subject_key, counter_epoch, updated_at_ms)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(client_key) DO NOTHING`,
+	result, err := s.control.ensureClient.ExecContext(ctx,
 		identity.Key, identity.Subject, encodeUint64(0), atMS,
 	)
 	if err != nil {
@@ -38,7 +34,7 @@ func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity,
 		return nil
 	}
 	var subject protocol.SubjectKey
-	if err := s.db.QueryRowContext(ctx, `SELECT subject_key FROM client_runtime WHERE client_key = ?`, identity.Key).Scan(&subject); err != nil {
+	if err := s.control.clientSubject.QueryRowContext(ctx, identity.Key).Scan(&subject); err != nil {
 		return fmt.Errorf("verify materialised client %s: %w", identity.Key, err)
 	}
 	if subject != identity.Subject {
@@ -48,7 +44,7 @@ func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity,
 }
 
 func (s *Store) Client(ctx context.Context, key protocol.ClientKey) (state.ClientRuntime, error) {
-	client, err := scanClient(s.db.QueryRowContext(ctx, clientSelect+` WHERE client_key = ?`, key))
+	client, err := scanClient(s.control.client.QueryRowContext(ctx, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return state.ClientRuntime{}, fmt.Errorf("client %s: %w", key, state.ErrNotFound)
 	}
@@ -56,7 +52,7 @@ func (s *Store) Client(ctx context.Context, key protocol.ClientKey) (state.Clien
 }
 
 func (s *Store) Clients(ctx context.Context) ([]state.ClientRuntime, error) {
-	rows, err := s.db.QueryContext(ctx, clientSelect+` ORDER BY client_key`)
+	rows, err := s.control.clients.QueryContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list client runtime: %w", err)
 	}
@@ -238,7 +234,7 @@ func (s *Store) ApplyQuota(ctx context.Context, key protocol.ClientKey, grant st
 		return fmt.Errorf("begin quota update for %s: %w", key, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	current, err := scanClient(tx.QueryRowContext(ctx, clientSelect+` WHERE client_key = ?`, key))
+	current, err := scanClient(tx.StmtContext(ctx, s.control.client).QueryRowContext(ctx, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("client %s: %w", key, state.ErrNotFound)
 	}

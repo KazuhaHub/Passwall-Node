@@ -43,7 +43,7 @@ jobs:
           fi
           grep -E '^BenchmarkProcessorCurrentQuota200-[0-9]+[[:space:]]+[0-9]+[[:space:]]' "$RUNNER_TEMP/processor-scale.private.log"
           go tool pprof -top -nodecount=25 "$RUNNER_TEMP/processor-scale.cpu"
-          go tool pprof -top -nodecount=25 -focus='github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.cpu"
-          go tool pprof -top -nodecount=25 -sample_index=alloc_space -focus='github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.heap"
+          go tool pprof -top -cum -nodecount=25 -show='^github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.cpu"
+          go tool pprof -top -cum -nodecount=25 -sample_index=alloc_space -show='^github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.heap"
           printf '%s\n' 'Profiles isolate processor/SQLite cost; runtime, network and the complete fleet are not measured.'
           # Raw profiles, state, test output and binaries stay private to this job.
