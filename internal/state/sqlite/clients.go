@@ -24,6 +24,22 @@ func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity,
 	if atMS < 0 {
 		return fmt.Errorf("client timestamp must be non-negative")
 	}
+	// Existing identities are not updated by the insert's DO NOTHING branch.
+	// Check the same current ownership first, without taking a write path for
+	// every client on every control response. No row is cached. A miss retains
+	// the original insert and post-conflict verification below, so concurrent
+	// first provisioning still cannot silently transfer an existing identity.
+	var current protocol.SubjectKey
+	readErr := s.control.clientSubject.QueryRowContext(ctx, identity.Key).Scan(&current)
+	if readErr == nil {
+		if current != identity.Subject {
+			return fmt.Errorf("client %s already belongs to subject %s, not %s", identity.Key, current, identity.Subject)
+		}
+		return nil
+	}
+	if !errors.Is(readErr, sql.ErrNoRows) {
+		return fmt.Errorf("verify materialised client %s: %w", identity.Key, readErr)
+	}
 	result, err := s.control.ensureClient.ExecContext(ctx,
 		identity.Key, identity.Subject, encodeUint64(0), atMS,
 	)
