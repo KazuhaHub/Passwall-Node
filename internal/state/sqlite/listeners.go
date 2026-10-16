@@ -85,7 +85,7 @@ func (s *Store) UpdateListenerCounters(ctx context.Context, update state.Listene
 		return fmt.Errorf("begin listener counter update for %s: %w", update.Key, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := applyListenerCounter(ctx, tx, update, atMS); err != nil {
+	if err := applyListenerCounter(ctx, s.bindListenerCounters(ctx, tx), update, atMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -94,11 +94,11 @@ func (s *Store) UpdateListenerCounters(ctx context.Context, update state.Listene
 	return nil
 }
 
-func applyListenerCounter(ctx context.Context, tx *sql.Tx, update state.ListenerCounterUpdate, atMS int64) error {
+func applyListenerCounter(ctx context.Context, programs counterProgramPair, update state.ListenerCounterUpdate, atMS int64) error {
 	if update.Key == "" || update.UpBytes < 0 || update.DownBytes < 0 || atMS < 0 {
 		return fmt.Errorf("listener counter update has invalid key, bytes, or timestamp")
 	}
-	current, err := scanListener(tx.QueryRowContext(ctx, listenerSelect+` WHERE listener_key = ?`, update.Key))
+	current, err := scanListener(programs.read.QueryRowContext(ctx, update.Key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("listener %s: %w", update.Key, state.ErrNotFound)
 	}
@@ -114,10 +114,7 @@ func applyListenerCounter(ctx context.Context, tx *sql.Tx, update state.Listener
 	if update.Present {
 		present = 1
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE listener_runtime
-		SET present = ?, up_bytes = ?, down_bytes = ?, counter_epoch = ?, updated_at_ms = ?
-		WHERE listener_key = ?`, present, update.UpBytes, update.DownBytes,
+	if _, err := programs.write.ExecContext(ctx, present, update.UpBytes, update.DownBytes,
 		encodeUint64(update.CounterEpoch), atMS, update.Key); err != nil {
 		return fmt.Errorf("update listener %s counters: %w", update.Key, err)
 	}

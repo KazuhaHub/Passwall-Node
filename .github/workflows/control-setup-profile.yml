@@ -1,0 +1,238 @@
+name: Node control setup profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [Kazuha/access-control-node-setup-profile]
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: 'off'
+  GOTOOLCHAIN: local
+
+jobs:
+  observation-state:
+    name: Real Xray observation and atomic SQLite counters for 200 clients
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify immutable source and exact preferred compiler
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+      - name: Prepare exact official core binaries through the existing verifier
+        run: |
+          set -euo pipefail
+          go run ./deployment/coreacceptance prepare \
+            --directory "$RUNNER_TEMP/core-acceptance" --env-file "$GITHUB_ENV" \
+            > "$RUNNER_TEMP/observation-core-versions.private.json"
+      - name: Measure real Observe with current complete atomic samples
+        run: |
+          set -euo pipefail
+          set +e
+          go test -json -count=1 -tags telemetry_profile ./internal/core/xray \
+            -run '^TestRealXrayObservationPersistenceCost200$' -timeout=3m \
+            > "$RUNNER_TEMP/observation-cost.private.jsonl" 2>&1
+          code=$?
+          set -e
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          package = 'github.com/KazuhaHub/passwall-node/v4/internal/core/xray'
+          name = 'TestRealXrayObservationPersistenceCost200'
+          safe = []
+          for line in (root / 'observation-cost.private.jsonl').read_text().splitlines():
+              try:
+                  e = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if e.get('Package') == package and e.get('Action') in ['start','run','pass','fail','skip'] and e.get('Test') in [None,name]:
+                  safe.append({k:e[k] for k in ['Action','Package','Test','Elapsed'] if k in e})
+          (root / 'xray-observation-tests.json').write_text(''.join(json.dumps(e)+'\n' for e in safe))
+          assert sum(e['Action']=='run' and e.get('Test')==name for e in safe)==1
+          assert sum(e['Action']=='pass' and e.get('Test')==name for e in safe)==1
+          assert sum(e['Action']=='pass' and 'Test' not in e for e in safe)==1
+          assert not any(e['Action'] in ['fail','skip'] for e in safe)
+          m = json.loads((root / 'xray-observation-cost.json').read_text())
+          assert set(m)=={'schema_version','node_source','run_id','clients','rounds','logical_cpus','wall_ns','cpu_ns','allocated_bytes','collect','persist','complete'}
+          assert m['schema_version']==1 and m['node_source']==os.environ['GITHUB_SHA'] and str(m['run_id'])==os.environ['GITHUB_RUN_ID']
+          assert m['clients']==200 and m['rounds']==200 and m['complete']==1
+          for field in ['logical_cpus','wall_ns','cpu_ns','allocated_bytes']:
+              assert type(m[field]) is int and 0<m[field]<=1000000000000000
+          for phase in ['collect','persist']:
+              assert set(m[phase])=={'calls','wall_ns','cpu_ns'} and m[phase]['calls']==200
+              assert all(type(m[phase][k]) is int and 0<m[phase][k]<=m[k] for k in ['wall_ns','cpu_ns'])
+          print(json.dumps(m))
+          PY
+          test "$code" -eq 0
+          go tool pprof -top -nodecount=25 "$RUNNER_TEMP/xray-observation.cpu.pprof"
+          go tool pprof -top -cum -nodecount=25 \
+            -show='^github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/xray-observation.cpu.pprof"
+          printf '%s\n' 'Observation includes real read-only Stats API and atomic SQLite counters; parent CPU includes probes. Core CPU, controller and complete fleet are excluded.'
+          # Raw profiles, state, test output and binaries stay private to this job.
+      - name: Keep only closed source-bound numeric observation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-observation-cost-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/xray-observation-cost.json
+            ${{ runner.temp }}/xray-observation-tests.json
+          if-no-files-found: error
+          retention-days: 7
+  telemetry-cli:
+    name: Real Xray telemetry command CPU with 200 idle clients
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify immutable source and exact preferred compiler
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+      - name: Prepare exact official core binaries through the existing verifier
+        run: |
+          set -euo pipefail
+          go run ./deployment/coreacceptance prepare \
+            --directory "$RUNNER_TEMP/core-acceptance" --env-file "$GITHUB_ENV" \
+            > "$RUNNER_TEMP/telemetry-core-versions.private.json"
+      - name: Compare CLI and Stats wire on all three official cores
+        env:
+          PSP_TELEMETRY_COST_METRICS: ${{ runner.temp }}/xray-telemetry-cost.json
+          PSP_STATS_WIRE_METRICS: ${{ runner.temp }}/xray-stats-wire.json
+        run: |
+          set -euo pipefail
+          code=0
+          sudo --preserve-env=PSP_TEST_XRAY_26627_BIN,PSP_TEST_XRAY_26728_BIN,PSP_TEST_XRAY_2699_BIN,PSP_TELEMETRY_COST_METRICS,PSP_STATS_WIRE_METRICS,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_ENVIRONMENT,RUNNER_TEMP,GOWORK,GOTOOLCHAIN \
+            env GOPATH="$(go env GOPATH)" GOCACHE="$(go env GOCACHE)" \
+            "$(command -v go)" test -json -tags telemetry_profile -count=1 -timeout=5m ./internal/core/xray \
+            -run '^(TestRealXrayTelemetryCommandCost200|TestRealXrayStatsWireCompatibility)$' \
+            2>&1 | tee "$RUNNER_TEMP/telemetry-cost.private.jsonl" > /dev/null || code=$?
+          for evidence in "$PSP_TELEMETRY_COST_METRICS" "$PSP_STATS_WIRE_METRICS"; do
+            if sudo test -f "$evidence"; then sudo chown "$(id -u):$(id -g)" -- "$evidence"; fi
+          done
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          package = 'github.com/KazuhaHub/passwall-node/v4/internal/core/xray'
+          names = {'TestRealXrayTelemetryCommandCost200', 'TestRealXrayStatsWireCompatibility'}
+          names |= {f'TestRealXrayStatsWireCompatibility/{v}' for v in ['26.6.27', '26.7.28', '26.9.9']}
+          names |= {f'TestRealXrayStatsWireCompatibility/{v}/{mode}' for v in ['26.6.27', '26.7.28', '26.9.9'] for mode in ['plain', 'tls']}
+          diagnostics = {'real wire conformance query failed; private details withheld': 'wire_query_failed',
+                         'real idle CLI and wire disagree': 'wire_idle_mismatch',
+                         'CLI and wire differ for real counters or dual-stack online IPs': 'wire_traffic_mismatch',
+                         'core changed during paired comparison': 'wire_core_changed',
+                         'wire comparison skipped a query, leaked or spawned a child': 'wire_command_accounting_failed',
+                         'dual-stack source fixture requires the owned disposable hosted runner': 'wire_source_runner_invalid',
+                         'IPv6 source fixture is already owned': 'wire_source_already_owned',
+                         'add exclusive IPv6 source fixture': 'wire_source_setup_failed',
+                         'remove exclusive IPv6 source fixture': 'wire_source_cleanup_failed',
+                         'allocate profile port': 'wire_listener_bind_failed',
+                         'connect real VLESS client': 'wire_client_connect_failed',
+                         'send real VLESS payload': 'wire_client_write_failed',
+                         'read real VLESS response': 'wire_client_header_failed',
+                         'read VLESS response addons': 'wire_client_addons_failed',
+                         'read owned VLESS HTTP response': 'wire_client_http_failed',
+                         'real traffic did not reach owned target': 'wire_client_payload_failed',
+                         'wire lost actual listener traffic': 'wire_listener_counters_missing',
+                         'owned TLS client handshake failed': 'wire_client_tls_failed'}
+          safe = []
+          fact_names = {'equal', 'clients_equal', 'listeners_equal', 'v4', 'v6', 'first_key', 'cli_ips', 'wire_ips', 'cli_up', 'cli_down', 'wire_up', 'wire_down', 'connect_family', 'dial_errno'}
+          fact_names |= {f'{mode}_{field}' for mode in ['cli', 'wire'] for field in ['wall_ns', 'parent_cpu_ns', 'child_cpu_ns']}
+          fact_names |= {f'listener_{i}_{field}' for i in [1, 2] for field in ['up', 'down']}
+          for line in (root / 'telemetry-cost.private.jsonl').read_text().splitlines():
+              try:
+                  event = json.loads(line)
+              except json.JSONDecodeError:
+                  continue  # Compiler/sudo stderr stays private; exit status and all required passes are still mandatory.
+              if event.get('Package') != package:
+                  continue
+              action, name = event.get('Action'), event.get('Test')
+              if action in ['start', 'run', 'pass', 'fail', 'skip'] and (name in names or name is None):
+                  safe.append({k: event[k] for k in ['Action', 'Package', 'Test', 'Elapsed'] if k in event})
+              if action == 'output':
+                  fact = re.search(r'wire fact: ([a-z0-9_]+)=([0-9]{1,13})\s*$', event.get('Output', ''))
+                  if name in names and fact and fact[1] in fact_names and int(fact[2]) <= 1000000000000:
+                      safe.append({'Action': 'output', 'Package': package, 'Test': name, 'Diagnostic': 'wire_fact_' + fact[1], 'Observed': int(fact[2])})
+                  for message, diagnostic in diagnostics.items():
+                      if event.get('Output', '').strip().endswith(message):
+                          safe.append({'Action': 'output', 'Package': package, 'Diagnostic': diagnostic})
+          (root / 'xray-telemetry-tests.json').write_text(''.join(json.dumps(e) + '\n' for e in safe))
+          for event in safe:
+              if event['Action'] in ['fail', 'skip', 'output']:
+                  print(json.dumps(event))
+          for name in names:
+              assert sum(e['Action'] == 'run' and e.get('Test') == name for e in safe) == 1
+              assert sum(e['Action'] == 'pass' and e.get('Test') == name for e in safe) == 1
+              assert not any(e['Action'] in ['fail', 'skip'] and e.get('Test') == name for e in safe)
+          assert sum(e['Action'] == 'pass' and 'Test' not in e for e in safe) == 1
+          PY
+          test "$code" -eq 0
+          test -s "$PSP_TELEMETRY_COST_METRICS"
+          test -s "$PSP_STATS_WIRE_METRICS"
+          cat "$PSP_TELEMETRY_COST_METRICS"
+          cat "$PSP_STATS_WIRE_METRICS"
+          printf '%s\n' 'Isolated idle telemetry measurement; active core CPU, traffic, controller work and the 65-node fleet are not measured.'
+          printf '%s\n' 'Parent CPU includes probe and validation overhead; per-command CPU counts only reaped CLI children while the original core stays live.'
+      - name: Keep only closed source-bound numeric telemetry evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-telemetry-cost-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/xray-telemetry-cost.json
+            ${{ runner.temp }}/xray-stats-wire.json
+            ${{ runner.temp }}/xray-telemetry-tests.json
+          if-no-files-found: error
+          retention-days: 7
+  processor-state:
+    name: Current 200-client processor and real SQLite state
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+      - name: Verify immutable source and exact preferred compiler
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          toolchain=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          test "$(go env GOVERSION)" = "$toolchain"
+          test "$(go tool compile -V | awk '{print $3}')" = "$toolchain"
+      - name: Profile the real processor with 200 current durable grants
+        run: |
+          set -euo pipefail
+          if ! go test ./internal/agent -run '^TestProcessorScaleKeepsAll200CurrentGrantsWithoutRuntimeMutation$' \
+            -bench '^BenchmarkProcessorCurrentQuota200$' -benchtime=10s -count=1 \
+            -cpuprofile="$RUNNER_TEMP/processor-scale.cpu" -memprofile="$RUNNER_TEMP/processor-scale.heap" \
+            > "$RUNNER_TEMP/processor-scale.private.log" 2>&1; then
+            printf '%s\n' 'Processor profile failed; private output withheld'
+            exit 1
+          fi
+          grep -E '^BenchmarkProcessorCurrentQuota200-[0-9]+[[:space:]]+[0-9]+[[:space:]]' "$RUNNER_TEMP/processor-scale.private.log"
+          go tool pprof -top -nodecount=25 "$RUNNER_TEMP/processor-scale.cpu"
+          go tool pprof -top -cum -nodecount=25 -show='^github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.cpu"
+          go tool pprof -top -cum -nodecount=25 -sample_index=alloc_space -show='^github.com/KazuhaHub/passwall-node/v4/internal/' "$RUNNER_TEMP/processor-scale.heap"
+          printf '%s\n' 'Profiles isolate processor/SQLite cost; runtime, network and the complete fleet are not measured.'
+          # Raw profiles, state, test output and binaries stay private to this job.

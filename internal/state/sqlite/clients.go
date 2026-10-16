@@ -24,11 +24,23 @@ func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity,
 	if atMS < 0 {
 		return fmt.Errorf("client timestamp must be non-negative")
 	}
-	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO client_runtime
-			(client_key, subject_key, counter_epoch, updated_at_ms)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(client_key) DO NOTHING`,
+	// Existing identities are not updated by the insert's DO NOTHING branch.
+	// Check the same current ownership first, without taking a write path for
+	// every client on every control response. No row is cached. A miss retains
+	// the original insert and post-conflict verification below, so concurrent
+	// first provisioning still cannot silently transfer an existing identity.
+	var current protocol.SubjectKey
+	readErr := s.control.clientSubject.QueryRowContext(ctx, identity.Key).Scan(&current)
+	if readErr == nil {
+		if current != identity.Subject {
+			return fmt.Errorf("client %s already belongs to subject %s, not %s", identity.Key, current, identity.Subject)
+		}
+		return nil
+	}
+	if !errors.Is(readErr, sql.ErrNoRows) {
+		return fmt.Errorf("verify materialised client %s: %w", identity.Key, readErr)
+	}
+	result, err := s.control.ensureClient.ExecContext(ctx,
 		identity.Key, identity.Subject, encodeUint64(0), atMS,
 	)
 	if err != nil {
@@ -38,7 +50,7 @@ func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity,
 		return nil
 	}
 	var subject protocol.SubjectKey
-	if err := s.db.QueryRowContext(ctx, `SELECT subject_key FROM client_runtime WHERE client_key = ?`, identity.Key).Scan(&subject); err != nil {
+	if err := s.control.clientSubject.QueryRowContext(ctx, identity.Key).Scan(&subject); err != nil {
 		return fmt.Errorf("verify materialised client %s: %w", identity.Key, err)
 	}
 	if subject != identity.Subject {
@@ -48,7 +60,7 @@ func (s *Store) EnsureClient(ctx context.Context, identity state.ClientIdentity,
 }
 
 func (s *Store) Client(ctx context.Context, key protocol.ClientKey) (state.ClientRuntime, error) {
-	client, err := scanClient(s.db.QueryRowContext(ctx, clientSelect+` WHERE client_key = ?`, key))
+	client, err := scanClient(s.control.client.QueryRowContext(ctx, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return state.ClientRuntime{}, fmt.Errorf("client %s: %w", key, state.ErrNotFound)
 	}
@@ -56,7 +68,7 @@ func (s *Store) Client(ctx context.Context, key protocol.ClientKey) (state.Clien
 }
 
 func (s *Store) Clients(ctx context.Context) ([]state.ClientRuntime, error) {
-	rows, err := s.db.QueryContext(ctx, clientSelect+` ORDER BY client_key`)
+	rows, err := s.control.clients.QueryContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list client runtime: %w", err)
 	}
@@ -148,7 +160,7 @@ func (s *Store) UpdateCounters(ctx context.Context, update state.CounterUpdate, 
 		return fmt.Errorf("begin counter update for %s: %w", update.Key, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := applyClientCounter(ctx, tx, update, atMS); err != nil {
+	if _, err := applyClientCounter(ctx, s.bindClientCounters(ctx, tx), update, atMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -157,11 +169,11 @@ func (s *Store) UpdateCounters(ctx context.Context, update state.CounterUpdate, 
 	return nil
 }
 
-func applyClientCounter(ctx context.Context, tx *sql.Tx, update state.CounterUpdate, atMS int64) (bool, error) {
+func applyClientCounter(ctx context.Context, programs counterProgramPair, update state.CounterUpdate, atMS int64) (bool, error) {
 	if update.Key == "" || update.UpBytes < 0 || update.DownBytes < 0 || atMS < 0 {
 		return false, fmt.Errorf("counter update has invalid key, bytes, or timestamp")
 	}
-	current, err := scanClient(tx.QueryRowContext(ctx, clientSelect+` WHERE client_key = ?`, update.Key))
+	current, err := scanClient(programs.read.QueryRowContext(ctx, update.Key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("client %s: %w", update.Key, state.ErrNotFound)
 	}
@@ -189,10 +201,7 @@ func applyClientCounter(ctx context.Context, tx *sql.Tx, update state.CounterUpd
 	if err != nil {
 		return false, fmt.Errorf("encode client %s live IPs: %w", update.Key, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE client_runtime
-		SET present = ?, up_bytes = ?, down_bytes = ?, counter_epoch = ?, gate = ?, updated_at_ms = ?, live_ips_json = ?
-		WHERE client_key = ?`,
+	if _, err := programs.write.ExecContext(ctx,
 		present, update.UpBytes, update.DownBytes, encodeUint64(update.CounterEpoch), gate, atMS, string(liveIPsJSON), update.Key,
 	); err != nil {
 		return false, fmt.Errorf("update client %s counters: %w", update.Key, err)
@@ -238,7 +247,7 @@ func (s *Store) ApplyQuota(ctx context.Context, key protocol.ClientKey, grant st
 		return fmt.Errorf("begin quota update for %s: %w", key, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	current, err := scanClient(tx.QueryRowContext(ctx, clientSelect+` WHERE client_key = ?`, key))
+	current, err := scanClient(tx.StmtContext(ctx, s.control.client).QueryRowContext(ctx, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("client %s: %w", key, state.ErrNotFound)
 	}

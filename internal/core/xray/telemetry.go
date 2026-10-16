@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc"
 
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
@@ -30,21 +33,26 @@ type TelemetryOptions struct {
 	APIListen      string
 	CommandTimeout time.Duration
 	RunCommand     CommandRunner
+	Dial           func(context.Context, string) (grpc.ClientConnInterface, io.Closer, error)
 }
 
-// Telemetry queries the running Xray binary's own CLI. This deliberately
-// avoids linking one Xray Go API version into the agent while the selected
-// child binary may be another audited release. Mapping uses the last confirmed
-// deployment snapshot, never the newer received desired documents.
+// Telemetry uses the audited Stats wire contract without linking a core
+// implementation. Other versions and explicit command runners retain the
+// selected-binary CLI. Mapping always uses the confirmed deployment snapshot.
 type Telemetry struct {
-	store      state.Store
-	status     func() agentcore.Status
-	apiListen  string
-	timeout    time.Duration
-	runCommand CommandRunner
+	store       state.Store
+	status      func() agentcore.Status
+	apiListen   string
+	timeout     time.Duration
+	runCommand  CommandRunner
+	commandOnly bool
+	dial        func(context.Context, string) (grpc.ClientConnInterface, io.Closer, error)
 }
 
 func NewTelemetry(options TelemetryOptions) (*Telemetry, error) {
+	if options.RunCommand != nil && options.Dial != nil {
+		return nil, errors.New("Xray telemetry command and wire overrides are mutually exclusive")
+	}
 	if options.Store == nil || options.Status == nil {
 		return nil, errors.New("state store and core status provider are required")
 	}
@@ -58,12 +66,17 @@ func NewTelemetry(options TelemetryOptions) (*Telemetry, error) {
 	if options.CommandTimeout <= 0 {
 		options.CommandTimeout = defaultTelemetryTimeout
 	}
+	commandOnly := options.RunCommand != nil
 	if options.RunCommand == nil {
 		options.RunCommand = runTelemetryCommand
+	}
+	if options.Dial == nil {
+		options.Dial = dialStats
 	}
 	return &Telemetry{
 		store: options.Store, status: options.Status, apiListen: apiListen,
 		timeout: options.CommandTimeout, runCommand: options.RunCommand,
+		commandOnly: commandOnly, dial: options.Dial,
 	}, nil
 }
 
@@ -98,19 +111,27 @@ func (t *Telemetry) Collect(ctx context.Context) (agentcore.Counters, error) {
 		return agentcore.Counters{}, err
 	}
 
-	timeoutSeconds := int((t.timeout + time.Second - 1) / time.Second)
-	if timeoutSeconds < 1 {
-		timeoutSeconds = 1
-	}
-	statsJSON, err := t.command(ctx, status.BinaryPath, "api", "statsquery",
-		"--server="+t.apiListen, "--timeout="+strconv.Itoa(timeoutSeconds))
-	if err != nil {
-		return agentcore.Counters{}, fmt.Errorf("query Xray counters: %w", err)
-	}
-	onlineJSON, err := t.command(ctx, status.BinaryPath, "api", "statsonlineiplist",
-		"--server="+t.apiListen, "--timeout="+strconv.Itoa(timeoutSeconds), "-all")
-	if err != nil {
-		return agentcore.Counters{}, fmt.Errorf("query Xray online IPs: %w", err)
+	var statsJSON, onlineJSON []byte
+	if !t.commandOnly && supportsStatsWire(status.Version) {
+		statsJSON, onlineJSON, err = t.queryWire(ctx)
+		if err != nil {
+			return agentcore.Counters{}, err
+		}
+	} else {
+		timeoutSeconds := int((t.timeout + time.Second - 1) / time.Second)
+		if timeoutSeconds < 1 {
+			timeoutSeconds = 1
+		}
+		statsJSON, err = t.command(ctx, status.BinaryPath, "api", "statsquery",
+			"--server="+t.apiListen, "--timeout="+strconv.Itoa(timeoutSeconds))
+		if err != nil {
+			return agentcore.Counters{}, fmt.Errorf("query Xray counters: %w", err)
+		}
+		onlineJSON, err = t.command(ctx, status.BinaryPath, "api", "statsonlineiplist",
+			"--server="+t.apiListen, "--timeout="+strconv.Itoa(timeoutSeconds), "-all")
+		if err != nil {
+			return agentcore.Counters{}, fmt.Errorf("query Xray online IPs: %w", err)
+		}
 	}
 	stats, err := decodeStats(statsJSON)
 	if err != nil {
@@ -119,6 +140,9 @@ func (t *Telemetry) Collect(ctx context.Context) (agentcore.Counters, error) {
 	online, err := decodeOnline(onlineJSON)
 	if err != nil {
 		return agentcore.Counters{}, err
+	}
+	if t.status() != status {
+		return agentcore.Counters{}, errors.New("running Xray process changed during telemetry")
 	}
 	identity := fmt.Sprintf("%s|%s|%s|%d|%d", status.Version, status.BinaryPath, status.ConfigDigest,
 		status.RestartCount, status.LastChangedAt.UnixNano())

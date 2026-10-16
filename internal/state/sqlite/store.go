@@ -31,6 +31,7 @@ const SupportedSchema = schemaVersion
 // while WAL still gives crash recovery and tooling-friendly reads.
 type Store struct {
 	db           *sql.DB
+	control      controlStatements
 	releaseState func() error
 	// Production uses crypto/rand.Reader. This per-store seam lets tests prove
 	// entropy failure cannot turn received into an executable running claim.
@@ -73,6 +74,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	store := &Store{db: db, releaseState: release}
 	if err := store.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := store.prepareControlStatements(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}

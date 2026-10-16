@@ -15,17 +15,11 @@ func (s *Store) Object(ctx context.Context, stream, key string) (protocol.Object
 	if err := validateStream(stream); err != nil {
 		return protocol.ObjectStatus{}, err
 	}
-	return readObject(s.db.QueryRowContext(ctx, `
-		SELECT stream, object_key, state, since_epoch, since_version,
-		       first_failed_at_ms, issue_code, blocked_on
-		FROM object_status WHERE stream = ? AND object_key = ?`, stream, key))
+	return readObject(s.control.object.QueryRowContext(ctx, stream, key))
 }
 
 func (s *Store) Objects(ctx context.Context) ([]protocol.ObjectStatus, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT stream, object_key, state, since_epoch, since_version,
-		       first_failed_at_ms, issue_code, blocked_on
-		FROM object_status ORDER BY stream, object_key`)
+	rows, err := s.control.objects.QueryContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list object status: %w", err)
 	}
@@ -49,19 +43,7 @@ func (s *Store) SaveObject(ctx context.Context, status protocol.ObjectStatus, up
 	if err := validateObject(status, updatedAtMS); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO object_status
-			(stream, object_key, state, since_epoch, since_version,
-			 first_failed_at_ms, issue_code, blocked_on, updated_at_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(stream, object_key) DO UPDATE SET
-			state = excluded.state,
-			since_epoch = excluded.since_epoch,
-			since_version = excluded.since_version,
-			first_failed_at_ms = excluded.first_failed_at_ms,
-			issue_code = excluded.issue_code,
-			blocked_on = excluded.blocked_on,
-			updated_at_ms = excluded.updated_at_ms`,
+	_, err := s.control.saveObject.ExecContext(ctx,
 		status.Stream, status.Key, status.State,
 		encodeUint64(status.SinceVersion.Epoch), encodeUint64(status.SinceVersion.Version),
 		status.FirstFailedAtMS, status.IssueCode, status.BlockedOn, updatedAtMS,
