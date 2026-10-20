@@ -57,7 +57,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		lastEnvelope protocol.Envelope
 		lastFull     time.Time
 		failures     int
-		forcePartial bool
 		delay        time.Duration
 	)
 	for {
@@ -73,20 +72,19 @@ func (r *Runner) Run(ctx context.Context) error {
 				if !timer.Stop() {
 					<-timer.C
 				}
-				forcePartial = !lastFull.IsZero()
 			case <-timer.C:
 			}
 		}
 
 		now := r.now()
-		partial := forcePartial && !lastFull.IsZero()
-		if !partial {
-			since := int(^uint(0) >> 1)
-			if !lastFull.IsZero() {
-				since = int(now.Sub(lastFull) / time.Second)
-			}
-			partial = !protocol.ShouldSendFull(lastEnvelope, since)
+		since := int(^uint(0) >> 1)
+		if !lastFull.IsZero() {
+			since = int(now.Sub(lastFull) / time.Second)
 		}
+		// Events shorten the wait, not the full-report cadence. A steady stream
+		// of immediate receipts must not starve due enumerations or override an
+		// explicit full-report request from the previous control envelope.
+		partial := !protocol.ShouldSendFull(lastEnvelope, since)
 		// The telemetry decision is made from the PREVIOUS envelope, which is the
 		// only one that has arrived. It rides on either report shape, so it is
 		// resolved separately from partial and passed alongside it.
@@ -99,7 +97,6 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.onError(err)
 			failures++
 			delay = failureBackoff(failures)
-			forcePartial = false
 			continue
 		}
 		failures = 0
@@ -107,8 +104,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		if result.ReportWasFull {
 			lastFull = now
 		}
-		forcePartial = result.ReportImmediately
-		if forcePartial {
+		if result.ReportImmediately {
 			delay = 0
 			continue
 		}
