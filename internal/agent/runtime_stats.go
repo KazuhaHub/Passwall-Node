@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
@@ -28,6 +29,7 @@ type RuntimeStats struct {
 	// rather than a value because the supervisor owns it and it changes without
 	// anything here being told.
 	coreRestarts func() uint64
+	coreStatus   func() agentcore.Status
 
 	lastSuccessAtMS int64
 	lastFailureAtMS int64
@@ -39,6 +41,14 @@ type RuntimeStats struct {
 	lastRoundTripMS   *uint64
 	lastRequestBytes  *uint64
 	lastResponseBytes *uint64
+}
+
+// NewRuntimeStatsWithCore supplies one coherent supervisor snapshot, including
+// optional failure counters that older agents cannot report.
+func NewRuntimeStatsWithCore(now func() time.Time, status func() agentcore.Status) *RuntimeStats {
+	stats := NewRuntimeStats(now, nil)
+	stats.coreStatus = status
+	return stats
 }
 
 func NewRuntimeStats(now func() time.Time, coreRestarts func() uint64) *RuntimeStats {
@@ -130,6 +140,15 @@ func (s *RuntimeStats) Observation() *protocol.RuntimeObservation {
 	}
 	if s.coreRestarts != nil {
 		observation.CoreRestartCount = s.coreRestarts()
+	}
+	if s.coreStatus != nil {
+		status := s.coreStatus()
+		observation.CoreRestartCount = status.RestartCount
+		exits := status.UnexpectedExitCount
+		observation.CoreUnexpectedExitCount = &exits
+		if !status.LastUnexpectedExitAt.IsZero() {
+			observation.LastCoreUnexpectedExitAtMS = status.LastUnexpectedExitAt.UnixMilli()
+		}
 	}
 	return observation
 }
