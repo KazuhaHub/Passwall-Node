@@ -43,14 +43,19 @@ const (
 )
 
 type Status struct {
-	State         ProcessState
-	Engine        string
-	Version       string
-	BinaryPath    string
-	ConfigDigest  string
-	RestartCount  uint64
-	LastError     string
-	LastChangedAt time.Time
+	State        ProcessState
+	Engine       string
+	Version      string
+	BinaryPath   string
+	ConfigDigest string
+	RestartCount uint64
+	// Unexpected exits are health evidence; RestartCount also includes normal
+	// configuration replacements and must remain available for traffic epochs.
+	UnexpectedExitCount  uint64
+	LastUnexpectedExitAt time.Time
+	LastUnexpectedExit   string
+	LastError            string
+	LastChangedAt        time.Time
 }
 
 // Deployment binds one compiled artifact to the exact immutable core binary

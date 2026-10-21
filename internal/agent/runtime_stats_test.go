@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
@@ -171,5 +172,23 @@ func TestSyncDoesNotCountAnAbortedRoundAsAFailure(t *testing.T) {
 	observation := stats.Observation()
 	if observation.SyncFailureCount != 0 {
 		t.Fatalf("an aborted round counted %d failures", observation.SyncFailureCount)
+	}
+}
+
+func TestRuntimeStatsSeparatesTotalStartsFromUnexpectedExits(t *testing.T) {
+	status := agentcore.Status{RestartCount: 12, UnexpectedExitCount: 0}
+	stats := NewRuntimeStatsWithCore(nil, func() agentcore.Status { return status })
+	report := stats.Observation()
+	if report.CoreRestartCount != 12 || report.CoreUnexpectedExitCount == nil || *report.CoreUnexpectedExitCount != 0 {
+		t.Fatalf("deployment history confused with failure: %+v", report)
+	}
+	status.UnexpectedExitCount = 1
+	status.LastUnexpectedExitAt = time.Unix(1789000000, 0)
+	report = stats.Observation()
+	if *report.CoreUnexpectedExitCount != 1 || report.LastCoreUnexpectedExitAtMS != 1789000000000 {
+		t.Fatalf("missing unexpected-exit evidence: %+v", report)
+	}
+	if NewRuntimeStats(nil, nil).Observation().CoreUnexpectedExitCount != nil {
+		t.Fatal("missing supervisor represented as zero")
 	}
 }

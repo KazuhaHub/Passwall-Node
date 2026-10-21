@@ -78,7 +78,7 @@ documented, versioned, with a deprecation cycle for breaking changes.
 
 ## Run the production daemon
 
-The build toolchain is pinned to `go1.26.9` in `go.mod` (`go 1.26.0` is the
+The build toolchain is pinned to `go1.26.10` in `go.mod` (`go 1.26.0` is the
 minimum language/toolchain requirement). CI selects that preferred toolchain
 without automatic switching and inspects all six release binaries. Source
 container builds use the same compiler; both container paths use Alpine

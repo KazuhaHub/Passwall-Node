@@ -42,9 +42,12 @@ type Options struct {
 	StopTimeout  time.Duration
 	// Events records core lifecycle transitions for a later diagnostic. NIL
 	// RECORDS NOTHING, which is what a build without one should do.
-	Events   nodeevent.Recorder
-	RetryMin time.Duration
-	RetryMax time.Duration
+	Events nodeevent.Recorder
+	// OnUnexpectedExit preserves the process exit detail in the local journal.
+	// LastError alone is transient and is cleared as soon as recovery succeeds.
+	OnUnexpectedExit func(error)
+	RetryMin         time.Duration
+	RetryMax         time.Duration
 	// RequireInitialConfigDigest makes restart fail closed: current.json is
 	// started only when its digest equals the last deployment durably confirmed
 	// by the runtime. A stale/tampered or crash-orphaned file is retained for
@@ -359,6 +362,9 @@ func (s *Supervisor) Run(ctx context.Context) (runErr error) {
 			current, currentEngine, currentBinary, currentVersion, child = s.handleApply(ctx, request, current, currentEngine, currentBinary, currentVersion, child, configPath)
 		case exitErr := <-child.done:
 			child = nil
+			if ctx.Err() == nil {
+				s.noteUnexpectedExit(exitErr)
+			}
 			// A core that died on its own never passes through stop(), so the
 			// handle is dropped here. Without this the supervisor would keep
 			// naming a process the kernel is free to recycle.
@@ -506,6 +512,9 @@ func (s *Supervisor) start(runCtx, waitCtx context.Context, engine, binary, conf
 	defer timer.Stop()
 	select {
 	case err := <-child.done:
+		if waitCtx.Err() == nil && runCtx.Err() == nil {
+			s.noteUnexpectedExit(err)
+		}
 		return nil, errors.New("exited during startup: " + processExitDetail(err))
 	case <-waitCtx.Done():
 		_ = s.stop(child)
@@ -625,6 +634,20 @@ func (s *Supervisor) noteStart() {
 	s.mu.Unlock()
 }
 
+// Only an exit observed while we expected the child to remain alive counts.
+// stop() consumes deliberate exits itself, including deployments and rollback.
+func (s *Supervisor) noteUnexpectedExit(err error) {
+	detail := processExitDetail(err)
+	s.mu.Lock()
+	s.status.UnexpectedExitCount++
+	s.status.LastUnexpectedExitAt = s.options.Now().UTC()
+	s.status.LastUnexpectedExit = detail
+	s.mu.Unlock()
+	if s.options.OnUnexpectedExit != nil {
+		s.options.OnUnexpectedExit(errors.New(detail))
+	}
+}
+
 func (s *Supervisor) updateStatus(update func(*agentcore.Status)) {
 	s.mu.Lock()
 	previous := s.status.State
@@ -652,7 +675,7 @@ func (s *Supervisor) recordStateChange(previous, next agentcore.ProcessState, re
 		// that difference: a core that came back is not a core that started.
 		if restarts > 0 {
 			nodeevent.Record(s.options.Events, protocol.DiagnosticsEventCoreRestarted,
-				protocol.DiagnosticsSeverityWarning, fmt.Sprintf("core restarted, %d restarts", restarts))
+				protocol.DiagnosticsSeverityInfo, fmt.Sprintf("core started again, %d total restarts (including deployments)", restarts))
 			return
 		}
 		nodeevent.Record(s.options.Events, protocol.DiagnosticsEventCoreStarted, protocol.DiagnosticsSeverityInfo, "core started")

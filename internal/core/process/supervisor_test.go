@@ -411,3 +411,47 @@ func mustAbs(t *testing.T, path string) string {
 	}
 	return absolute
 }
+
+func TestUnexpectedExitSurvivesRecoveryButDeploymentsDoNotCount(t *testing.T) {
+	supervisor, cancel, done := startTestSupervisor(t)
+	defer shutdownSupervisor(t, cancel, done)
+	if err := supervisor.Apply(t.Context(), testArtifact("good-one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.Apply(t.Context(), testArtifact("good-two")); err != nil {
+		t.Fatal(err)
+	}
+	if supervisor.Status().UnexpectedExitCount != 0 {
+		t.Fatal("deployment counted as unexpected exit")
+	}
+	handle, ok := supervisor.ProcessHandle()
+	if !ok {
+		t.Fatal("missing process handle")
+	}
+	child, err := os.FindProcess(handle.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(testProcessTimeout)
+	for time.Now().Before(deadline) {
+		status := supervisor.Status()
+		next, running := supervisor.ProcessHandle()
+		if status.UnexpectedExitCount == 1 && status.State == agentcore.ProcessRunning && running && next.PID != handle.PID {
+			if status.LastUnexpectedExitAt.IsZero() || status.LastUnexpectedExit == "" {
+				t.Fatal("recovery erased exit evidence")
+			}
+			if err := supervisor.Apply(t.Context(), testArtifact("good-three")); err != nil {
+				t.Fatal(err)
+			}
+			if supervisor.Status().UnexpectedExitCount != 1 {
+				t.Fatal("subsequent deployment counted as failure")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("failed to observe unexpected exit and recovery: %+v", supervisor.Status())
+}

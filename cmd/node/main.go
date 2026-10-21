@@ -186,6 +186,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Commands: coreCommand,
 		Stdout:   stdout, Stderr: stderr,
 		Events:                     eventRing,
+		OnUnexpectedExit:           func(err error) { logger.Warnf("core exited unexpectedly: %v", err) },
 		RequireInitialConfigDigest: true,
 		InitialConfigDigest:        initial.ConfigDigest,
 	})
@@ -288,8 +289,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	restarts := func() uint64 { return supervisor.Status().RestartCount }
-	runtimeStats := agent.NewRuntimeStats(now, restarts)
+	runtimeStats := agent.NewRuntimeStatsWithCore(now, supervisor.Status)
 	syncer, err := agent.NewHTTPSyncer(parsed.Endpoint, agent.HTTPOptions{
 		Signer: signer, AllowInsecureHTTP: parsed.AllowInsecureHTTP,
 		UserAgent: "passwall-node/" + buildversion.String(),
