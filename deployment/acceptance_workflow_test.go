@@ -43,7 +43,7 @@ func TestTheAcceptancesRunAfterEveryRelease(t *testing.T) {
 			}
 			// A FAILED RELEASE PUBLISHED NOTHING WHOLE, and only a tag push is a
 			// release whose head_branch is its tag. The one job carries the gate.
-			gate := "    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')\n"
+			gate := "    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') && startsWith(github.event.workflow_run.head_branch, 'v'))\n"
 			if strings.Count(text, gate) != 1 || strings.Count(text, "\n    if: ") != 1 {
 				t.Fatalf("%s's job is not gated on a successful Release from a tag push", name)
 			}

@@ -70,3 +70,16 @@ func TestDockerImageTagAcceptsProductVersions(t *testing.T) {
 		}
 	}
 }
+
+func TestUpgradeAcrossTheVersionFormatMigration(t *testing.T) {
+	for _, payload := range []string{
+		`{"version":"4.0.2","expected_version":"4.0.1.11"}`,
+		`{"version":"4.1.0-beta.1","expected_version":"4.0.2"}`,
+		`{"version":"4.1.0-beta.10","expected_version":"4.1.0-beta.2"}`,
+		`{"version":"4.1.0","expected_version":"4.1.0-rc.1"}`,
+	} {
+		if _, err := ParseArgs(upgradeTask(payload)); err != nil {
+			t.Errorf("%s: %v", payload, err)
+		}
+	}
+}

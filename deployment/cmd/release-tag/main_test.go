@@ -33,9 +33,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func run(t *testing.T, tag string) (int, string, string) {
+func run(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
-	cmd := exec.Command(releaseTagBinary, tag)
+	cmd := exec.Command(releaseTagBinary, args...)
 	var stderr, stdout bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = &stdout
@@ -45,7 +45,7 @@ func run(t *testing.T, tag string) (int, string, string) {
 	}
 	var exit *exec.ExitError
 	if !asExitError(err, &exit) {
-		t.Fatalf("running release-tag %q: %v", tag, err)
+		t.Fatalf("running release-tag %q: %v", args, err)
 	}
 	return exit.ExitCode(), stdout.String(), stderr.String()
 }
@@ -169,5 +169,20 @@ func TestNoArgumentIsRefused(t *testing.T) {
 	cmd := exec.Command(releaseTagBinary)
 	if err := cmd.Run(); err == nil {
 		t.Fatal("release-tag with no argument was accepted")
+	}
+}
+
+func TestPublisherReadsHistoryButDoesNotPublishFourSegments(t *testing.T) {
+	for _, tag := range []string{"v4.1.0-beta.1", "v4.1.0-rc.10", "v4.1.0"} {
+		code, out, err := run(t, "--publish", tag)
+		if code != 0 || out != tag[1:]+"\n" {
+			t.Errorf("%s: %s %s", tag, out, err)
+		}
+	}
+	for _, tag := range []string{"v4.0.1.22", "release/4.0.1.2", "v4.1.0-beta.01"} {
+		code, out, _ := run(t, "--publish", tag)
+		if code == 0 || out != "" {
+			t.Errorf("published historical/malformed tag %s: %s", tag, out)
+		}
 	}
 }

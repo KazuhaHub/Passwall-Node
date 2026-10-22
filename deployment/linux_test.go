@@ -42,7 +42,7 @@ func TestRenderLinuxValidation(t *testing.T) {
 		{"legacy-tag", func(o *Options) { o.Version = "v1.2.3" }},
 		{"legacy-prerelease", func(o *Options) { o.Version = "v0.0.1-beta11" }},
 		{"leading-zero", func(o *Options) { o.Version = "01.2.3" }},
-		{"prerelease", func(o *Options) { o.Version = "4.1.0-rc.1" }},
+		{"prerelease", func(o *Options) { o.Version = "4.1.0-rc.01" }},
 		{"build-metadata", func(o *Options) { o.Version = "4.1.0+build" }},
 		{"version-injection", func(o *Options) { o.Version = "4.1.0;touch /tmp/bad" }},
 		{"short-form", func(o *Options) { o.Version = "4.1" }},

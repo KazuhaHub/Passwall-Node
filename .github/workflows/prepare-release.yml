@@ -1,0 +1,64 @@
+name: Prepare release
+on:
+  workflow_dispatch:
+    inputs:
+      line:
+        description: "Release line (MAJOR.MINOR); numbering migrates on 4.1"
+        required: true
+        default: "4.1"
+        type: string
+      stage:
+        description: "Candidate stage"
+        default: beta
+        type: choice
+        options: [beta, rc]
+      target:
+        description: "Optional feature target, for example 4.1.0"
+        required: false
+        type: string
+permissions:
+  contents: write
+  actions: write
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: "local"
+concurrency:
+  group: prepare-passwall-node
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify exact preferred compiler
+        run: |
+          set -eu
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      - name: Require tested main and allocate candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINE: ${{ inputs.line }}
+          PN_RELEASE_STAGE: ${{ inputs.stage }}
+          PN_RELEASE_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow test.yml --branch main --commit "$GITHUB_SHA" --limit 1 --json conclusion --jq '.[0].conclusion')
+          test "$passed" = success || { echo 'main has not passed Test' >&2; exit 1; }
+          tag=$(sh deployment/allocate-release-tag.sh "$LINE")
+          # A GITHUB_TOKEN-created tag does not trigger a push workflow. Dispatch
+          # explicitly on that immutable ref so publication uses the same source.
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag" -f tag="$tag" -f channel=testing

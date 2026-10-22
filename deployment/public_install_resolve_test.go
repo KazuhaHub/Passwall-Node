@@ -136,6 +136,11 @@ func TestResolveReleaseSelectsTheCanonicalArchive(t *testing.T) {
 		wantAsset string
 	}{
 		{
+			name: "numbered prerelease", tag: "v4.1.0-beta.10", arch: "amd64",
+			assets:  []string{"passwall-node_4.1.0-beta.10_linux_amd64.tar.gz", "SHA256SUMS.txt"},
+			wantVer: "4.1.0-beta.10", wantAsset: "passwall-node_4.1.0-beta.10_linux_amd64.tar.gz",
+		},
+		{
 			name: "legacy tag, whose version is the tag",
 			tag:  "v0.0.1-beta12", arch: "amd64",
 			assets:    []string{"passwall-node_v0.0.1-beta12_linux_amd64.tar.gz", "passwall-node_v0.0.1-beta12_linux_arm64.tar.gz", "SHA256SUMS.txt"},

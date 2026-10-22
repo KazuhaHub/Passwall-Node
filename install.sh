@@ -12,17 +12,17 @@ setup_mode=configure
 channel_override=
 usage() {
     cat <<'USAGE'
-Usage: install.sh [--channel stable|beta] [--install-only] [--offline]
+Usage: install.sh [--channel stable|testing|beta] [--install-only] [--offline]
 
   (no arguments)   Install the newest stable release and open PSP setup.
-  --channel VALUE  Select stable or beta without a channel prompt.
+  --channel VALUE  Select stable or testing (beta is an alias) without a channel prompt.
   --install-only   Install the service and pn command without configuring PSP.
   --offline        Install the binary beside this script; use from an extracted
                    official Linux release archive without contacting GitHub.
 
 Examples:
   curl .../install.sh | sudo sh
-  curl .../install.sh | sudo sh -s -- --channel beta
+  curl .../install.sh | sudo sh -s -- --channel testing
   curl .../install.sh | sudo sh -s -- --install-only
   sudo ./install.sh --offline
   sudo ./install.sh --offline --install-only
@@ -43,7 +43,7 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-case "$channel_override" in ''|stable|beta) ;; *) printf 'Invalid channel: %s\n' "$channel_override" >&2; usage >&2; exit 2 ;; esac
+case "$channel_override" in ''|stable|testing|beta) ;; *) printf 'Invalid channel: %s\n' "$channel_override" >&2; usage >&2; exit 2 ;; esac
 if [ "$source_mode" = offline ] && [ -n "$channel_override" ]; then
     printf '%s\n' '--channel cannot be combined with --offline' >&2
     usage >&2
@@ -216,7 +216,7 @@ resolve_release() {
             # silently never matched, so the version came out with the file suffix
             # still attached and the installer refused a release that was fine.
             legacy  = "^passwall-node_v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?_linux_" arch "\\.tar\\.gz$"
-            product = "^passwall-node_(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(\\.(0|[1-9][0-9]*))?_linux_" arch "\\.tar\\.gz$"
+            product = "^passwall-node_(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(\\.(0|[1-9][0-9]*)|-(beta|rc)\\.[1-9][0-9]*)?_linux_" arch "\\.tar\\.gz$"
             if (name ~ legacy || name ~ product) {
                 version = name
                 sub(/^passwall-node_/, "", version)
@@ -263,8 +263,8 @@ else
     # other release's assets in the document to be mixed up with it.
     case "$channel" in
         stable) releases_url=https://api.github.com/repos/KazuhaHub/Passwall-Node/releases/latest ;;
-        beta) releases_url='https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=20' ;;
-        *) fail 'PN_CHANNEL must be stable or beta' ;;
+        testing|beta) releases_url='https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=20' ;;
+        *) fail 'PN_CHANNEL must be stable or testing (beta is a compatibility alias)' ;;
     esac
     curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
         --connect-timeout 15 --max-time 60 --max-filesize 1048576 --output "$stage/releases.json" "$releases_url" || \
@@ -279,14 +279,18 @@ fi
 #
 # THE FOURTH SEGMENT IS WHAT EVERY RELEASE SINCE 4.0.1.1 CARRIES, and this check
 # used to stop at three. The asset-name match above admitted 4.0.1.5 and this line
-# then refused it as non-canonical, so `--channel beta` and `--offline` refused
+# then refused it as non-canonical, so `--channel testing` and `--offline` refused
 # every release published since the fourth segment was first allocated. The
 # fourth is never zero: releaseid refuses 4.0.1.0 as another spelling of 4.0.1,
 # and public_install_test.go holds this check to releaseid's shared vectors.
 case "$version" in *[!0-9A-Za-z._-]*) fail "the selected release source returned an unsafe version: $version" ;; esac
 printf '%s\n' "$version" | awk '
     /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/ { ok = 1 }
-    /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.[1-9][0-9]*)?$/ { ok = 1 }
+    /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.[1-9][0-9]*|-(beta|rc)\.[1-9][0-9]*)?$/ {
+        ok = 1
+        count = split($0, fields, /[.-]/)
+        for (i = 1; i <= count; i++) if (fields[i] ~ /^[0-9]+$/ && fields[i]+0 > 2147483647) ok = 0
+    }
     END { exit !ok }' || \
     fail "the selected release source returned a non-canonical version: $version"
 

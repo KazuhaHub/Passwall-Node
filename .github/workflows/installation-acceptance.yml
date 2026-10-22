@@ -44,7 +44,7 @@ jobs:
   installation:
     name: systemd ${{ matrix.runner }}
     # See container-acceptance.yml: head_branch is the tag of a tag push.
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') && startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:

@@ -45,6 +45,8 @@ while [ "$attempt" -lt "$max_attempts" ]; do
   # one decision and splitting it would be a second place knowing the rule.
   tag=$(go run ./deployment/cmd/allocate-release-tag \
     -line "$line" \
+    -stage "${PN_RELEASE_STAGE-beta}" \
+    -target "${PN_RELEASE_TARGET:-}" \
     -existing "$(all_tags)" \
     -on-commit "$(tags_on_this_commit)")
 
