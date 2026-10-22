@@ -297,11 +297,11 @@ func TestTheFlipStatesStableAndLatestOnEveryRun(t *testing.T) {
 		{"false", "api -X PATCH repos/" + promotionRepository + "/releases/42 -f make_latest=true"},
 	} {
 		stub := newPromotionStub(t)
-		out, err := stub.run(t, script, t.TempDir(), nil, "RELEASE_ID=42", "ALREADY="+tc.already)
+		out, err := stub.run(t, script, t.TempDir(), nil, "RELEASE_ID=42", "ALREADY="+tc.already, "TAG=v4.1.0")
 		if err != nil {
 			t.Fatalf("prerelease=%s: %v\n%s", tc.already, err, out)
 		}
-		if asked := stub.asked(t, "gh"); len(asked) != 1 || asked[0] != tc.want {
+		if asked := stub.asked(t, "gh"); len(asked) != 1 || asked[0] != tc.want+" -f name=Passwall Node v4.1.0 · Stable" {
 			t.Fatalf("prerelease=%s: gh was asked %q, want %q", tc.already, asked, tc.want)
 		}
 	}
@@ -326,7 +326,7 @@ func TestThePromotionReadsBackWhatUsersNowGet(t *testing.T) {
 		{"a cached answer turns over", "v4.0.1.5", tag, digest, "", 2},
 		{"another release is latest", "v4.0.1.5", "", digest, "/releases/latest names v4.0.1.5, not " + tag, 5},
 		{"no release is latest", "", "", digest, "HTTP 404", 5},
-		{"the image pointer names other bytes", tag, "", "sha256:2222222222222222222222222222222222222222222222222222222222222222", "is sha256:2222", 1},
+		{"the image pointer names other bytes", tag, "", "sha256:2222222222222222222222222222222222222222222222222222222222222222", "stable alias has the wrong digest", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := newPromotionStub(t)
@@ -348,7 +348,7 @@ func TestThePromotionReadsBackWhatUsersNowGet(t *testing.T) {
 				if err != nil {
 					t.Fatalf("a completed promotion was refused: %v\n%s", err, out)
 				}
-				if asked := stub.asked(t, "docker"); len(asked) != 1 || !strings.Contains(asked[0], "ghcr.io/kazuhahub/passwall-node:latest") {
+				if asked := stub.asked(t, "docker"); len(asked) != 2 || !strings.Contains(asked[0], "ghcr.io/kazuhahub/passwall-node:stable") || !strings.Contains(asked[1], "ghcr.io/kazuhahub/passwall-node:latest") {
 					t.Fatalf("the image pointer read back was %q", asked)
 				}
 				return
@@ -446,5 +446,22 @@ func TestAReleaseIsPromotedOnlyAfterBothAcceptancesPassed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPromotionRefusesCandidateIdentityBeforeGitHubChanges(t *testing.T) {
+	script := promotionStep(t, "Resolve the release and the version it is stamped with")
+	for _, version := range []string{"4.1.0-beta.1", "4.1.0-rc.1"} {
+		stub := newPromotionStub(t)
+		if err := os.WriteFile(filepath.Join(stub.bin, "go"), []byte("#!/bin/sh\nprintf '%s\\n' \"$STUB_VERSION\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := stub.run(t, script, t.TempDir(), nil, "REQUESTED_TAG=v"+version, "STUB_VERSION="+version)
+		if err == nil || !strings.Contains(out, "cannot become stable") {
+			t.Fatalf("%s: %v %s", version, err, out)
+		}
+		if asked := stub.asked(t, "gh"); len(asked) != 0 {
+			t.Fatalf("candidate reached GitHub before refusal: %v", asked)
+		}
 	}
 }

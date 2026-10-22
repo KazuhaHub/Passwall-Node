@@ -97,6 +97,8 @@ type Version struct {
 	// would be two spellings of one version, and the whole point of a release
 	// identity is that one string names one release.
 	Build int64
+	// Prerelease is beta.N or rc.N. Historical fourth segments never carry it.
+	Prerelease string
 }
 
 // String renders the version as published: three segments, or four when a build
@@ -106,25 +108,26 @@ func (v Version) String() string {
 	if v.Build > 0 {
 		return fmt.Sprintf("%d.%d.%d.%d", v.Major, v.Minor, v.Patch, v.Build)
 	}
-	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+	base := fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+	if v.Prerelease != "" {
+		return base + "-" + v.Prerelease
+	}
+	return base
 }
 
-// ParseProductVersion parses a product version.
-//
-// One to FOUR segments, each a run of ASCII digits, missing trailing segments
-// padded with zero: "102", "102.0" and "102.0.0" are the same version, and
-// "102.0.0.1" is a fourth segment beyond them. A FIFTH is rejected rather than
-// truncated — silently dropping a segment would accept an input from a format this
-// build does not understand — and so is a literal zero fourth: see Version.Build
-// for why. Leading zeros, signs, whitespace, non-ASCII digits and scientific
-// notation are all rejected for the same reason: the caller's input is what it is,
-// and guessing at a malformed version is how two sides end up agreeing on a
-// version neither was given.
+// ParseProductVersion accepts current three-segment versions with optional beta.N or rc.N, plus historical numeric shorthand and fourth segments. Prereleases require exactly three base segments. All numeric components are bounded and canonical.
 func ParseProductVersion(s string) (Version, error) {
 	if s == "" {
 		return Version{}, fmt.Errorf("%w: empty", ErrUnknownFormat)
 	}
-	parts := strings.Split(s, ".")
+	base, pre, hasPre := strings.Cut(s, "-")
+	if hasPre && !validPrerelease(pre) {
+		return Version{}, fmt.Errorf("%w: invalid prerelease %q", ErrUnknownFormat, s)
+	}
+	parts := strings.Split(base, ".")
+	if hasPre && len(parts) != 3 {
+		return Version{}, fmt.Errorf("%w: prereleases require three segments", ErrUnknownFormat)
+	}
 	if len(parts) > 4 {
 		return Version{}, fmt.Errorf("%w: %q has %d segments, the format has at most four", ErrUnknownFormat, s, len(parts))
 	}
@@ -140,7 +143,18 @@ func ParseProductVersion(s string) (Version, error) {
 		return Version{}, fmt.Errorf("%w: %q has a zero fourth segment, which is another way to write %d.%d.%d",
 			ErrUnknownFormat, s, out[0], out[1], out[2])
 	}
-	return Version{Major: out[0], Minor: out[1], Patch: out[2], Build: out[3]}, nil
+	return Version{Major: out[0], Minor: out[1], Patch: out[2], Build: out[3], Prerelease: pre}, nil
+}
+
+// Only dotted, numbered beta and rc stages are published. Restricting this
+// grammar keeps shell, browser and Go consumers on the same ordering rule.
+func validPrerelease(pre string) bool {
+	stage, number, ok := strings.Cut(pre, ".")
+	if !ok || (stage != "beta" && stage != "rc") {
+		return false
+	}
+	n, err := parseSegment(number, pre)
+	return err == nil && n > 0
 }
 
 func parseSegment(part, whole string) (int64, error) {
@@ -162,18 +176,7 @@ func parseSegment(part, whole string) (int64, error) {
 	return n, nil
 }
 
-// CompareProductVersion orders two product versions, -1 / 0 / +1.
-//
-// Segment by segment, as integers: 102.1.10 is above 102.1.9, which any string
-// comparison gets backwards.
-//
-// THE BUILD SEGMENT IS PART OF THE ORDER, AND IT WAS NOT. This compared the first
-// three segments and returned zero, so `4.0.0` and `4.0.0.1` were EQUAL here
-// while the panel's mirror of this rule ranked the rebuild above its base — two
-// implementations of one rule, disagreeing about a pair the fourth segment exists
-// to distinguish. It matters in exactly one place, and it is the place that
-// matters most: the node refuses an upgrade whose target does not compare above
-// its current version, so a rebuild could never be installed.
+// CompareProductVersion orders numeric segments, then beta.N < rc.N < stable. Counters are compared numerically. Historical fourth segments sort above their base and below the next patch.
 func CompareProductVersion(a, b Version) int {
 	for _, pair := range [][2]int64{{a.Major, b.Major}, {a.Minor, b.Minor}, {a.Patch, b.Patch}, {a.Build, b.Build}} {
 		if pair[0] != pair[1] {
@@ -183,7 +186,26 @@ func CompareProductVersion(a, b Version) int {
 			return 1
 		}
 	}
-	return 0
+	if a.Prerelease == b.Prerelease {
+		return 0
+	}
+	if a.Prerelease == "" {
+		return 1
+	}
+	if b.Prerelease == "" {
+		return -1
+	}
+	as, an, _ := strings.Cut(a.Prerelease, ".")
+	bs, bn, _ := strings.Cut(b.Prerelease, ".")
+	if as != bs {
+		return strings.Compare(as, bs)
+	}
+	ai, _ := strconv.ParseInt(an, 10, 64)
+	bi, _ := strconv.ParseInt(bn, 10, 64)
+	if ai < bi {
+		return -1
+	}
+	return 1
 }
 
 // Tag is a parsed release tag, with the scheme it belongs to.
@@ -197,25 +219,13 @@ type Tag struct {
 	Product Version
 }
 
-// ValidVersion is the version rule: what a binary may be stamped with, and what a
-// caller may ask for.
-//
-// Anything that is not a product version — a tag, a channel name, a version with
-// build metadata, a v-prefixed historical string — is refused rather than
-// repaired.
-//
-// THREE OR FOUR SEGMENTS, NEVER FEWER. ParseProductVersion pads the short forms,
-// because comparing "4" and "4.0.0" is a thing callers legitimately do; a VERSION
-// is what a release is stamped with and what a download is addressed by, and those
-// are never shorthand — accepting "4.0" here would let a caller ask for a release
-// that does not exist under that name. The fourth segment is the optional BUILD
-// component, and a literal zero in it is refused by the parser beside this.
+// ValidVersion accepts exact release identities, without a tag prefix, build metadata, or numeric shorthand. Historical fourth segments remain valid for reading and upgrades.
 func ValidVersion(value string) bool {
-	if dots := strings.Count(value, "."); dots != 2 && dots != 3 {
+	if dots := strings.Count(strings.SplitN(value, "-", 2)[0], "."); dots != 2 && dots != 3 {
 		return false
 	}
 	parsed, err := ParseProductVersion(value)
-	return err == nil && parsed.Major != 0
+	return err == nil && parsed.Major != 0 && parsed.String() == value
 }
 
 // TagForVersion is the inverse of VersionString: the tag a release stamped with
@@ -279,29 +289,14 @@ func (t Tag) VersionString() string {
 	return t.Product.String()
 }
 
-// ParseReleaseTag parses a release tag.
-//
-// "vMAJOR.MINOR.PATCH[.BUILD]" is the form, and the version part must be three or
-// four segments either way: a tag is a published identity, so the short forms that
-// are legal as parse input do not get releases of their own.
-//
-// BOTH NAMESPACES ARE READ. The four releases published under `release/` are on
-// GitHub permanently and the panel still offers them, so a reader that accepted
-// only the current one would drop them — silently, since an unreadable tag is
-// skipped wherever this is used to build a registry. The two cannot be confused
-// for one another: neither is a prefix of the other.
-//
-// A v INSIDE THE HISTORICAL NAMESPACE (release/v4.0.0) is refused: the version
-// after that namespace is bare, and the v IS the other namespace — a string read
-// as a tag by one rule and a version by another differs about which release it
-// names.
+// ParseReleaseTag reads v-prefixed current identities and historical release/ addresses. It never changes the published spelling of a tag.
 func ParseReleaseTag(raw string) (Tag, error) {
 	body, found := tagBody(raw)
 	if !found {
 		return Tag{}, fmt.Errorf("%w: %q is neither a %sMAJOR.MINOR.PATCH nor a %sMAJOR.MINOR.PATCH tag",
 			ErrUnknownFormat, raw, TagPrefix, HistoricalTagPrefix)
 	}
-	if dots := strings.Count(body, "."); dots != 2 && dots != 3 {
+	if dots := strings.Count(strings.SplitN(body, "-", 2)[0], "."); dots != 2 && dots != 3 {
 		return Tag{}, fmt.Errorf("%w: %q is a product tag, which is three or four segments", ErrUnknownFormat, raw)
 	}
 	v, err := ParseProductVersion(body)
@@ -333,15 +328,7 @@ const (
 	ChannelTesting Channel = "testing"
 )
 
-// ResolveChannel reads the channel from GitHub's release metadata.
-//
-// From the METADATA, never from the tag text. Whether a tag contains a hyphen
-// says nothing about whether its release is a testing candidate — a product
-// version has no hyphen at all, so a rule that read one would classify every
-// numeric release the same way regardless of what the maintainer published. A
-// draft is not published and therefore has no channel, which is why it is an
-// error rather than a default: defaulting to stable is how an unreleased build
-// becomes an upgrade target.
+// ResolveChannel reads publication state from GitHub metadata. A draft has no public channel. Callers must also keep beta/rc suffixes out of stable catalogs, even if metadata is inconsistent.
 func ResolveChannel(draft, prerelease bool) (Channel, error) {
 	if draft {
 		return "", fmt.Errorf("%w: a draft release is not published and has no channel", ErrNotTagged)

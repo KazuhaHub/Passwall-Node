@@ -138,6 +138,7 @@ jobs:
           # stdout when it does, so a failure here cannot leave `version` empty
           # and be carried into a filename.
           version=$(go run ./deployment/cmd/release-tag "$tag")
+          go run ./deployment/cmd/release-tag --publish "$tag" >/dev/null
           # Belt and braces: the command already refuses rather than printing
           # nothing, but an empty version reaching ldflags or a filename is a
           # silently wrong artifact rather than a failure.
@@ -511,7 +512,7 @@ jobs:
         with:
           tag_name: ${{ needs.setup.outputs.tag }}
           target_commitish: ${{ needs.setup.outputs.sha }}
-          name: ${{ needs.setup.outputs.tag }}
+          name: Passwall Node ${{ needs.setup.outputs.tag }} · ${{ contains(needs.setup.outputs.version, '-') && 'Testing' || 'Awaiting promotion' }}
           # Resolved once in setup, where the reason for each answer is written
           # down; both this job and the image job read that one answer.
           prerelease: ${{ needs.setup.outputs.prerelease }}
@@ -588,6 +589,7 @@ jobs:
             # for, so the pointer would not have moved; it reads the answer setup
             # resolved. `latest` is not here: every release is published as a
             # pre-release, and promote.yml moves `latest` to a digest it verified.
+            type=raw,value=testing,enable=${{ needs.setup.outputs.image_channel == 'true' }}
             type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}
           # THESE LABELS ARE WHAT THE PUBLISHED IMAGE CARRIES; build-push-action
           # applies them over the Dockerfile's. The updater handover label is a

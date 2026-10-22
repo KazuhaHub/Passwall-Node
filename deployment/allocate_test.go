@@ -103,7 +103,7 @@ func (r *releaseRepo) allocateCmd(t *testing.T, line string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("sh", "deployment/allocate-release-tag.sh", line, "origin")
 	cmd.Dir = moduleRoot(t)
-	cmd.Env = r.env
+	cmd.Env = append(r.env, "PN_RELEASE_STAGE=")
 	return cmd
 }
 
@@ -438,5 +438,28 @@ func TestARerunOfAReleaseBindsNoSecondTag(t *testing.T) {
 	listed := gitIn(t, repo.work, "ls-remote", "--tags", "--refs", "origin")
 	if count := strings.Count(listed, "refs/tags/"); count != 1 {
 		t.Fatalf("the rerun left %d tags, want the one already bound:\n%s", count, listed)
+	}
+}
+
+func TestCurrentShellAllocatesAndResumesNumberedCandidates(t *testing.T) {
+	repo := newReleaseRepo(t)
+	allocate := func() string {
+		cmd := repo.allocateCmd(t, "4.1")
+		cmd.Env = append(cmd.Env, "PN_RELEASE_STAGE=beta")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got := allocate(); got != "v4.1.0-beta.1" {
+		t.Fatal(got)
+	}
+	if got := allocate(); got != "v4.1.0-beta.1" {
+		t.Fatal(got)
+	}
+	repo.commit(t, "next")
+	if got := allocate(); got != "v4.1.0-beta.2" {
+		t.Fatal(got)
 	}
 }

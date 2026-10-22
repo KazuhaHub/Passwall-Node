@@ -40,6 +40,7 @@ concurrency:
 
 jobs:
   promote:
+    if: github.ref == 'refs/heads/main'
     name: Promote to stable
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -54,6 +55,8 @@ jobs:
     environment: release-promotion
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-go@v6
         env:
           GOTOOLCHAIN: auto
@@ -81,6 +84,9 @@ jobs:
           # that is not a release tag, before the tag reaches a ref or a URL below.
           version=$(go run ./deployment/cmd/release-tag "$tag")
           test -n "$version" || { echo 'the tag produced no version' >&2; exit 1; }
+          case "$version" in
+            *-*) echo 'a beta/rc identity cannot become stable; publish the plain three-segment version from the same tested source, then promote that release' >&2; exit 1 ;;
+          esac
 
           # THE RELEASE MUST EXIST AND MUST NOT BE A DRAFT. Promoting one that never
           # went out is not a promotion, and doing it silently would report success
@@ -217,6 +223,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.identity.outputs.release_id }}
           ALREADY: ${{ steps.identity.outputs.prerelease }}
+          TAG: ${{ steps.identity.outputs.tag }}
         run: |
           set -euo pipefail
           # STABLE IS NOT THE SAME AS LATEST. /releases/latest is what the public
@@ -230,7 +237,7 @@ jobs:
           else
             fields+=(-F prerelease=false)
           fi
-          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" "${fields[@]}" >/dev/null
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" "${fields[@]}" -f "name=Passwall Node ${TAG} · Stable" >/dev/null
 
       - name: Move the latest image pointer to the verified digest
         shell: bash
@@ -246,7 +253,7 @@ jobs:
           # the exact digest is the same bytes; a rebuild would be different bytes
           # under the same name, which is the one thing a promotion must not do.
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker buildx imagetools create -t "${repository}:latest" "${repository}@${DIGEST}"
+          docker buildx imagetools create -t "${repository}:stable" -t "${repository}:latest" "${repository}@${DIGEST}"
           # `beta` is not touched: it tracks the newest of ANY kind, which the
           # publication already set and a promotion does not change.
           echo "promoted ${VERSION} (${DIGEST}) to latest"
@@ -283,6 +290,8 @@ jobs:
             echo "/releases/latest names ${latest:-nothing}, not ${TAG}" >&2
             exit 1
           fi
+          stable_digest=$(docker buildx imagetools inspect "${repository}:stable" --format '{{json .Manifest}}' | jq -r .digest)
+          test "$stable_digest" = "$DIGEST" || { echo 'stable alias has the wrong digest' >&2; exit 1; }
           moved=$(docker buildx imagetools inspect "${repository}:latest" --format '{{json .Manifest}}' | jq -r .digest)
           if [ "$moved" != "$DIGEST" ]; then
             echo "${repository}:latest is ${moved:-unreadable}, not the verified ${DIGEST}" >&2

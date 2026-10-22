@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/KazuhaHub/passwall-node/v4/releaseid"
 )
@@ -29,14 +30,24 @@ import (
 // A refusal prints nothing on stdout, so a caller that ignores the exit status
 // still cannot build with an empty or invented version.
 func main() {
-	if len(os.Args) != 2 {
+	args := os.Args[1:]
+	publish := len(args) == 2 && args[0] == "--publish"
+	if publish {
+		args = args[1:]
+	}
+	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "release requires an explicit tag: release/MAJOR.MINOR.PATCH or a legacy vMAJOR.MINOR.PATCH[-prerelease]")
 		os.Exit(1)
 	}
-	tag, err := releaseid.ParseReleaseTag(os.Args[1])
+	tag, err := releaseid.ParseReleaseTag(args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "not a publishable release tag: %v\n", err)
 		os.Exit(1)
 	}
+	if publish && (strings.HasPrefix(args[0], "release/") || len(strings.Split(strings.SplitN(tag.VersionString(), "-", 2)[0], ".")) != 3) {
+		fmt.Fprintln(os.Stderr, "new releases require three segments, optionally followed by -beta.N or -rc.N; historical tags remain readable")
+		os.Exit(1)
+	}
+
 	fmt.Println(tag.VersionString())
 }
