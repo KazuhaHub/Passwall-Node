@@ -544,26 +544,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.setup.outputs.sha }}
-      - uses: actions/setup-go@v7
-        env:
-          GOTOOLCHAIN: auto
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: Verify exact preferred compiler
-        run: |
-          set -eu
-          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
-          test -n "$build_toolchain"
-          test "$(go env GOVERSION)" = "$build_toolchain"
-          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
-      - name: Build channel policy
-        run: go build -o "$RUNNER_TEMP/release-stage" ./deployment/cmd/release-stage
-
       - name: Download linux/amd64 binary
         uses: actions/download-artifact@v8
         with:
@@ -641,10 +627,44 @@ jobs:
             UPGRADE_CONTRACT=${{ needs.setup.outputs.upgrade_contract }}
           provenance: false
 
+
+  channels:
+    name: Advance candidate image channels
+    needs: [setup, release, docker, gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.sha }}
+      - uses: actions/setup-go@v7
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify exact preferred compiler
+        run: |
+          set -eu
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build channel policy
+        run: go build -o "$RUNNER_TEMP/release-stage" ./deployment/cmd/release-stage
       - name: Advance eligible candidate image channels
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGE: ghcr.io/${{ needs.setup.outputs.owner_lc }}/passwall-node
           VERSION: ${{ needs.setup.outputs.version }}
-          DIGEST: ${{ steps.push.outputs.digest }}
+          DIGEST: ${{ needs.docker.outputs.digest }}
           STAGE_TOOL: ${{ runner.temp }}/release-stage
-        run: bash .github/scripts/update-image-channels.sh
+        run: |
+          set -euo pipefail
+          test "$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -er .digest)" = "$DIGEST"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          bash .github/scripts/update-image-channels.sh
