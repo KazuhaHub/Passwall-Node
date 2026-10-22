@@ -448,3 +448,20 @@ func TestAReleaseIsPromotedOnlyAfterBothAcceptancesPassed(t *testing.T) {
 		})
 	}
 }
+
+func TestPromotionRefusesCandidateIdentityBeforeGitHubChanges(t *testing.T) {
+	script := promotionStep(t, "Resolve the release and the version it is stamped with")
+	for _, version := range []string{"4.1.0-beta.1", "4.1.0-rc.1"} {
+		stub := newPromotionStub(t)
+		if err := os.WriteFile(filepath.Join(stub.bin, "go"), []byte("#!/bin/sh\nprintf '%s\\n' \"$STUB_VERSION\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := stub.run(t, script, t.TempDir(), nil, "REQUESTED_TAG=v"+version, "STUB_VERSION="+version)
+		if err == nil || !strings.Contains(out, "cannot become stable") {
+			t.Fatalf("%s: %v %s", version, err, out)
+		}
+		if asked := stub.asked(t, "gh"); len(asked) != 0 {
+			t.Fatalf("candidate reached GitHub before refusal: %v", asked)
+		}
+	}
+}
