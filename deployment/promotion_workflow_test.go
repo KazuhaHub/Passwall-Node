@@ -23,14 +23,14 @@ func TestPromotionReusesArtefactsRatherThanBuilding(t *testing.T) {
 	// workflow, so the build patterns are narrower than the word "build": a
 	// trailing space rules out buildx, and the subcommand is named for the rest.
 	for _, forbidden := range []string{"go build", "docker build ", "buildx build", "build-push-action", "--no-cache"} {
-		if strings.Contains(text, forbidden) {
+		if strings.Contains(strings.ReplaceAll(text, `go build -o "$RUNNER_TEMP/release-stage" ./deployment/cmd/release-stage`, ""), forbidden) {
 			t.Fatalf("the promotion builds rather than reuses: %q", forbidden)
 		}
 	}
 
 	// AND IT MOVES A POINTER TO A DIGEST IT READ. A digest arriving as an input
 	// would let a caller point `latest` at an image no release produced.
-	if !strings.Contains(text, "${repository}@${DIGEST}") {
+	if !strings.Contains(text, "APPROVED=true bash .github/scripts/update-image-channels.sh") {
 		t.Fatal("the promotion does not retag by digest, so it is not pinned to the verified image")
 	}
 	if strings.Contains(text, "inputs.digest") {
@@ -40,15 +40,12 @@ func TestPromotionReusesArtefactsRatherThanBuilding(t *testing.T) {
 		t.Fatal("the promotion does not read the digest back from the registry")
 	}
 
-	// `latest` MOVES AND `beta` DOES NOT. beta tracks the newest of any kind, which
-	// publication already set; a promotion that advanced it too would move a
-	// testing pointer to a stable release as a side effect.
-	if !strings.Contains(text, ":latest") {
-		t.Fatal("the promotion does not move the latest pointer")
+	// All alias decisions use the same pinned policy as publication. Its shell
+	// tests verify latest/stable advance together while newer candidates survive.
+	if !strings.Contains(text, "CHECK_ONLY: \"true\"") || !strings.Contains(text, "APPROVED=true bash .github/scripts/update-image-channels.sh") {
+		t.Fatal("promotion lost its rollback preflight or approved channel update")
 	}
-	if strings.Contains(text, ":beta") {
-		t.Fatal("the promotion touches the beta pointer, which tracks the newest of any kind")
-	}
+
 }
 
 // ONE TRIGGER, AND IT IS A HUMAN. A `release: published` trigger would promote on

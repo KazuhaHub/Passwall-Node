@@ -12,17 +12,17 @@ setup_mode=configure
 channel_override=
 usage() {
     cat <<'USAGE'
-Usage: install.sh [--channel stable|testing|beta] [--install-only] [--offline]
+Usage: install.sh [--channel stable|rc|beta|testing] [--install-only] [--offline]
 
   (no arguments)   Install the newest stable release and open PSP setup.
-  --channel VALUE  Select stable or testing (beta is an alias) without a channel prompt.
+  --channel VALUE  Select stable, rc or beta (testing is an alias) without a channel prompt.
   --install-only   Install the service and pn command without configuring PSP.
   --offline        Install the binary beside this script; use from an extracted
                    official Linux release archive without contacting GitHub.
 
 Examples:
   curl .../install.sh | sudo sh
-  curl .../install.sh | sudo sh -s -- --channel testing
+  curl .../install.sh | sudo sh -s -- --channel beta
   curl .../install.sh | sudo sh -s -- --install-only
   sudo ./install.sh --offline
   sudo ./install.sh --offline --install-only
@@ -43,7 +43,7 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-case "$channel_override" in ''|stable|testing|beta) ;; *) printf 'Invalid channel: %s\n' "$channel_override" >&2; usage >&2; exit 2 ;; esac
+case "$channel_override" in ''|stable|rc|beta|testing) ;; *) printf 'Invalid channel: %s\n' "$channel_override" >&2; usage >&2; exit 2 ;; esac
 if [ "$source_mode" = offline ] && [ -n "$channel_override" ]; then
     printf '%s\n' '--channel cannot be combined with --offline' >&2
     usage >&2
@@ -148,34 +148,54 @@ resolve_release() {
     document=$1
     want_arch=$2
 
-    # THE NEWEST IS CHOSEN, NOT ASSUMED TO BE FIRST. `releases[0]` was taken for
-    # the newest because the API is documented to answer in that order, and against
-    # the live repository it is not: a release published two hours after another sat
-    # at index one, and nothing in the response explains the ordering. The axis that
-    # cannot be reinterpreted is the release's OWN publication time, which the API
-    # states per release — an ISO-8601 UTC instant, so ordering the strings is
-    # ordering the instants.
-    #
-    # NONE AND UNPAIRABLE ARE SEPARATE MESSAGES. `curl --fail` rejects an HTTP error
-    # before this runs, but a proxy or a captive portal answers 200 with a body that
-    # is not a release at all, and the operator needs to be sent to the channel
-    # rather than to a second release that does not exist.
+    # Update channels select the highest eligible version. Release metadata is
+    # paired by entry; drafts and staged final builds cannot enter a channel.
+    # The unfiltered resolver retains publication ordering for legacy callers.
     tags=$(sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' "$document")
     published=$(sed -n 's/.*"published_at": "\([^"]*\)".*/\1/p' "$document")
+    prereleases=$(sed -E -n 's/^[[:space:]]*"prerelease": (true|false).*/\1/p' "$document")
+    drafts=$(sed -E -n 's/^[[:space:]]*"draft": (true|false).*/\1/p' "$document")
     [ -n "$tags" ] || fail 'the release source named no release; check that the channel has a published release'
     # THE LISTS GO IN THROUGH THE ENVIRONMENT, NOT `-v`. `-v` processes escape
     # sequences in its value, so a multi-line list arrives broken and awk reports a
     # newline inside a string — a failure about the mechanism rather than about the
     # releases. ENVIRON is passed through verbatim.
-    release_tag=$(RELEASE_TAGS="$tags" RELEASE_TIMES="$published" awk 'BEGIN {
+    release_tag=$(RELEASE_TAGS="$tags" RELEASE_TIMES="$published" RELEASE_PRE="$prereleases" RELEASE_DRAFT="$drafts" RELEASE_CHANNEL="${channel:-}" awk '
+    function cmp(a,b, A,B,x,y,i,na,nb,sa,sb,ca,cb) {
+        sub(/^release\//,"",a);sub(/^v/,"",a);sub(/^release\//,"",b);sub(/^v/,"",b)
+        split(a,A,"-");split(b,B,"-");na=split(A[1],x,".");nb=split(B[1],y,".")
+        for(i=1;i<=4;i++){if((x[i]+0)!=(y[i]+0))return (x[i]+0)>(y[i]+0)?1:-1}
+        sa=A[2]==""?3:(A[2]~/^rc\./?2:1);sb=B[2]==""?3:(B[2]~/^rc\./?2:1)
+        if(sa!=sb)return sa>sb?1:-1
+        split(A[2],x,".");split(B[2],y,".");ca=x[2]+0;cb=y[2]+0
+        return ca==cb?0:(ca>cb?1:-1)
+    }
+    BEGIN {
         n = split(ENVIRON["RELEASE_TAGS"], T, "\n"); m = split(ENVIRON["RELEASE_TIMES"], P, "\n")
         # A RELEASE WITHOUT A TIME CANNOT BE ORDERED, and guessing which one is
         # newest is how an older build gets installed. The counts are compared
         # first because a response where they differ is not a page of releases.
         if (n != m || n == 0) exit 1
-        best = 1
-        for (i = 2; i <= n; i++) if (P[i] > P[best]) best = i
-        print T[best]
+        channel = ENVIRON["RELEASE_CHANNEL"]
+        if (channel != "") {
+            np=split(ENVIRON["RELEASE_PRE"], R, "\n"); nd=split(ENVIRON["RELEASE_DRAFT"], D, "\n")
+            if (np != n || nd != n) exit 1
+        }
+        best=0
+        for(i=1;i<=n;i++) {
+            if (channel != "") {
+                if (D[i] != "false" || (R[i] != "true" && R[i] != "false")) continue
+                v=T[i];sub(/^release\//,"",v);sub(/^v/,"",v)
+                if (v ~ /-beta[.]|-[a-z]+[0-9]+/) stage="beta"
+                else if (v ~ /-rc[.]/) stage="rc"
+                else if (R[i]=="false") stage="stable"
+                else if (split(v,F,".")==4 || cmp(v,"4.0.2")<0) stage="beta"
+                else stage="pending"
+                if (stage=="pending" || (channel=="stable" && stage!="stable") || (channel=="rc" && stage!="rc" && stage!="stable")) continue
+                if (!best || cmp(T[i],T[best])>0) best=i
+            } else if (!best || P[i]>P[best]) best=i
+        }
+        if (best) print T[best]
     }') || fail 'the release source did not give a publication time for every release, so the newest cannot be chosen'
     [ -n "$release_tag" ] || fail 'the release source named no release; check that the channel has a published release' 
 
@@ -256,15 +276,12 @@ if [ "$source_mode" = offline ]; then
 else
     phase 2 'Resolve a published release'
     channel=${channel_override:-${PN_CHANNEL:-stable}}
-    # ONE RELEASE PER PAGE. The beta channel wants the newest release including
-    # pre-releases, which `releases/latest` will not answer, so it asks the list
-    # endpoint for a single element instead of paging twenty and taking the first
-    # — that is the same release (the API answers newest-first either way) with no
-    # other release's assets in the document to be mixed up with it.
+    # Candidate preferences include final releases and are filtered below.
+    # Stable uses GitHub Latest, which only verified promotion updates.
     case "$channel" in
         stable) releases_url=https://api.github.com/repos/KazuhaHub/Passwall-Node/releases/latest ;;
-        testing|beta) releases_url='https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=20' ;;
-        *) fail 'PN_CHANNEL must be stable or testing (beta is a compatibility alias)' ;;
+        rc|testing|beta) releases_url='https://api.github.com/repos/KazuhaHub/Passwall-Node/releases?per_page=100' ;;
+        *) fail 'PN_CHANNEL must be stable, rc or beta (testing is a compatibility alias)' ;;
     esac
     curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
         --connect-timeout 15 --max-time 60 --max-filesize 1048576 --output "$stage/releases.json" "$releases_url" || \

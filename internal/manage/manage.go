@@ -535,14 +535,16 @@ func (a *app) printStatus(details bool) error {
 	return nil
 }
 
-// deployChannel uses immutable suffixes or an explicit build stamp. Historical
-// numeric builds cannot reveal whether their release was later promoted.
+// deployChannel reads immutable candidate suffixes. Plain numeric builds
+// cannot reveal whether their release was later promoted.
 func deployChannel(version string) string {
 	switch {
 	case version == "" || version == "dev":
 		return "Unknown"
-	case !strings.HasPrefix(version, "v") && (strings.Contains(version, "-beta.") || strings.Contains(version, "-rc.")):
-		return "Testing"
+	case strings.Contains(version, "-rc."):
+		return "RC"
+	case strings.Contains(version, "-beta."):
+		return "Beta"
 	case strings.HasPrefix(version, "v"):
 		if strings.Contains(version, "-") {
 			return "Beta"

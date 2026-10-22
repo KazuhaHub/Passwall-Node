@@ -261,7 +261,7 @@ func TestReleasePublishesChannelTagsAndUpgradeContractLabels(t *testing.T) {
 		t.Fatal("the release workflow tags `latest`, which only promote.yml moves")
 	}
 	for _, required := range []string{
-		"type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}",
+		"bash .github/scripts/update-image-channels.sh",
 		"io.kazuhahub.passwall-node.state-schema=${{ needs.setup.outputs.state_schema }}",
 		"io.kazuhahub.passwall-node.upgrade-contract=${{ needs.setup.outputs.upgrade_contract }}",
 		"STATE_SCHEMA=${{ needs.setup.outputs.state_schema }}",
