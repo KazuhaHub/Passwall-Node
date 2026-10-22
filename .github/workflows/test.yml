@@ -98,7 +98,7 @@ jobs:
       - name: Shellcheck the standalone shell scripts
         run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
       - name: Validate immutable image publishing check
-        run: node --test deployment/check_image_test.mjs
+        run: node --test deployment/check_image_test.mjs deployment/stage_transitions_test.mjs
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:

@@ -36,7 +36,7 @@ on:
         # NO `stable`. A release is published as a pre-release and reaches stable
         # only through promote.yml, after both acceptances passed on it; see the
         # channel step.
-        description: "Publication channel. Both publish a pre-release; promote.yml makes one stable."
+        description: "Legacy publication mode; stage comes from the tag. Every final requires verified promotion."
         required: false
         default: auto
         type: choice
@@ -512,7 +512,7 @@ jobs:
         with:
           tag_name: ${{ needs.setup.outputs.tag }}
           target_commitish: ${{ needs.setup.outputs.sha }}
-          name: Passwall Node ${{ needs.setup.outputs.tag }} · ${{ contains(needs.setup.outputs.version, '-') && 'Testing' || 'Awaiting promotion' }}
+          name: Passwall Node ${{ needs.setup.outputs.tag }} · ${{ contains(needs.setup.outputs.version, '-rc.') && 'RC' || contains(needs.setup.outputs.version, '-beta.') && 'Beta' || 'Awaiting promotion' }}
           # Resolved once in setup, where the reason for each answer is written
           # down; both this job and the image job read that one answer.
           prerelease: ${{ needs.setup.outputs.prerelease }}
@@ -548,6 +548,22 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.setup.outputs.sha }}
+      - uses: actions/setup-go@v7
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify exact preferred compiler
+        run: |
+          set -eu
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      - name: Build channel policy
+        run: go build -o "$RUNNER_TEMP/release-stage" ./deployment/cmd/release-stage
+
       - name: Download linux/amd64 binary
         uses: actions/download-artifact@v8
         with:
@@ -589,8 +605,6 @@ jobs:
             # for, so the pointer would not have moved; it reads the answer setup
             # resolved. `latest` is not here: every release is published as a
             # pre-release, and promote.yml moves `latest` to a digest it verified.
-            type=raw,value=testing,enable=${{ needs.setup.outputs.image_channel == 'true' }}
-            type=raw,value=beta,enable=${{ needs.setup.outputs.image_channel == 'true' }}
           # THESE LABELS ARE WHAT THE PUBLISHED IMAGE CARRIES; build-push-action
           # applies them over the Dockerfile's. The updater handover label is a
           # literal for the Dockerfile's reason: it lists the handover protocols
@@ -612,6 +626,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.setup.outputs.version }}
         run: node deployment/check-image.mjs "$IMAGE_REPOSITORY" "$RELEASE_VERSION"
       - name: Build and push multi-arch image
+        id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -625,3 +640,11 @@ jobs:
             STATE_SCHEMA=${{ needs.setup.outputs.state_schema }}
             UPGRADE_CONTRACT=${{ needs.setup.outputs.upgrade_contract }}
           provenance: false
+
+      - name: Advance eligible candidate image channels
+        env:
+          IMAGE: ghcr.io/${{ needs.setup.outputs.owner_lc }}/passwall-node
+          VERSION: ${{ needs.setup.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          STAGE_TOOL: ${{ runner.temp }}/release-stage
+        run: bash .github/scripts/update-image-channels.sh

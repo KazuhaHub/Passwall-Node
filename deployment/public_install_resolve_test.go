@@ -1,6 +1,7 @@
 package deployment
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -352,5 +353,39 @@ func TestResolveReleaseRefusesABodyThatNamesNoRelease(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "named no release") {
 		t.Errorf("refusal did not distinguish an absent release from an ambiguous one:\n%s", output)
+	}
+}
+
+func TestResolveReleaseRespectsThreeUpdateChannels(t *testing.T) {
+	makeDoc := func(tag, time string, pre, draft bool) string {
+		v := strings.TrimPrefix(tag, "v")
+		doc := releaseDocumentAt(tag, time, "passwall-node_"+v+"_linux_amd64.tar.gz", "SHA256SUMS.txt")
+		flags := fmt.Sprintf("    \"prerelease\": %t,\n    \"draft\": %t,\n", pre, draft)
+		return strings.Replace(doc, "    \"assets\": [", flags+"    \"assets\": [", 1)
+	}
+	docs := []string{
+		makeDoc("v4.2.0-beta.12", "2026-10-10T00:00:00Z", true, false),
+		makeDoc("v4.2.0-beta.9", "2026-10-19T00:00:00Z", true, false),
+		makeDoc("v4.1.1-rc.2", "2026-10-09T00:00:00Z", true, false),
+		makeDoc("v4.1.0", "2026-10-20T00:00:00Z", false, false),
+		makeDoc("v4.3.0", "2026-10-21T00:00:00Z", true, false),
+		makeDoc("v4.4.0-beta.1", "2026-10-22T00:00:00Z", true, true),
+	}
+	for i := range docs {
+		docs[i] = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(docs[i]), "["), "]")
+	}
+	document := "[" + strings.Join(docs, ",") + "]"
+	for _, tc := range []struct{ channel, want string }{{"stable", "v4.1.0"}, {"rc", "v4.1.1-rc.2"}, {"beta", "v4.2.0-beta.12"}, {"testing", "v4.2.0-beta.12"}} {
+		cmd := driver(t, document, "amd64")
+		cmd.Env = append(os.Environ(), "channel="+tc.channel)
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "tag="+tc.want+"\n") {
+			t.Errorf("%s: %v %s", tc.channel, err, out)
+		}
+	}
+	cmd := driver(t, makeDoc("v4.2.0-beta.1", "2026-10-10T00:00:00Z", false, false), "amd64")
+	cmd.Env = append(os.Environ(), "channel=rc")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("RC accepted a mislabelled Beta: %s", out)
 	}
 }

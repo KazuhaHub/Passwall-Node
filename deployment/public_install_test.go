@@ -48,7 +48,7 @@ func TestPublicInstallerArgumentsBeforePrivilegedPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--help: %v\n%s", err, output)
 	}
-	for _, expected := range []string{"--channel stable|testing|beta", "--install-only", "--offline", "without contacting GitHub"} {
+	for _, expected := range []string{"--channel stable|rc|beta|testing", "--install-only", "--offline", "without contacting GitHub"} {
 		if !strings.Contains(string(output), expected) {
 			t.Fatalf("--help is missing %q:\n%s", expected, output)
 		}

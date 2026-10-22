@@ -35,7 +35,7 @@ env:
   GOTOOLCHAIN: "local"
 
 concurrency:
-  group: promote-passwall-node
+  group: release-passwall-node
   cancel-in-progress: false
 
 jobs:
@@ -67,6 +67,14 @@ jobs:
           # release and move `latest`. Both import nothing outside this module,
           # so the cache only ever saved a compile of a few seconds.
           cache: false
+
+      - name: Verify exact preferred compiler
+        run: |
+          set -eu
+          build_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$build_toolchain"
+          test "$(go env GOVERSION)" = "$build_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
 
       - name: Resolve the release and the version it is stamped with
         id: identity
@@ -216,6 +224,20 @@ jobs:
           fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
+      - name: Build channel policy
+        run: go build -o "$RUNNER_TEMP/release-stage" ./deployment/cmd/release-stage
+      - name: Refuse stable pointer rollback before any change
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/passwall-node
+          VERSION: ${{ steps.identity.outputs.version }}
+          DIGEST: ${{ steps.artifacts.outputs.digest }}
+          STAGE_TOOL: ${{ runner.temp }}/release-stage
+          APPROVED: "true"
+          CHECK_ONLY: "true"
+        run: |
+          export IMAGE="${IMAGE,,}"
+          bash .github/scripts/update-image-channels.sh
+
       - name: Flip the release to stable
         id: flip
         shell: bash
@@ -253,9 +275,8 @@ jobs:
           # the exact digest is the same bytes; a rebuild would be different bytes
           # under the same name, which is the one thing a promotion must not do.
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker buildx imagetools create -t "${repository}:stable" -t "${repository}:latest" "${repository}@${DIGEST}"
-          # `beta` is not touched: it tracks the newest of ANY kind, which the
-          # publication already set and a promotion does not change.
+          IMAGE="$repository" VERSION="$VERSION" DIGEST="$DIGEST" STAGE_TOOL="$RUNNER_TEMP/release-stage" APPROVED=true bash .github/scripts/update-image-channels.sh
+          # RC/Beta also accept finals; newer candidate pointers are preserved.
           echo "promoted ${VERSION} (${DIGEST}) to latest"
 
       - name: Confirm what the stable pointers now name
