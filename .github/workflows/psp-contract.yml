@@ -91,7 +91,7 @@ jobs:
       # toolchain line, installed and then exported as local. It builds this
       # checkout too, as it does in PSP's job, since PSP's go directive is not
       # older than this module's.
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         env:
           GOTOOLCHAIN: auto
         with:
