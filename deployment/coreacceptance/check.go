@@ -12,13 +12,15 @@ type testIdentity struct{ Package, Test string }
 
 const module = "github.com/KazuhaHub/passwall-node/v4/internal/core/"
 
-// Require the eight executable leaves, plus both parent tests and all three
+// Require the ten executable leaves, plus both parent tests and all three
 // package pass events. A cached, missing, renamed or skipped gate cannot pass.
 var requiredTests = []testIdentity{
 	{module + "install", "TestOfficialXrayInstallIntegration"},
 	{module + "install", "TestOfficialSingBoxInstallIntegration"},
 	{module + "xray", "TestCompilerArtifactPassesPinnedXrayValidation"},
 	{module + "xray", "TestCompilerArtifactPassesPinnedXrayValidation/26.6.27"},
+	{module + "xray", "TestCompilerArtifactPassesPinnedXrayValidation/26.7.28"},
+	{module + "xray", "TestCompilerArtifactPassesPinnedXrayValidation/26.9.9"},
 	{module + "singbox", "TestCompilerArtifactPassesPinnedSingBoxValidation"},
 	{module + "singbox", "TestDaemonAPIWireCompatibilityWithPinnedSingBox"},
 	{module + "singbox", "TestRealityHandshakeMatrix"},

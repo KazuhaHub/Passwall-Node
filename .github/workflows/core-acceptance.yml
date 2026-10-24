@@ -69,7 +69,7 @@ jobs:
             -run '^TestOfficial(Xray|SingBox)InstallIntegration$' \
             | tee "$RUNNER_TEMP/core-acceptance-tests.json"
           go test -json -count=1 -timeout=5m ./internal/core/xray \
-            -run '^TestCompilerArtifactPassesPinnedXrayValidation$/^26\.6\.27$' \
+            -run '^TestCompilerArtifactPassesPinnedXrayValidation$' \
             | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
           go test -json -count=1 -timeout=5m ./internal/core/singbox \
             -run '^(TestCompilerArtifactPassesPinnedSingBoxValidation|TestDaemonAPIWireCompatibilityWithPinnedSingBox|TestRealityHandshakeMatrix)$' \
