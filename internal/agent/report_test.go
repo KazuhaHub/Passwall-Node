@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -264,5 +265,80 @@ func TestReportBuilderAdvancesScheduledQuotaBeforePartialReport(t *testing.T) {
 		after.HeadroomBytes == nil || *after.HeadroomBytes != nextHeadroom ||
 		after.PeriodEndsAtMS != 0 || after.NextPeriodHeadroomBytes != nil {
 		t.Fatalf("client after scheduled rollover = %+v", after)
+	}
+}
+
+func TestReportCarriesPolicyStatusInFullAndPartialReportsWhenCapable(t *testing.T) {
+	status := protocol.PolicyStatus{Digest: hex.EncodeToString(make([]byte, 32)), State: protocol.PolicyStateApplied}
+	for _, partial := range []bool{false, true} {
+		t.Run(map[bool]string{false: "full", true: "partial"}[partial], func(t *testing.T) {
+			builder := ReportBuilder{
+				AgentID: "agent-1", Store: openAgentTestStore(t),
+				Capabilities: []string{protocol.CapabilityDestinationPolicy},
+				PolicyStatus: func() protocol.PolicyStatus { return status },
+			}
+			built, err := builder.Build(t.Context(), partial, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if built.Report.PolicyStatus == nil || !reflect.DeepEqual(*built.Report.PolicyStatus, status) {
+				t.Fatalf("policy status = %+v, want %+v", built.Report.PolicyStatus, status)
+			}
+			if err := protocol.ValidateNodeReport(built.Report); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(built.Report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := wire["policy_status"]; !present {
+				t.Fatalf("the wire form of a partial=%v report lost policy_status: %s", partial, encoded)
+			}
+		})
+	}
+}
+
+// A status that does not validate is dropped, never sent: ValidateNodeReport
+// failing would stop the whole round, and with it every roster update.
+func TestReportDropsAnInvalidPolicyStatusInsteadOfFailingTheRound(t *testing.T) {
+	builder := ReportBuilder{
+		AgentID: "agent-1", Store: openAgentTestStore(t),
+		Capabilities: []string{protocol.CapabilityDestinationPolicy},
+		PolicyStatus: func() protocol.PolicyStatus {
+			return protocol.PolicyStatus{State: protocol.PolicyStateRejected, IssueCode: "not_an_issue"}
+		},
+	}
+	built, err := builder.Build(t.Context(), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.Report.PolicyStatus != nil {
+		t.Fatalf("an invalid status was attached: %+v", built.Report.PolicyStatus)
+	}
+	if err := protocol.ValidateNodeReport(built.Report); err != nil {
+		t.Fatalf("report no longer validates: %v", err)
+	}
+}
+
+func TestReportOmitsPolicyStatusWithoutTheCapabilityOrASource(t *testing.T) {
+	applied := func() protocol.PolicyStatus { return protocol.PolicyStatus{State: protocol.PolicyStateApplied} }
+	for name, builder := range map[string]ReportBuilder{
+		"no capability": {AgentID: "agent-1", Store: openAgentTestStore(t), PolicyStatus: applied},
+		"no source":     {AgentID: "agent-1", Store: openAgentTestStore(t), Capabilities: []string{protocol.CapabilityDestinationPolicy}},
+	} {
+		built, err := builder.Build(t.Context(), false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if built.Report.PolicyStatus != nil {
+			t.Fatalf("%s: policy status = %+v, want none", name, built.Report.PolicyStatus)
+		}
+		if err := protocol.ValidateNodeReport(built.Report); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }

@@ -12,15 +12,21 @@ type testIdentity struct{ Package, Test string }
 
 const module = "github.com/KazuhaHub/passwall-node/v4/internal/core/"
 
-// Require the eight executable leaves, plus both parent tests and all three
+// Require the executable leaves, plus both parent tests and all three
 // package pass events. A cached, missing, renamed or skipped gate cannot pass.
 var requiredTests = []testIdentity{
 	{module + "install", "TestOfficialXrayInstallIntegration"},
 	{module + "install", "TestOfficialSingBoxInstallIntegration"},
 	{module + "xray", "TestCompilerArtifactPassesPinnedXrayValidation"},
 	{module + "xray", "TestCompilerArtifactPassesPinnedXrayValidation/26.6.27"},
+	{module + "xray", "TestCompilerPolicyArtifactPassesPinnedXrayValidation"},
+	{module + "xray", "TestCompilerPolicyArtifactPassesPinnedXrayValidation/26.6.27"},
+	{module + "xray", "TestPolicyEnforcedByRealXray"},
+	{module + "xray", "TestPolicyEnforcedByRealXray/26.6.27"},
 	{module + "singbox", "TestCompilerArtifactPassesPinnedSingBoxValidation"},
 	{module + "singbox", "TestDaemonAPIWireCompatibilityWithPinnedSingBox"},
+	{module + "singbox", "TestCompilerPolicyArtifactPassesPinnedSingBoxValidation"},
+	{module + "singbox", "TestPolicyEnforcedByRealSingBox"},
 	{module + "singbox", "TestRealityHandshakeMatrix"},
 	{module + "singbox", "TestRealityHandshakeMatrix/xray-26.6.27"},
 	{module + "singbox", "TestRealityHandshakeMatrix/mihomo-1.19.30"},

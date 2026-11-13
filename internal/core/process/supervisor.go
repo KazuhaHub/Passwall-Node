@@ -29,6 +29,16 @@ const (
 	maxCommandOutput   = 64 << 10
 )
 
+// ErrCandidateRejected means the core's own configuration check ran to
+// completion and exited non-zero: the core read the candidate and said no.
+//
+// IT IS EVIDENCE ABOUT THE CONFIGURATION AND NOTHING ELSE. A check that timed
+// out, a binary that could not be executed and a core that started and then
+// died are different failures that say nothing about what the candidate
+// contained, so none of them carries it. Blaming a destination policy for one
+// of those would turn an unrelated fault into a policy rejection.
+var ErrCandidateRejected = errors.New("core rejected the candidate configuration")
+
 type Options struct {
 	Binary       string
 	Engine       string
@@ -230,6 +240,24 @@ func (s *Supervisor) Deploy(ctx context.Context, deployment agentcore.Deployment
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	return s.deployLocked(ctx, deployment)
+}
+
+// Validate runs the core's own check on a candidate and nothing else: the
+// running core, the stored configuration and the status are not touched. It
+// reports ErrCandidateRejected when the core refused the configuration.
+func (s *Supervisor) Validate(ctx context.Context, deployment agentcore.Deployment) error {
+	if err := validateDeployment(deployment); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.options.StateDir, 0o700); err != nil {
+		return fmt.Errorf("create core state directory: %w", err)
+	}
+	candidate, err := writeCandidate(s.options.StateDir, deployment.Artifact.Config)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(candidate)
+	return s.validateCandidate(ctx, deployment.Engine, deployment.BinaryPath, candidate)
 }
 
 func (s *Supervisor) deployLocked(ctx context.Context, deployment agentcore.Deployment) error {
@@ -486,6 +514,12 @@ func (s *Supervisor) validateCandidate(ctx context.Context, engine, binary, path
 	if err := command.Run(); err != nil {
 		if checkCtx.Err() != nil {
 			return fmt.Errorf("validate core config: %w", checkCtx.Err())
+		}
+		// A positive exit code is the core saying no. A signal (an OOM kill, an
+		// operator's kill) leaves no exit code and says nothing about the file.
+		var exited *exec.ExitError
+		if errors.As(err, &exited) && exited.Exited() && exited.ExitCode() > 0 {
+			return fmt.Errorf("validate core config: %w: %w: %s", ErrCandidateRejected, err, strings.TrimSpace(output.String()))
 		}
 		return fmt.Errorf("validate core config: %w: %s", err, strings.TrimSpace(output.String()))
 	}

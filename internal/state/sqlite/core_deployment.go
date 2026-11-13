@@ -58,6 +58,32 @@ func (s *Store) SaveCoreDeployment(ctx context.Context, deployment state.CoreDep
 	return nil
 }
 
+// TouchCoreDeployment moves applied_at_ms forward when the saved deployment is
+// exactly this one (engine, version, digest and both bodies) and reports
+// whether it did. It exists so an unchanged deployment does not rewrite a
+// multi-megabyte artifact and two bodies every round: the one column that has
+// to advance is the one the expiry schedule reads.
+func (s *Store) TouchCoreDeployment(ctx context.Context, deployment state.CoreDeployment) (bool, error) {
+	if err := validateCoreDeployment(deployment); err != nil {
+		return false, err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE core_deployment SET applied_at_ms = ?
+		WHERE id = 1 AND engine = ? AND version = ? AND config_digest = ?
+			AND config_body = ? AND roster_body = ?`,
+		deployment.AppliedAtMS, deployment.Engine, deployment.Version, deployment.ConfigDigest,
+		deployment.ConfigBody, deployment.RosterBody,
+	)
+	if err != nil {
+		return false, fmt.Errorf("touch core deployment: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("touch core deployment: %w", err)
+	}
+	return changed == 1, nil
+}
+
 func validateCoreDeployment(deployment state.CoreDeployment) error {
 	if strings.TrimSpace(deployment.Engine) == "" || strings.TrimSpace(deployment.Version) == "" || deployment.AppliedAtMS <= 0 {
 		return fmt.Errorf("%w: core deployment requires engine, version and positive applied time", state.ErrInvalidState)

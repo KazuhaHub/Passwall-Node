@@ -194,7 +194,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	coreRuntime, err := coreruntime.New(coreruntime.Options{
-		Store: store, Installer: installer, Supervisor: supervisor,
+		Store: store, Installer: installer, Supervisor: supervisor, Warnf: logger.Warnf,
 		CompilerFactory: func(selection protocol.CoreSelection) (agentcore.Compiler, error) {
 			switch selection.Engine {
 			case "xray":
@@ -305,7 +305,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	// NOT among them: they come from taskWorker.Capabilities, which the report
 	// builder calls for every report, because one of them — remote upgrade —
 	// depends on a helper outside this process.
-	var capabilities []string
+	var hostTelemetry bool
 	// THE CAPABILITY IS DECLARED FROM THE RESULT, NOT FROM THE PLATFORM. A build
 	// whose collector could not be constructed must not advertise
 	// host.telemetry.v1: the panel would then expect telemetry from a node that
@@ -326,11 +326,10 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}); err != nil {
 		return err
 	}
-	if hostReporter != nil {
-		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
-	}
+	hostTelemetry = hostReporter != nil
+	capabilities := staticCapabilities(hostTelemetry)
 	synchronizer := agent.Synchronizer{
-		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker),
+		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus),
 		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
@@ -354,6 +353,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	taskWorker.SetResultNotifier(runner.Wake)
+
+	// Before the first report is built: an agent restarted with an unchanged
+	// config redeploys nothing, so nothing else would set the policy status.
+	if err := coreRuntime.RestoreStatus(ctx); err != nil {
+		return fmt.Errorf("restore destination policy status: %w", err)
+	}
 
 	logger.Infof("starting agent_id=%s version=%s endpoint=%s", parsed.AgentID, buildversion.String(), parsed.Endpoint)
 	err = lifecycle.Run(ctx,
@@ -383,12 +388,27 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 // updater never advertised remote upgrade until it was restarted. It is a
 // function of its own so the tests build their reports through exactly this
 // wiring rather than a copy of it.
-func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker) agent.ReportBuilder {
+func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus) agent.ReportBuilder {
 	return agent.ReportBuilder{
 		AgentID: agentID, AgentVersion: buildversion.String(),
 		Store: store, CoreStatus: status, Now: now,
 		Capabilities: static, CapabilitySource: worker.Capabilities,
+		PolicyStatus: policyStatus,
 	}
+}
+
+// staticCapabilities are the capabilities fixed for the process lifetime.
+//
+// policy.destination.v1 is always among them and is NOT in the per-report
+// CapabilitySource: both engines enforce it, and the panel can switch engine
+// under a running agent, so a declaration that followed the engine would
+// flicker and make the panel withdraw and resend the policy.
+func staticCapabilities(hostTelemetry bool) []string {
+	capabilities := []string{protocol.CapabilityDestinationPolicy}
+	if hostTelemetry {
+		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
+	}
+	return capabilities
 }
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {

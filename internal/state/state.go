@@ -289,6 +289,10 @@ type Store interface {
 	ClaimCoreCounterEpoch(context.Context, string) (uint64, error)
 	CoreDeployment(context.Context) (CoreDeployment, error)
 	SaveCoreDeployment(context.Context, CoreDeployment) error
+	// TouchCoreDeployment advances only applied_at_ms, and only when the saved
+	// deployment is identical to the one given; false means it was not, and the
+	// caller saves in full.
+	TouchCoreDeployment(context.Context, CoreDeployment) (bool, error)
 
 	// EnqueueIssue returns true only when the durable dedupe key was first
 	// recorded. Delivered keys remain as tombstones so a persistent condition

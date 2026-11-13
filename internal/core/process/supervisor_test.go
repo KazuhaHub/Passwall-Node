@@ -47,6 +47,13 @@ func TestSupervisorHelperProcess(t *testing.T) {
 	}
 	switch action {
 	case "check", "check-next":
+		if strings.Contains(string(config), "self-kill") {
+			// Dies to a signal, as an out-of-memory kill or an operator's kill does.
+			self, _ := os.FindProcess(os.Getpid())
+			_ = self.Kill()
+			time.Sleep(testProcessTimeout)
+			os.Exit(0)
+		}
 		if strings.Contains(string(config), "invalid") {
 			_, _ = os.Stderr.WriteString("synthetic validation failure")
 			os.Exit(2)
@@ -157,6 +164,85 @@ func TestSupervisorValidationFailureLeavesCurrentProcessUntouched(t *testing.T) 
 	}
 	assertCurrentConfig(t, supervisor.options.StateDir, good.Config)
 	shutdownSupervisor(t, cancel, runDone)
+}
+
+// A policy is blamed for a failed deployment only when the core itself said no.
+// ErrCandidateRejected is that evidence: the check ran to completion and exited
+// non-zero. Everything else a failed deployment can be (no binary, a timeout, a
+// core that dies after starting) says nothing about the configuration.
+func TestSupervisorMarksOnlyANonZeroCheckExitAsACandidateRejection(t *testing.T) {
+	supervisor, cancel, runDone := startTestSupervisor(t)
+	defer shutdownSupervisor(t, cancel, runDone)
+	if err := supervisor.Apply(t.Context(), testArtifact("good")); err != nil {
+		t.Fatal(err)
+	}
+	notExecutable := filepath.Join(t.TempDir(), "core")
+	if err := os.WriteFile(notExecutable, []byte("not a binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		deploy   func() error
+		rejected bool
+	}{
+		{name: "check exits non-zero", rejected: true, deploy: func() error {
+			return supervisor.Apply(t.Context(), testArtifact("invalid"))
+		}},
+		{name: "check cannot be executed", deploy: func() error {
+			return supervisor.Deploy(t.Context(), agentcore.Deployment{
+				Artifact: testArtifact("good-two"), Engine: "test", BinaryPath: notExecutable, Version: "test-2",
+			})
+		}},
+		{name: "check is killed by a signal", deploy: func() error {
+			return supervisor.Apply(t.Context(), testArtifact("self-kill"))
+		}},
+		{name: "check times out", deploy: func() error {
+			timed := newTestSupervisorWithOptions(t, func(options *Options) { options.CheckTimeout = time.Nanosecond })
+			return timed.Apply(t.Context(), testArtifact("good-three"))
+		}},
+		{name: "core exits during startup", deploy: func() error {
+			return supervisor.Apply(t.Context(), testArtifact("crash"))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.deploy()
+			if err == nil {
+				t.Fatal("deployment unexpectedly succeeded")
+			}
+			if got := errors.Is(err, ErrCandidateRejected); got != test.rejected {
+				t.Fatalf("errors.Is(ErrCandidateRejected) = %v, want %v: %v", got, test.rejected, err)
+			}
+		})
+	}
+	err := supervisor.Apply(t.Context(), testArtifact("invalid"))
+	if err == nil || !strings.Contains(err.Error(), "synthetic validation failure") {
+		t.Fatalf("the core's own message must survive the marking: %v", err)
+	}
+}
+
+func TestSupervisorValidateChecksACandidateWithoutDeployingIt(t *testing.T) {
+	supervisor, cancel, runDone := startTestSupervisor(t)
+	defer shutdownSupervisor(t, cancel, runDone)
+	good := testArtifact("good")
+	if err := supervisor.Apply(t.Context(), good); err != nil {
+		t.Fatal(err)
+	}
+	before := supervisor.Status()
+	deployment := func(artifact agentcore.Artifact) agentcore.Deployment {
+		return agentcore.Deployment{Artifact: artifact, Engine: "test", BinaryPath: mustAbs(t, os.Args[0]), Version: "test"}
+	}
+	if err := supervisor.Validate(t.Context(), deployment(testArtifact("fine-but-different"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.Validate(t.Context(), deployment(testArtifact("invalid"))); !errors.Is(err, ErrCandidateRejected) {
+		t.Fatalf("validate error = %v, want a candidate rejection", err)
+	}
+	after := supervisor.Status()
+	if after != before {
+		t.Fatalf("validation changed the running core: before=%#v after=%#v", before, after)
+	}
+	assertCurrentConfig(t, supervisor.options.StateDir, good.Config)
 }
 
 func TestSupervisorRollsBackCandidateThatExitsDuringStartup(t *testing.T) {

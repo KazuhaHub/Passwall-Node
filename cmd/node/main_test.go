@@ -6,9 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
+	statesqlite "github.com/KazuhaHub/passwall-node/v4/internal/state/sqlite"
 
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
@@ -131,5 +135,50 @@ func TestUpgradeInfoDoesNotOpenStateOrRequireCredentials(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"state_schema":9`) || !strings.Contains(output.String(), `"upgrade_contract":1`) {
 		t.Fatal(output.String())
+	}
+}
+
+// The destination policy capability is declared whatever else the process
+// could construct: both compilers enforce it, so it does not depend on a
+// collector, a helper or the engine that happens to be running. It is also
+// not a per-report capability; a flickering declaration would make the panel
+// resend or withdraw the policy.
+func TestStaticCapabilitiesAlwaysDeclareTheDestinationPolicy(t *testing.T) {
+	for _, hostTelemetry := range []bool{false, true} {
+		capabilities := staticCapabilities(hostTelemetry)
+		if !slices.Contains(capabilities, protocol.CapabilityDestinationPolicy) {
+			t.Fatalf("host telemetry %v: capabilities %v lack %s", hostTelemetry, capabilities, protocol.CapabilityDestinationPolicy)
+		}
+		if got := slices.Contains(capabilities, protocol.CapabilityHostTelemetry); got != hostTelemetry {
+			t.Fatalf("host telemetry %v: capabilities %v", hostTelemetry, capabilities)
+		}
+	}
+}
+
+func TestNodeReportBuilderAttachesThePolicyStatusItIsGiven(t *testing.T) {
+	store, err := statesqlite.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	registry, err := agent.NewTaskRegistry(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := agent.NewTaskWorker(agent.TaskWorkerOptions{Store: store, Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := protocol.PolicyStatus{State: protocol.PolicyStateApplied}
+	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false), worker,
+		func() protocol.PolicyStatus { return status })
+	for _, partial := range []bool{false, true} {
+		built, err := builder.Build(t.Context(), partial, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if built.Report.PolicyStatus == nil || built.Report.PolicyStatus.State != protocol.PolicyStateApplied {
+			t.Fatalf("partial=%v: report policy status = %+v", partial, built.Report.PolicyStatus)
+		}
 	}
 }

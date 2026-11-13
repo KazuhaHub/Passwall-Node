@@ -24,11 +24,17 @@ type compilerStub struct {
 	artifact agentcore.Artifact
 	err      error
 	snapshot agentcore.Snapshot
+	// during, when set, runs inside Compile: whatever happens to the rest of the
+	// system while a policy is being compiled.
+	during func()
 }
 
 func (c *compilerStub) Compile(_ context.Context, snapshot agentcore.Snapshot) (agentcore.Artifact, error) {
 	c.calls++
 	c.snapshot = snapshot
+	if c.during != nil {
+		c.during()
+	}
 	return c.artifact, c.err
 }
 
@@ -50,6 +56,11 @@ type supervisorStub struct {
 	deployCalls int
 	deployment  agentcore.Deployment
 	err         error
+	// validate* record the policy-less re-test the runtime runs after the core
+	// rejects a candidate.
+	validateCalls int
+	validated     []agentcore.Deployment
+	validateErr   error
 }
 
 func (s *supervisorStub) Run(context.Context) error { return nil }
@@ -59,6 +70,14 @@ func (s *supervisorStub) Apply(context.Context, agentcore.Artifact) error {
 func (s *supervisorStub) Status() agentcore.Status { return s.status }
 func (s *supervisorStub) ProcessHandle() (agentcore.ProcessHandle, bool) {
 	return agentcore.ProcessHandle{}, false
+}
+func (s *supervisorStub) Validate(_ context.Context, deployment agentcore.Deployment) error {
+	s.validateCalls++
+	s.validated = append(s.validated, deployment)
+	if s.validateErr != nil {
+		return s.validateErr
+	}
+	return nil
 }
 func (s *supervisorStub) Deploy(_ context.Context, deployment agentcore.Deployment) error {
 	s.deployCalls++
@@ -112,12 +131,12 @@ func TestRoundCompilesInstallsAndDeploysAtMostOnce(t *testing.T) {
 		t.Fatalf("confirmed deployment = %+v", deployment)
 	}
 
-	// A new heartbeat gets a new round, but a running identical artifact is
-	// content-idempotent before the expensive binary verification/deploy path.
+	// A new heartbeat gets a new round, but nothing changed, so it neither
+	// compiles nor installs nor deploys (the idle short-circuit).
 	if err := runtime.NewRound().Finalize(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if compiler.calls != 2 || installer.calls != 1 || supervisor.deployCalls != 1 {
+	if compiler.calls != 1 || installer.calls != 1 || supervisor.deployCalls != 1 {
 		t.Fatalf("unchanged heartbeat calls compile/install/deploy = %d/%d/%d", compiler.calls, installer.calls, supervisor.deployCalls)
 	}
 }

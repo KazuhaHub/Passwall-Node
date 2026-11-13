@@ -122,6 +122,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	}
 	seenListeners := make(map[protocol.ListenerKey]struct{}, len(listeners))
 	binds := make(map[string]protocol.ListenerKey, len(listeners))
+	served := make([]protocol.ListenerKey, 0, len(listeners))
 	for _, listener := range listeners {
 		if err := ctx.Err(); err != nil {
 			return agentcore.Artifact{}, err
@@ -149,6 +150,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 		binds[bind] = listener.Key
 		result.Inbounds = append(result.Inbounds, inbound)
+		served = append(served, listener.Key)
 	}
 	for key := range clientByListener {
 		if _, exists := seenListeners[key]; !exists {
@@ -156,6 +158,11 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 				Stream: protocol.StreamRoster, Key: string(key), Code: "attachment_unknown_listener",
 				Err: fmt.Errorf("attachment names missing listener %s", key),
 			}
+		}
+	}
+	if snapshot.DestinationPolicy != nil {
+		if err := c.applyPolicy(&result, snapshot, served); err != nil {
+			return agentcore.Artifact{}, err
 		}
 	}
 	encoded, err := json.MarshalIndent(result, "", "  ")
