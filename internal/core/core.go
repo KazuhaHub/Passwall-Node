@@ -17,6 +17,10 @@ type Snapshot struct {
 	Listeners []protocol.Listener
 	Clients   []protocol.Client
 	Now       time.Time
+	// DestinationPolicy is the destination rule set from the config stream. It
+	// is not called Policy because the Xray configuration already has a Policy
+	// section (levels and statistics) that it must not be confused with.
+	DestinationPolicy *protocol.DestinationPolicy
 }
 
 // Artifact is a validated, content-addressed core configuration. Digest is a
@@ -93,6 +97,9 @@ type Supervisor interface {
 	Run(context.Context) error
 	Apply(context.Context, Artifact) error
 	Deploy(context.Context, Deployment) error
+	// Validate runs the core's own check on a candidate without deploying it,
+	// leaving the running core and the status untouched.
+	Validate(context.Context, Deployment) error
 	Status() Status
 	// ProcessHandle reports the identity of the core currently running under
 	// this supervisor. False means no core is running — a business state that a

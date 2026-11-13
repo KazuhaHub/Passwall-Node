@@ -39,10 +39,14 @@ type ReportBuilder struct {
 	// same readiness, so it must be safe for concurrent use; it must also be
 	// cheap, because it is on the path of every report.
 	CapabilitySource func() []string
-	Store            state.Store
-	OutboxLimit      int
-	Now              func() time.Time
-	maxBodyBytes     int64
+	// PolicyStatus is what the node did with the destination policy. It is
+	// attached to every report, full or partial, from an agent that declares
+	// protocol.CapabilityDestinationPolicy; nil attaches nothing.
+	PolicyStatus func() protocol.PolicyStatus
+	Store        state.Store
+	OutboxLimit  int
+	Now          func() time.Time
+	maxBodyBytes int64
 }
 
 // BuiltReport retains the outbox ids that may be acknowledged only after the
@@ -155,6 +159,16 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.H
 	// settled, so the wire-size check below sees the report it is actually
 	// deciding about.
 	report.Host = host
+	// Validated on its own, and dropped when it fails: ValidateNodeReport runs
+	// over the whole report every round, and a report that fails it is never
+	// sent, which would stop the node receiving rosters. A missing status costs
+	// the panel one round of "unknown"; a failed round costs it control.
+	if b.PolicyStatus != nil && hasCapability(report.Capabilities, protocol.CapabilityDestinationPolicy) {
+		status := b.PolicyStatus()
+		if protocol.ValidatePolicyStatus(status) == nil {
+			report.PolicyStatus = &status
+		}
+	}
 	droppedHost, err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit())
 	if err != nil {
 		return BuiltReport{}, err
@@ -227,6 +241,15 @@ func (b ReportBuilder) bodyLimit() int64 {
 		return b.maxBodyBytes
 	}
 	return protocol.MaxSyncBodyBytes
+}
+
+func hasCapability(capabilities []string, want string) bool {
+	for _, capability := range capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedUniqueStrings(values []string) []string {

@@ -1,0 +1,199 @@
+package xray
+
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
+)
+
+// xrayUsername is the name a rule uses for a client. The inbound's email is the
+// credential username as given, untrimmed. Xray's user matcher reads an entry
+// that starts with "regexp:" as a pattern (app/router/condition.go), so for a
+// client whose email does, the rule carries the pattern that matches exactly
+// that email: the rule still applies to that client and to nobody else.
+func xrayUsername(username string) (string, bool) {
+	if strings.HasPrefix(username, "regexp:") {
+		return "regexp:^" + regexp.QuoteMeta(username) + "$", true
+	}
+	return username, true
+}
+
+// injectedSniffing is the protocol's own object, verbatim: it is the one shape
+// its check calls sufficient, so anything else could pass the check and fail
+// the policy.
+func injectedSniffing() (map[string]any, error) {
+	var sniffing map[string]any
+	if err := json.Unmarshal([]byte(protocol.XraySniffingInjection()), &sniffing); err != nil {
+		return nil, fmt.Errorf("decode the protocol's sniffing injection: %w", err)
+	}
+	return sniffing, nil
+}
+
+// applyPolicy adds the destination policy to a configuration whose inbounds
+// are already built. It runs after them because both of its safety rules are
+// about which inbounds this compile actually serves: a rule that names only
+// inbounds that are absent or disabled must disappear rather than apply to all
+// of them, and sniffing is only needed on the inbounds a rule applies to.
+//
+// served holds the listener key of each entry of config.Inbounds, in order.
+func (c Compiler) applyPolicy(config *xrayConfig, snapshot agentcore.Snapshot, served []protocol.ListenerKey) error {
+	plan, err := agentcore.PlanPolicy(snapshot.DestinationPolicy, snapshot.Clients, served, xrayUsername)
+	if err != nil {
+		return err
+	}
+	if err := ensureSniffing(config.Inbounds, served, plan); err != nil {
+		return err
+	}
+	rules, outbounds := policyRouting(plan)
+	config.Outbounds = append(config.Outbounds, outbounds...)
+	// An explicit AsIs because the documented limit that a hostname destination
+	// never matches an IP rule depends on it; the default is not a promise.
+	config.Routing = map[string]any{"domainStrategy": "AsIs", "rules": rules}
+	return nil
+}
+
+// ensureSniffing gives each inbound the sniffing its rules need, using the
+// check shared with PSP. An inbound whose own sniffing cannot supply it is
+// reported and left alone: changing an operator's destOverride with routeOnly
+// off would change the connection's real destination.
+func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, plan agentcore.PolicyPlan) error {
+	var insufficient []protocol.ListenerKey
+	for index, inbound := range inbounds {
+		need := plan.SniffNeedFor(served[index])
+		if need == 0 {
+			continue
+		}
+		var raw []byte
+		if sniffing, present := inbound["sniffing"]; present {
+			encoded, err := json.Marshal(sniffing)
+			if err != nil {
+				return fmt.Errorf("encode sniffing of %s: %w", served[index], err)
+			}
+			raw = encoded
+		}
+		verdict, _, err := protocol.CheckXraySniffing(raw, need)
+		switch {
+		case err != nil:
+			// A value Xray itself would not read cannot supply anything.
+			insufficient = append(insufficient, served[index])
+		case verdict == protocol.SniffInject:
+			injected, err := injectedSniffing()
+			if err != nil {
+				return err
+			}
+			inbound["sniffing"] = injected
+		case verdict == protocol.SniffInsufficient:
+			insufficient = append(insufficient, served[index])
+		}
+	}
+	if len(insufficient) > 0 {
+		return &agentcore.PolicyError{
+			Code: protocol.IssueDestinationPolicySniffingInsufficient, Listeners: insufficient,
+			Err: fmt.Errorf("sniffing on %d inbound(s) cannot supply the policy's domain or protocol rules", len(insufficient)),
+		}
+	}
+	return nil
+}
+
+// policyRouting turns the plan into routing rules, in evaluation order, and
+// the outbounds they name. The outbounds are appended after the existing ones
+// by the caller: Xray sends unmatched traffic to the FIRST outbound, which must
+// stay direct, so a deny outbound placed first would block everything.
+func policyRouting(plan agentcore.PolicyPlan) ([]map[string]any, []map[string]any) {
+	rules := []map[string]any{}
+	var outbounds []map[string]any
+	// The exempt step, then the trailing-dot guard: an exempt subject is not
+	// subject to it, and it must precede every block.
+	exempt := func() {
+		if len(plan.ExemptUsers) > 0 {
+			rules = append(rules, map[string]any{
+				"type": "field", "ruleTag": "psp-exempt", "user": plan.ExemptUsers, "outboundTag": "direct",
+			})
+		}
+		if plan.TrailingDotGuard() {
+			rules = append(rules, map[string]any{
+				"type": "field", "ruleTag": "psp-trailing-dot", "domain": []string{`regexp:\.$`}, "outboundTag": "blocked",
+			})
+		}
+	}
+	for index, planned := range plan.Rules {
+		if index == plan.ExemptAt {
+			exempt()
+		}
+		rule := planned.Rule
+		outbound := "direct"
+		switch rule.Action {
+		case protocol.RuleBlock:
+			outbound = "psp-deny-" + rule.ID
+			outbounds = append(outbounds, map[string]any{"tag": outbound, "protocol": "blackhole", "settings": map[string]any{}})
+		case protocol.RuleObserve:
+			outbound = "psp-watch-" + rule.ID
+			outbounds = append(outbounds, map[string]any{"tag": outbound, "protocol": "freedom", "settings": map[string]any{}})
+		}
+		common := map[string]any{"type": "field", "outboundTag": outbound}
+		if planned.Users != nil {
+			common["user"] = planned.Users
+		}
+		if planned.Inbounds != nil {
+			tags := make([]string, 0, len(planned.Inbounds))
+			for _, key := range planned.Inbounds {
+				tags = append(tags, "psp-"+string(key))
+			}
+			common["inboundTag"] = tags
+		}
+		if len(rule.SourceCIDRs) > 0 {
+			common["sourceIP"] = rule.SourceCIDRs
+		}
+		if rule.Ports != "" {
+			common["port"] = rule.Ports
+		}
+		if rule.Network != "" {
+			common["network"] = rule.Network
+		}
+		if len(rule.Protocols) > 0 {
+			common["protocol"] = rule.Protocols
+		}
+		domains := rule.Domains
+		var addresses []string
+		addresses = append(addresses, rule.CIDRs...)
+		if rule.Private {
+			addresses = append(addresses, protocol.PrivateDestinationCIDRs()...)
+		}
+		// Xray ANDs the fields of one rule, and a destination is a domain or an
+		// address but never both, so a rule that names domains and addresses is
+		// two rules with the same outbound.
+		if len(domains) > 0 && len(addresses) > 0 {
+			rules = append(rules, withFields(common, "psp-"+rule.ID+"a", "domain", domains))
+			rules = append(rules, withFields(common, "psp-"+rule.ID+"b", "ip", addresses))
+			continue
+		}
+		switch {
+		case len(domains) > 0:
+			rules = append(rules, withFields(common, "psp-"+rule.ID, "domain", domains))
+		case len(addresses) > 0:
+			rules = append(rules, withFields(common, "psp-"+rule.ID, "ip", addresses))
+		default:
+			rules = append(rules, withFields(common, "psp-"+rule.ID, "", nil))
+		}
+	}
+	if plan.ExemptAt == len(plan.Rules) {
+		exempt()
+	}
+	return rules, outbounds
+}
+
+func withFields(common map[string]any, tag, field string, values []string) map[string]any {
+	rule := make(map[string]any, len(common)+2)
+	for key, value := range common {
+		rule[key] = value
+	}
+	rule["ruleTag"] = tag
+	if field != "" {
+		rule[field] = values
+	}
+	return rule
+}
