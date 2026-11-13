@@ -2,7 +2,7 @@ module github.com/KazuhaHub/passwall-node/v4
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/KazuhaHub/passwall-protocol v0.2.1
