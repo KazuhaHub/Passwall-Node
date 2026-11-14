@@ -27,7 +27,7 @@ type auditReceiver struct {
 // nil.
 //
 // NIL IS A LEGITIMATE ANSWER AND THE NODE CARRIES ON. A node that cannot listen
-// declares no audit.hits.v1 and writes no webhook, so the panel sees a node that
+// declares neither audit.hits.v1 nor audit.usage.v1 and writes no webhook, so the panel sees a node that
 // does not record, which is true. What the node must never do is declare the
 // capability and then not be listening, which is why the declaration is made
 // from this function's result and nowhere else.

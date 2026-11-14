@@ -416,17 +416,20 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // "on every engine this agent runs", which is why the sing-box compiler could
 // not be left out of the release.
 //
-// audit.hits.v1 is among them only when the hit receiver is listening, which is
-// decided once at startup; a receiver that fails afterwards takes the agent down
-// rather than leaving the declaration untrue. audit.usage.v1 is never declared:
-// per-site usage is a later tier.
+// audit.hits.v1 and audit.usage.v1 are among them only when the audit receiver
+// is listening, which is decided once at startup; a receiver that fails
+// afterwards takes the agent down rather than leaving the declaration untrue.
+// They are declared together and statically, for both engines: the receiver
+// serves both paths, and the panel works out from the engine whether usage is
+// actually collected (only Xray has a webhook, so a sing-box node enforces and
+// records nothing).
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
 	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}
 	if auditHits {
-		capabilities = append(capabilities, protocol.CapabilityAuditHits)
+		capabilities = append(capabilities, protocol.CapabilityAuditHits, protocol.CapabilityAuditUsage)
 	}
 	return capabilities
 }

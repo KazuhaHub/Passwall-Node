@@ -24,17 +24,17 @@ func shortDataDir(t *testing.T) string {
 	return directory
 }
 
-// audit.hits.v1 is declared only while the receiver is listening. The usage
-// capability is not declared at all: per-site usage is a later tier, and a node
-// that declared it would be promising a record it does not keep.
-func TestStaticCapabilitiesDeclareAuditHitsOnlyWhenTheReceiverIsListening(t *testing.T) {
+// audit.hits.v1 and audit.usage.v1 are declared together, and only while the
+// receiver is listening: it serves both paths, and a node that declared either
+// without it would be promising a record it does not keep.
+func TestStaticCapabilitiesDeclareAuditHitsAndUsageOnlyWhenTheReceiverIsListening(t *testing.T) {
 	for _, listening := range []bool{false, true} {
 		capabilities := staticCapabilities(false, listening)
 		if got := slices.Contains(capabilities, protocol.CapabilityAuditHits); got != listening {
 			t.Fatalf("listening %v: capabilities %v", listening, capabilities)
 		}
-		if slices.Contains(capabilities, protocol.CapabilityAuditUsage) {
-			t.Fatalf("listening %v: capabilities %v declare %s", listening, capabilities, protocol.CapabilityAuditUsage)
+		if got := slices.Contains(capabilities, protocol.CapabilityAuditUsage); got != listening {
+			t.Fatalf("listening %v: capabilities %v, %s declared = %v", listening, capabilities, protocol.CapabilityAuditUsage, got)
 		}
 		if !slices.Contains(capabilities, protocol.CapabilityDestinationPolicy) {
 			t.Fatalf("listening %v: the policy capability is gone: %v", listening, capabilities)
@@ -181,5 +181,51 @@ func TestStartAuditReceiverDeclinesAPathWithAColon(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "secrets", "audit-webhook")); err == nil {
 		t.Fatal("a token was created for a receiver that cannot be used")
+	}
+}
+
+// The same receiver and token carry the usage webhook: at hits_and_usage the
+// Xray compiler the factory builds ends its rules with the catch-all that
+// reports to the receiver's /usage path, and engine sing-box is given nothing.
+func TestCompilerFactoryGivesXrayTheUsageWebhookAtTheUsageLevel(t *testing.T) {
+	dataDir := shortDataDir(t)
+	receiver := startAuditReceiver(dataDir, func(string, ...any) {})
+	if receiver == nil {
+		t.Fatal("no receiver")
+	}
+	t.Cleanup(func() { _ = receiver.Sink.Close() })
+	snapshot := agentcore.Snapshot{Now: time.Unix(1, 0), DestinationPolicy: &protocol.DestinationPolicy{
+		Collect: protocol.CollectHitsAndUsage, Rules: []protocol.DestinationRule{},
+	}}
+	compiler, err := compilerFactory(options{DataDir: dataDir}, "secret", receiver)(protocol.CoreSelection{Engine: "xray"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := compiler.Compile(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Log     map[string]any `json:"log"`
+		Routing struct {
+			Rules []struct {
+				RuleTag string `json:"ruleTag"`
+				Webhook struct {
+					URL     string            `json:"url"`
+					Headers map[string]string `json:"headers"`
+				} `json:"webhook"`
+			} `json:"rules"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(artifact.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	rules := config.Routing.Rules
+	if len(rules) != 1 || rules[0].RuleTag != "psp-usage" ||
+		rules[0].Webhook.URL != receiver.Socket+":/usage" || rules[0].Webhook.Headers["X-PSP-Audit"] != receiver.Token {
+		t.Fatalf("rules = %+v", rules)
+	}
+	if config.Log["access"] != "none" {
+		t.Fatalf("log.access = %v", config.Log["access"])
 	}
 }
