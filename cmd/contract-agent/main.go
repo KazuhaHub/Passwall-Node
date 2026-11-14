@@ -7,8 +7,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -41,23 +43,43 @@ func (r observedRuntime) UpsertClient(ctx context.Context, client protocol.Clien
 func (r observedRuntime) RemoveClient(context.Context, protocol.ClientKey) error { return nil }
 
 func main() {
+	err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr)
+	var usage usageError
+	switch {
+	case err == nil:
+	case errors.As(err, &usage):
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	default:
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+type usageError struct{ message string }
+
+func (e usageError) Error() string { return e.message }
+
+func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
 	var endpoint, agentID, statePath string
 	var rounds int
 	var allowHTTP bool
-	flag.StringVar(&endpoint, "endpoint", "", "absolute /v1/node/sync URL")
-	flag.StringVar(&agentID, "agent-id", "", "registered agent id")
-	flag.StringVar(&statePath, "state", "", "SQLite state path")
-	flag.IntVar(&rounds, "rounds", 2, "number of full sync rounds")
-	flag.BoolVar(&allowHTTP, "allow-insecure-http", false, "allow HTTP for local contract tests")
-	flag.Parse()
-	if endpoint == "" || agentID == "" || statePath == "" || rounds < 1 {
-		fmt.Fprintln(os.Stderr, "endpoint, agent-id, state and positive rounds are required")
-		os.Exit(2)
+	flags := flag.NewFlagSet("contract-agent", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.StringVar(&endpoint, "endpoint", "", "absolute /v1/node/sync URL")
+	flags.StringVar(&agentID, "agent-id", "", "registered agent id")
+	flags.StringVar(&statePath, "state", "", "SQLite state path")
+	flags.IntVar(&rounds, "rounds", 2, "number of full sync rounds")
+	flags.BoolVar(&allowHTTP, "allow-insecure-http", false, "allow HTTP for local contract tests")
+	if err := flags.Parse(arguments); err != nil {
+		return usageError{err.Error()}
 	}
-	ctx := context.Background()
+	if endpoint == "" || agentID == "" || statePath == "" || rounds < 1 {
+		return usageError{"endpoint, agent-id, state and positive rounds are required"}
+	}
 	store, err := statesqlite.Open(ctx, statePath)
 	if err != nil {
-		fail(err)
+		return err
 	}
 	defer store.Close()
 	now := time.Now
@@ -69,18 +91,20 @@ func main() {
 		ObjectIssueTimeout: 5 * time.Minute, Now: now,
 	})
 	if err != nil {
-		fail(err)
+		return err
 	}
 	httpSyncer, err := agent.NewHTTPSyncer(endpoint, agent.HTTPOptions{
 		AllowInsecureHTTP: allowHTTP, UserAgent: "passwall-node/contract",
 	})
 	if err != nil {
-		fail(err)
+		return err
 	}
 	synchronizer := agent.Synchronizer{
 		Reports: agent.ReportBuilder{
 			AgentID: agentID, AgentVersion: "contract", CoreEngine: "xray", CoreVersion: "coreless", CoreState: "running",
-			Store: store, Now: now,
+			Capabilities: []string{protocol.CapabilityDestinationPolicy},
+			PolicyStatus: heldPolicyStatus(store, stderr),
+			Store:        store, Now: now,
 		},
 		Syncer: httpSyncer, Store: store, Processor: processor,
 	}
@@ -88,20 +112,47 @@ func main() {
 	for i := 0; i < rounds; i++ {
 		result, err := synchronizer.SyncOnce(ctx, false, false)
 		if err != nil {
-			fail(fmt.Errorf("sync round %d: %w", i+1, err))
+			return fmt.Errorf("sync round %d: %w", i+1, err)
 		}
 		results = append(results, result)
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
+	return json.NewEncoder(stdout).Encode(map[string]any{
 		"agent_id": agentID, "rounds": rounds, "results": results,
-	}); err != nil {
-		fail(err)
-	}
+	})
 }
 
-func fail(err error) {
-	fmt.Fprintln(os.Stderr, err)
-	os.Exit(1)
+// heldPolicyStatus is the contract agent's PolicyStatus: an observation of the
+// destination policy in the config document it last received. (Production
+// restores its status from the last confirmed deployment instead; a coreless
+// agent has no deployment, so the received document is the honest source.)
+// There is no core to deploy to, so a policy that validates is "applied" and
+// one that does not is "rejected"; an empty digest says it holds no policy.
+// Nothing is cached, so a policy the panel withdraws is reported as withdrawn on
+// the next report. A store it cannot read yields the zero status, which the
+// report builder drops: the panel sees "unknown" rather than "no policy".
+func heldPolicyStatus(store state.Store, warn io.Writer) func() protocol.PolicyStatus {
+	return func() protocol.PolicyStatus {
+		none := protocol.PolicyStatus{State: protocol.PolicyStateApplied}
+		doc, err := store.Stream(context.Background(), protocol.StreamConfig)
+		if errors.Is(err, state.ErrNotFound) {
+			return none
+		}
+		var config protocol.ConfigBody
+		if err == nil {
+			err = json.Unmarshal(doc.Body, &config)
+		}
+		if err != nil {
+			fmt.Fprintf(warn, "contract agent: omitting the policy status, the stored config is unreadable: %v\n", err)
+			return protocol.PolicyStatus{}
+		}
+		digest := protocol.PolicyDigest(config.Policy)
+		if protocol.ValidateDestinationPolicy(config.Policy) != nil {
+			return protocol.PolicyStatus{
+				Digest: digest, State: protocol.PolicyStateRejected, IssueCode: protocol.IssueDestinationPolicyRejected,
+			}
+		}
+		return protocol.PolicyStatus{Digest: digest, State: protocol.PolicyStateApplied}
+	}
 }
 
 var _ agent.Runtime = observedRuntime{}
