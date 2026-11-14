@@ -39,6 +39,9 @@ func TestStaticCapabilitiesDeclareAuditHitsOnlyWhenTheReceiverIsListening(t *tes
 		if !slices.Contains(capabilities, protocol.CapabilityDestinationPolicy) {
 			t.Fatalf("listening %v: the policy capability is gone: %v", listening, capabilities)
 		}
+		if !slices.Contains(capabilities, protocol.CapabilityDestinationGroups) {
+			t.Fatalf("listening %v: the group capability is gone: %v", listening, capabilities)
+		}
 	}
 }
 
