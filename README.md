@@ -97,9 +97,9 @@ shipped cores.
 |---|---|---|---|
 | Compiled as | `routing.domainStrategy: "AsIs"` | `routing.domainStrategy: "IPOnDemand"` | one `{"action":"resolve"}` before the first rule with an `ip_cidr`, searched through logical rules, in pass A or pass B, whichever the connection meets first |
 | DNS cost | none | one uncached system lookup per hostname connection that reaches an address rule, plus the one freedom does when it dials | one lookup (the core's DNS cache applies), and the dial reuses it |
-| Lookup fails | not applicable | the address rules miss and the connection is let through (fail open); freedom then fails to dial the same name | the connection fails (fail closed), for every connection that reaches the resolve, not only those an address rule would have judged |
+| Lookup fails | not applicable | the address rules miss and the connection is let through (fail open); freedom resolves the name again when it dials (usually failing too) | the connection fails (fail closed), for every connection that reaches the resolve, not only those an address rule would have judged |
 | Address matched is the address dialed | not applicable | not guaranteed: two separate lookups, so a rebinding or round-robin name can differ | yes: the direct outbound dials the stored addresses |
-| Inbound with `routeOnly: true` sniffing | fine | refused with `sniffing_insufficient` (`route_only_resolve`) wherever an address rule applies | not applicable: sing-box takes no per-inbound sniffing |
+| Inbound with `routeOnly: true` sniffing | fine | refused with `sniffing_insufficient` wherever an address rule applies; the error message names the listener and the reason (`route_only_resolve`) | not applicable: sing-box takes no per-inbound sniffing |
 | Sniffing the node adds | none | none for an address-only policy (disabled or `metadataOnly` sniffing is fine); the usual injection for domain rules | none |
 
 Caveats worth repeating to an operator:

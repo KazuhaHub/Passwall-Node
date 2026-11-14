@@ -59,7 +59,7 @@ func onDemand(policy *protocol.DestinationPolicy) *protocol.DestinationPolicy {
 
 // routedTo is an attempt for a name no sink can be placed at, judged by the
 // core's log: it "succeeds" when the log holds text.
-func routedTo(host string, text string) attempt {
+func routedTo(host string, text ...string) attempt {
 	a := socksDomain(host)
 	a.logHas, a.timeout = text, 2500*time.Millisecond
 	return a
@@ -165,8 +165,8 @@ func strategyCases(kind StrategyKind, engine string) []liveCase {
 		return []liveCase{{name: "on_demand: a name that does not resolve", policy: fixed(onDemand(blockLoopback())), outcomes: []outcome{
 			// The log lines are the cores' own and are what tells the verdicts
 			// apart: nothing reaches a sink either way.
-			forEngine("xray", viaDomain(reaches("Xray fails open: no IP rule matched, so the default route is taken", routedTo(NXHost, "default route for tcp:"+NXHost)))),
-			forEngine("sing-box", viaDomain(reaches("sing-box fails closed: the resolve action fails the connection", routedTo(NXHost, "dns: lookup failed for "+NXHost)))),
+			forEngine("xray", viaDomain(reaches("Xray fails open: the routing lookup failed, no IP rule matched, so the default route is taken", routedTo(NXHost, "features/routing/dns: resolve ip for "+NXHost, "default route for tcp:"+NXHost)))),
+			forEngine("sing-box", viaDomain(reaches("sing-box fails closed: the resolve action fails the connection", routedTo(NXHost, "=> resolve", "dns: lookup failed for "+NXHost)))),
 		}}}
 	}
 	return nil

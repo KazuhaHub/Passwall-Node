@@ -105,6 +105,9 @@ func (c Compiler) auditWebhook(policy *protocol.DestinationPolicy) func() map[st
 // off would change the connection's real destination.
 func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, plan agentcore.PolicyPlan) error {
 	var insufficient []protocol.ListenerKey
+	// reasons is the check's own reason for each refused listener, so the
+	// operator can see why (route_only_resolve, route_only, metadata_only, ...).
+	var reasons []string
 	for index, inbound := range inbounds {
 		need := plan.SniffNeedFor(served[index])
 		if need == 0 {
@@ -118,11 +121,12 @@ func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, pl
 			}
 			raw = encoded
 		}
-		verdict, _, err := protocol.CheckXraySniffing(raw, need)
+		verdict, reason, err := protocol.CheckXraySniffing(raw, need)
 		switch {
 		case err != nil:
 			// A value Xray itself would not read cannot supply anything.
 			insufficient = append(insufficient, served[index])
+			reasons = append(reasons, fmt.Sprintf("%s: malformed", served[index]))
 		case verdict == protocol.SniffInject:
 			injected, err := injectedSniffing()
 			if err != nil {
@@ -131,12 +135,13 @@ func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, pl
 			inbound["sniffing"] = injected
 		case verdict == protocol.SniffInsufficient:
 			insufficient = append(insufficient, served[index])
+			reasons = append(reasons, fmt.Sprintf("%s: %s", served[index], reason))
 		}
 	}
 	if len(insufficient) > 0 {
 		return &agentcore.PolicyError{
 			Code: protocol.IssueDestinationPolicySniffingInsufficient, Listeners: insufficient,
-			Err: fmt.Errorf("sniffing on %d inbound(s) cannot supply the policy's domain, protocol or resolved-address rules", len(insufficient)),
+			Err: fmt.Errorf("sniffing on %d inbound(s) cannot supply the policy's domain, protocol or resolved-address rules (%s)", len(insufficient), strings.Join(reasons, ", ")),
 		}
 	}
 	return nil

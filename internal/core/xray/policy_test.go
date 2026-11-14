@@ -898,6 +898,9 @@ func TestCompilerOnDemandRefusesARouteOnlyInboundThatAnIPRuleAppliesTo(t *testin
 		!reflect.DeepEqual(policyErr.Listeners, []protocol.ListenerKey{"lst_1"}) {
 		t.Fatalf("error = %v, want sniffing_insufficient naming only lst_1 (the inbound the IP rule applies to)", err)
 	}
+	if !strings.Contains(err.Error(), "lst_1: route_only_resolve") {
+		t.Fatalf("error = %q, want it to carry the reason route_only_resolve for lst_1", err)
+	}
 
 	// Under AsIs the same inbound is fine: routeOnly only matters once the
 	// router resolves a name.
