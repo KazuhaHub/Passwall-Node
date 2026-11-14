@@ -152,8 +152,14 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			{"tag": "blocked", "protocol": "blackhole", "settings": map[string]any{}},
 		},
 	}
+	// Xray writes an access line for every connection to stdout, carrying the
+	// user email and destination, unless log.access is exactly "none". The
+	// agent forwards core stdout to journald or docker logs, so the default
+	// must switch it off; an explicit path is still honoured.
 	if c.AccessLog != "" {
 		config.Log["access"] = c.AccessLog
+	} else {
+		config.Log["access"] = "none"
 	}
 	if c.ErrorLog != "" {
 		config.Log["error"] = c.ErrorLog

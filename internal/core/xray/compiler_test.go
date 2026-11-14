@@ -178,6 +178,39 @@ func TestCompilerArtifactPassesPinnedXrayValidation(t *testing.T) {
 	}
 }
 
+func TestCompilerDisablesAccessLogByDefault(t *testing.T) {
+	t.Parallel()
+	artifact, err := (Compiler{}).Compile(context.Background(), realitySnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := logSetting(t, artifact, "access"); got != "none" {
+		t.Fatalf("log.access = %v, want \"none\" so Xray does not write every connection to stdout", got)
+	}
+}
+
+func TestCompilerUsesExplicitAccessLog(t *testing.T) {
+	t.Parallel()
+	artifact, err := (Compiler{AccessLog: "/var/log/xray/access.log"}).Compile(context.Background(), realitySnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := logSetting(t, artifact, "access"); got != "/var/log/xray/access.log" {
+		t.Fatalf("log.access = %v, want the configured path", got)
+	}
+}
+
+func logSetting(t *testing.T, artifact agentcore.Artifact, key string) any {
+	t.Helper()
+	var config struct {
+		Log map[string]any `json:"log"`
+	}
+	if err := json.Unmarshal(artifact.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	return config.Log[key]
+}
+
 func TestCompilerRejectsTrailingListenerJSON(t *testing.T) {
 	t.Parallel()
 	snapshot := realitySnapshot(t)
