@@ -407,17 +407,21 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 
 // staticCapabilities are the capabilities fixed for the process lifetime.
 //
-// policy.destination.v1 and policy.destination.groups.v1 are always among them and are NOT in the per-report
-// CapabilitySource: both engines enforce it, and the panel can switch engine
-// under a running agent, so a declaration that followed the engine would
-// flicker and make the panel withdraw and resend the policy.
+// policy.destination.v1, policy.destination.groups.v1 and
+// policy.destination.resolve.v1 are always among them and are NOT in the
+// per-report CapabilitySource: both engines enforce them, and the panel can
+// switch engine under a running agent, so a declaration that followed the
+// engine would flicker and make the panel withdraw and resend the policy. The
+// resolve one is declared only because BOTH engines compile on_demand: it means
+// "on every engine this agent runs", which is why the sing-box compiler could
+// not be left out of the release.
 //
 // audit.hits.v1 is among them only when the hit receiver is listening, which is
 // decided once at startup; a receiver that fails afterwards takes the agent down
 // rather than leaving the declaration untrue. audit.usage.v1 is never declared:
 // per-site usage is a later tier.
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
-	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups}
+	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}

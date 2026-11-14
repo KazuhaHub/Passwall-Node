@@ -107,6 +107,9 @@ func requireStatus(t *testing.T, report protocol.NodeReport, want *protocol.Poli
 	if !slices.Contains(report.Capabilities, protocol.CapabilityDestinationGroups) {
 		t.Fatalf("capabilities %v do not declare %s", report.Capabilities, protocol.CapabilityDestinationGroups)
 	}
+	if !slices.Contains(report.Capabilities, protocol.CapabilityDestinationResolve) {
+		t.Fatalf("capabilities %v do not declare %s", report.Capabilities, protocol.CapabilityDestinationResolve)
+	}
 	got := report.PolicyStatus
 	if got == nil || got.Digest != want.Digest || got.State != want.State || got.IssueCode != want.IssueCode {
 		t.Fatalf("policy status = %+v, want %+v", got, want)

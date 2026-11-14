@@ -67,13 +67,65 @@ func (c Compiler) applyPolicy(result *config, snapshot agentcore.Snapshot, serve
 		return err
 	}
 	rules := []map[string]any{}
-	if plan.SniffNeed() != 0 {
+	// Only domain and protocol rules need the sniff. The resolved-address need
+	// is Xray's alone (routeOnly), and sing-box takes no per-inbound sniffing.
+	if plan.SniffNeed()&(protocol.SniffForDomains|protocol.SniffForProtocols) != 0 {
 		rules = append(rules, c.sequence(result, plan, true)...)
 		rules = append(rules, map[string]any{"action": "sniff"})
 	}
 	rules = append(rules, c.sequence(result, plan, false)...)
+	if plan.Resolve == protocol.ResolveOnDemand {
+		rules = insertResolve(rules)
+	}
 	result.Route["rules"] = rules
 	return nil
+}
+
+// insertResolve puts one {"action":"resolve"} immediately before the first rule,
+// in evaluation order, that has an address condition, and leaves the rules
+// alone when none does. rules is the whole list, pass A, the sniff and pass B
+// included, so "first" is the order the connection meets them in: an address
+// rule in pass A is resolved there and pass B reads the stored result, while a
+// policy whose only address rules are in pass B resolves there. Nothing before
+// the resolve is delayed by a lookup, and a connection one of those rules ends
+// never pays for one.
+//
+// sing-box matches ip_cidr against a hostname destination only through the
+// addresses a resolve action has stored, and the direct outbound dials those
+// same addresses, so the address matched is the address dialed. The action does
+// nothing for an IP destination. A name that does not resolve fails the
+// connection (fail closed), for every connection that reaches the resolve and
+// not only those an address rule would have judged. The resolve action exists
+// from sing-box 1.11; the catalog offers nothing older (see the catalog test).
+func insertResolve(rules []map[string]any) []map[string]any {
+	for index, rule := range rules {
+		if !hasIPCondition(rule) {
+			continue
+		}
+		out := make([]map[string]any, 0, len(rules)+1)
+		out = append(out, rules[:index]...)
+		out = append(out, map[string]any{"action": "resolve"})
+		return append(out, rules[index:]...)
+	}
+	return rules
+}
+
+// hasIPCondition reports whether a rule, or any rule nested in it, reads the
+// destination's addresses. The policy writes Private out as ip_cidr (see
+// policyRule), so ip_cidr is the only field to look for. A logical rule is
+// searched whole, an inverted member included: a NOT over an address condition
+// needs the addresses as much as the condition does.
+func hasIPCondition(rule map[string]any) bool {
+	if _, present := rule["ip_cidr"]; present {
+		return true
+	}
+	nested, _ := rule["rules"].([]map[string]any)
+	for _, inner := range nested {
+		if hasIPCondition(inner) {
+			return true
+		}
+	}
+	return false
 }
 
 // sequence emits the plan's rules in evaluation order: exempt, then the

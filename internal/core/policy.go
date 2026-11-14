@@ -72,7 +72,10 @@ type PolicyPlan struct {
 	// SkippedUsers counts the roster clients whose name the compiler's
 	// normaliser refused, so none of their names reached a rule.
 	SkippedUsers int
-	trailingDot  bool
+	// Resolve is the policy's resolve mode: whether the core resolves a
+	// hostname before it tries the IP rules on it.
+	Resolve     protocol.ResolveMode
+	trailingDot bool
 }
 
 // The evaluation phases of a rule, from the wire spec. The exempt step sits
@@ -113,7 +116,7 @@ func PlanPolicy(policy *protocol.DestinationPolicy, clients []protocol.Client, i
 	if username == nil {
 		username = func(name string) (string, bool) { return name, true }
 	}
-	var plan PolicyPlan
+	plan := PolicyPlan{Resolve: policy.Resolve}
 	usersBySubject := make(map[protocol.SubjectKey][]string, len(clients))
 	for _, client := range clients {
 		name, usable := username(client.Credentials.Username)
@@ -189,8 +192,14 @@ func rulePhase(rule protocol.DestinationRule) int {
 	}
 }
 
-func ruleNeed(rule protocol.DestinationRule) protocol.SniffNeed {
+// ruleNeed is what one rule needs from sniffing. An IP rule (CIDRs, Private)
+// needs the resolved-address guard only when the policy resolves hostnames:
+// under AsIs it is tried on an address target and nothing is looked up.
+func ruleNeed(rule protocol.DestinationRule, resolve protocol.ResolveMode) protocol.SniffNeed {
 	var need protocol.SniffNeed
+	if resolve == protocol.ResolveOnDemand && (len(rule.CIDRs) > 0 || rule.Private) {
+		need |= protocol.SniffForResolvedIPs
+	}
 	if len(rule.Domains) > 0 {
 		need |= protocol.SniffForDomains
 	}
@@ -204,7 +213,7 @@ func ruleNeed(rule protocol.DestinationRule) protocol.SniffNeed {
 func (p PolicyPlan) SniffNeed() protocol.SniffNeed {
 	var need protocol.SniffNeed
 	for _, rule := range p.Rules {
-		need |= ruleNeed(rule.Rule)
+		need |= ruleNeed(rule.Rule, p.Resolve)
 	}
 	return need
 }
@@ -217,7 +226,7 @@ func (p PolicyPlan) SniffNeedFor(listener protocol.ListenerKey) protocol.SniffNe
 		if rule.Inbounds != nil && !containsListener(rule.Inbounds, listener) {
 			continue
 		}
-		need |= ruleNeed(rule.Rule)
+		need |= ruleNeed(rule.Rule, p.Resolve)
 	}
 	return need
 }

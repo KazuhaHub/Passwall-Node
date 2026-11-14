@@ -11,17 +11,9 @@ import (
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
-// TestPolicyEnforcedByRealSingBox is the Xray live test's counterpart: a real
-// sing-box server compiled by this repository, a real Xray client in front of
-// it, and a sink that sees which connections get through. sing-box's direct
-// outbound needs no rewrite to reach loopback; only the fake host names do.
-func TestPolicyEnforcedByRealSingBox(t *testing.T) {
-	server, serverOK := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
-	client, clientOK := os.LookupEnv("PSP_TEST_XRAY_CLIENT_BIN")
-	if !serverOK || !clientOK {
-		t.Skip("set PSP_TEST_SING_BOX_BIN and PSP_TEST_XRAY_CLIENT_BIN")
-	}
-	policylive.Run(t, client, policylive.Options{Engine: "sing-box", SOCKSDomainTargets: true}, func(t *testing.T, policy *protocol.DestinationPolicy, port int) *policylive.Process {
+// startSingBox compiles policy for a real sing-box as the live test does.
+func startSingBox(server string) policylive.StartFunc {
+	return func(t *testing.T, policy *protocol.DestinationPolicy, port int) *policylive.Process {
 		spec, err := json.Marshal(listenerSpec{
 			Enabled: true, Listen: "127.0.0.1", Port: port, Protocol: "shadowsocks",
 			Settings: fmt.Sprintf(`{"method":"2022-blake3-aes-128-gcm","password":%q,"network":"tcp,udp"}`, policylive.ServerKey),
@@ -43,7 +35,49 @@ func TestPolicyEnforcedByRealSingBox(t *testing.T) {
 			}
 		})
 		return process
-	})
+	}
+}
+
+// TestPolicyEnforcedByRealSingBox is the Xray live test's counterpart: a real
+// sing-box server compiled by this repository, a real Xray client in front of
+// it, and a sink that sees which connections get through. sing-box's direct
+// outbound needs no rewrite to reach loopback; only the fake host names do.
+func TestPolicyEnforcedByRealSingBox(t *testing.T) {
+	server, serverOK := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
+	client, clientOK := os.LookupEnv("PSP_TEST_XRAY_CLIENT_BIN")
+	if !serverOK || !clientOK {
+		t.Skip("set PSP_TEST_SING_BOX_BIN and PSP_TEST_XRAY_CLIENT_BIN")
+	}
+	policylive.Run(t, client, policylive.Options{Engine: "sing-box", SOCKSDomainTargets: true}, startSingBox(server))
+}
+
+// TestRealSingBoxAsIsDoesNotResolveForAnAddressRule is the baseline the
+// resolve option is measured against: with no resolve action in the route, a
+// name that resolves into a blocked CIDR is not blocked.
+func TestRealSingBoxAsIsDoesNotResolveForAnAddressRule(t *testing.T) {
+	server, serverOK := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
+	client, clientOK := os.LookupEnv("PSP_TEST_XRAY_CLIENT_BIN")
+	if !serverOK || !clientOK {
+		t.Skip("set PSP_TEST_SING_BOX_BIN and PSP_TEST_XRAY_CLIENT_BIN")
+	}
+	policylive.RunStrategy(t, client, policylive.Options{Engine: "sing-box", SOCKSDomainTargets: true}, policylive.StrategyAsIs, startSingBox(server))
+}
+
+// TestRealSingBoxOnDemandResolvesForAnAddressRule runs the compiler's own output
+// for a policy with Resolve on_demand on a real sing-box: a name that resolves
+// into a blocked range is blocked, and a name that does not resolve fails the
+// connection.
+func TestRealSingBoxOnDemandResolvesForAnAddressRule(t *testing.T) {
+	server, serverOK := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
+	client, clientOK := os.LookupEnv("PSP_TEST_XRAY_CLIENT_BIN")
+	if !serverOK || !clientOK {
+		t.Skip("set PSP_TEST_SING_BOX_BIN and PSP_TEST_XRAY_CLIENT_BIN")
+	}
+	for _, kind := range []policylive.StrategyKind{policylive.StrategyOnDemand, policylive.StrategyOnDemandUnresolvable} {
+		t.Run(string(kind), func(t *testing.T) {
+			policylive.RunStrategy(t, client, policylive.Options{Engine: "sing-box", SOCKSDomainTargets: true}, kind, startSingBox(server))
+		})
+	}
 }
 
 // withFakeHosts is the test-only rewrite: the harness's fake host names resolve
