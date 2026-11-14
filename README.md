@@ -152,8 +152,13 @@ as one stream in the journal:
 2026/09/17 08:15:36.091882 [Info] passwall-node: sync completed
 ```
 
-Core subprocesses retain their upstream log format. The Compose example also
-bounds Docker's `json-file` logs to three 10 MiB files.
+Core subprocesses retain their upstream log format. Xray's per-connection
+access log is off (`"access": "none"`): it carried every user's email and
+destination into journald or `docker logs`. Upgrading to a release with this
+change alters the compiled config, so each node's core restarts once, and access
+lines can still appear for about one sync period while the agent starts the core
+from the previously deployed artifact. The Compose example also bounds Docker's
+`json-file` logs to three 10 MiB files.
 
 The optional `passwall-node-updater` service enables PSP's authenticated remote
 upgrade task for Docker deployments. The network-facing Agent never receives
