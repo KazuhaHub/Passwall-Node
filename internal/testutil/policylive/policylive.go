@@ -590,6 +590,18 @@ func cases() []liveCase {
 			viaDomain(reaches("http to the allowed host", socksHTTP("allowed.example", "allowed.example"))),
 			viaDomain(isBlocked("http to a host off the list", socksHTTP("blocked.example", "blocked.example"))),
 			isBlocked("bittorrent by address", bittorrent),
+			forEngine("sing-box", viaDomain(isBlocked("requested off the list, claiming one on it", socksHTTP("blocked.example", "allowed.example")))),
+			forEngine("sing-box", viaDomain(isBlocked("requested off the list, claiming one on it by sni", socksTLS("blocked.example", "allowed.example")))),
+		}},
+		// A group catch-all that only observes ends the evaluation like any other
+		// observe rule, so it must not let the protocol it follows through.
+		{name: "a group observe catch-all does not let a blocked protocol through", policy: policyOf(
+			protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
+			protocol.DestinationRule{ID: "g1", Action: protocol.RuleObserve, CatchAll: true, Subjects: []protocol.SubjectKey{Subject}},
+		), outcomes: []outcome{
+			viaDomain(isBlocked("bittorrent to a host", socksBittorrent("allowed.example"))),
+			viaDomain(reaches("http to a host", socksHTTP("allowed.example", "allowed.example"))),
+			isBlocked("bittorrent by address", bittorrent),
 		}},
 		{name: "observe delivers and does not shadow a later block", policy: func(sinkPort int) *protocol.DestinationPolicy {
 			return &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{

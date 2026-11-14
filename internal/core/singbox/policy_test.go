@@ -453,7 +453,10 @@ func TestCompilerPolicyArtifactPassesPinnedSingBoxValidation(t *testing.T) {
 // A terminating rule in pass A that the reference order puts AFTER a protocol
 // block would let traffic skip that block: BitTorrent to a host on a group's
 // allowlist would end at the group allow and never reach the protocol block in
-// pass B. Once pass A has left out a protocol block, no allow may follow in it.
+// pass B. Once pass A has left out a protocol block it holds no allow; a block
+// that follows is still decided there by the requested name, as "not on any
+// allow that was left out", so the group's deny-the-rest does not block the host
+// the group allows.
 func TestCompilerPassAHoldsNoAllowAfterAProtocolBlock(t *testing.T) {
 	t.Parallel()
 	policy := &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
@@ -466,8 +469,22 @@ func TestCompilerPassAHoldsNoAllowAfterAProtocolBlock(t *testing.T) {
 	if !sniffed {
 		t.Fatal("no sniff rule")
 	}
-	if len(passA) != 0 {
-		t.Fatalf("pass A = %v, want nothing: the group allow follows the protocol block", shapes(passA))
+	if got, want := shapes(passA), []string{"reject"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass A = %v, want only the group's deny-the-rest: %v", got, want)
+	}
+	// requested domain AND the group AND NOT (any member allow).
+	want := map[string]any{
+		"type": "logical", "mode": "and", "action": "reject",
+		"rules": []any{
+			map[string]any{"auth_user": []any{"u5-k2@x", "u5@x"}, "domain_regex": []any{"."}},
+			map[string]any{
+				"type": "logical", "mode": "or", "invert": true,
+				"rules": []any{map[string]any{"auth_user": []any{"u5-k2@x", "u5@x"}, "domain": []any{"x.example"}}},
+			},
+		},
+	}
+	if !reflect.DeepEqual(passA[0], want) {
+		t.Fatalf("pass A group rule = %#v\nwant %#v", passA[0], want)
 	}
 	if got, want := shapes(passB), []string{"reject", "route>direct", "reject"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("pass B = %v, want %v", got, want)
@@ -477,11 +494,9 @@ func TestCompilerPassAHoldsNoAllowAfterAProtocolBlock(t *testing.T) {
 	}
 }
 
-// Blocks after the protocol block stay in pass A, where the requested name
-// decides them. Up to the first allow that has to move: a block after a moved
-// allow could pre-empt it (a group's deny-the-rest would block the very host the
-// group allows), so it moves with it.
-func TestCompilerPassAStopsAtTheFirstAllowAfterAProtocolBlock(t *testing.T) {
+// Blocks after the protocol block stay in pass A. Only a block that follows a
+// left-out allow carries the "and not that allow" condition.
+func TestCompilerPassAConditionsOnlyTheBlocksThatFollowALeftOutAllow(t *testing.T) {
 	t.Parallel()
 	policy := &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
 		{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:a.example"}},
@@ -489,21 +504,46 @@ func TestCompilerPassAStopsAtTheFirstAllowAfterAProtocolBlock(t *testing.T) {
 		{ID: "p3", Action: protocol.RuleBlock, Domains: []string{"domain:b.example"}},
 		{ID: "g1x1", Action: protocol.RuleAllow, Domains: []string{"full:x.example"}, Subjects: []protocol.SubjectKey{"usr_5"}},
 		{ID: "g1", Action: protocol.RuleBlock, CatchAll: true, Subjects: []protocol.SubjectKey{"usr_5"}},
+		{ID: "g2x1", Action: protocol.RuleAllow, Domains: []string{"full:y.example"}, Subjects: []protocol.SubjectKey{"usr_6"}},
+		{ID: "g2", Action: protocol.RuleBlock, CatchAll: true, Subjects: []protocol.SubjectKey{"usr_6"}},
 		{ID: "p4", Action: protocol.RuleObserve, Ports: "6881"},
 	}}
 	config, _ := compilePolicy(t, policySnapshot(t, policy))
 	passA, passB, _ := split(config.rules(t))
-	// Pass A: the trailing-dot guard, then the two domain blocks.
-	if got, want := shapes(passA), []string{"reject", "reject", "reject"}; !reflect.DeepEqual(got, want) {
+	if got, want := shapes(passA), []string{"reject", "reject", "reject", "reject", "reject"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("pass A = %v, want %v", got, want)
 	}
-	for _, rule := range passA {
-		if rule["outbound"] == "direct" || rule["auth_user"] != nil {
-			t.Fatalf("pass A holds %v, want only the guard and the domain blocks", rule)
+	for index, rule := range passA {
+		_, logical := rule["type"]
+		if logical != (index >= 3) {
+			t.Fatalf("pass A rule %d = %v, only the two group catch-alls are conditioned", index, rule)
 		}
 	}
-	want := []string{"reject", "reject", "reject", "reject", "route>direct", "reject", "route>psp-watch-p4"}
+	// g2 follows g1's member allow as well as its own.
+	inner := passA[4]["rules"].([]any)[1].(map[string]any)["rules"].([]any)
+	if len(inner) != 2 {
+		t.Fatalf("g2 excludes %v, want both member allows that precede it", inner)
+	}
+	want := []string{"reject", "reject", "reject", "reject", "route>direct", "reject", "route>direct", "reject", "route>psp-watch-p4"}
 	if got := shapes(passB); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass B = %v, want %v", got, want)
+	}
+}
+
+// A group catch-all that only observes is terminating too (it routes to the
+// watch outbound), so pass A leaves it out like every other observe rule.
+func TestCompilerPassALeavesOutAGroupObserveCatchAll(t *testing.T) {
+	t.Parallel()
+	policy := &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
+		{ID: "g1", Action: protocol.RuleObserve, CatchAll: true, Subjects: []protocol.SubjectKey{"usr_5"}},
+	}}
+	config, _ := compilePolicy(t, policySnapshot(t, policy))
+	passA, passB, _ := split(config.rules(t))
+	if len(passA) != 0 {
+		t.Fatalf("pass A = %v, want nothing", shapes(passA))
+	}
+	if got, want := shapes(passB), []string{"reject", "route>psp-watch-g1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("pass B = %v, want %v", got, want)
 	}
 }
@@ -526,9 +566,11 @@ func TestCompilerPassAKeepsAllowsThatPrecedeEveryOmittedBlock(t *testing.T) {
 	}
 	config, _ := compilePolicy(t, policySnapshot(t, policy))
 	passA, _, _ := split(config.rules(t))
-	// ok.example, ok2.example, exempt; no guard (no domain block). The group
-	// allow follows the omitted protocol block, so it is not here.
-	if got, want := shapes(passA), []string{"route>direct", "route>direct", "route>direct"}; !reflect.DeepEqual(got, want) {
+	// ok.example, ok2.example, exempt, then the group's conditioned catch-all.
+	if got, want := shapes(passA), []string{"route>direct", "route>direct", "route>direct", "reject"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("pass A = %v, want %v", got, want)
+	}
+	if passA[3]["type"] != "logical" {
+		t.Fatalf("pass A group rule = %v, want the conditioned catch-all", passA[3])
 	}
 }

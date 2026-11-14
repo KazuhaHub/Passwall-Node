@@ -36,11 +36,16 @@ import (
 // (it ends in the same verdict), so blocks keep being decided by the requested
 // name. An ALLOW that follows a protocol BLOCK is not: the connection would end
 // there and never reach the block in pass B, so BitTorrent to a host a group
-// allows would go through. At the first such allow pass A stops and everything
-// from there on is decided in pass B alone.
+// allows would go through. Such an allow is left out of pass A, and a block
+// after it is emitted as a logical rule, "the block's own match AND NOT (any
+// allow left out before it)", so the group's deny-the-rest still decides the
+// requested name without blocking the host the group allows. The allow itself
+// is decided in pass B, after the protocol block. Observe rules end the
+// evaluation too, and are always left out of pass A, a group's catch-all that
+// only observes included.
 //
-// Otherwise pass A never stops early: every block after a protocol rule must
-// still be decided by the requested name. A narrower sniff for the protocols alone is not
+// Pass A never stops early: every block after a protocol rule must still be
+// decided by the requested name. A narrower sniff for the protocols alone is not
 // an option; a second sniff action re-reads the connection, times out and sets
 // no domain, which breaks the full sniff that follows.
 //
@@ -48,14 +53,10 @@ import (
 //   - A connection that asks for an IP and carries a false SNI or Host is
 //     decided by that false name, because there is no requested name to check it
 //     against. The panel's docs say so.
-//   - One over-block, in place of a leak: a protocol allow followed by a domain
-//     block is invisible to pass A, so that protocol sent to the blocked domain
-//     is blocked, where Xray lets it through.
-//   - When pass A stops at an allow that follows a protocol block (a group
-//     allowlist, in practice), the rules from there on are decided by the
-//     sniffed name only, so a connection that requests a domain and claims
-//     another in its SNI or Host is judged by the claim. The same class as the
-//     first limit, widened to those rules.
+//   - One over-block, in place of a leak: a protocol allow followed by a block
+//     (a domain block, or a group's deny-the-rest) is invisible to pass A, so
+//     that protocol sent to a destination the block names is blocked, where Xray
+//     lets it through.
 //
 // sing-box needs no sniffing check of its own: it takes no per-inbound
 // sniffing, so there is nothing an operator's inbound setting could withhold.
@@ -78,20 +79,14 @@ func (c Compiler) applyPolicy(result *config, snapshot agentcore.Snapshot, serve
 // trailing-dot guard, at the exempt position. beforeSniff selects pass A.
 func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSniff bool) []map[string]any {
 	var rules []map[string]any
-	// blockOmitted: pass A has left out a protocol block. From there on pass A
-	// may not hold an allow: the reference order evaluates that block first, and
-	// an allow that ends the evaluation here would let the protocol skip it.
-	// stopped: such an allow has been moved to pass B, so every later rule
-	// moves with it; a block that stayed could pre-empt the allow (a group's
-	// deny-the-rest would block the host the group allows).
-	blockOmitted, stopped := false, false
+	// blockOmitted: pass A has left out a protocol block. From there on an allow
+	// may not end the evaluation in pass A, so it is collected in leftOut and
+	// excluded from the blocks that follow it. The exempt step needs no such
+	// care: it sits before phase 3, and only a phase 3 rule carries a protocol
+	// block.
+	blockOmitted := false
+	var leftOut []map[string]any
 	exempt := func() {
-		if beforeSniff && blockOmitted {
-			stopped = true
-		}
-		if beforeSniff && stopped {
-			return
-		}
 		if len(plan.ExemptUsers) > 0 {
 			rules = append(rules, map[string]any{"auth_user": plan.ExemptUsers, "action": "route", "outbound": "direct"})
 		}
@@ -105,7 +100,7 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 			exempt()
 		}
 		if beforeSniff {
-			if planned.Phase == agentcore.PhaseObserve {
+			if rule.Action == protocol.RuleObserve {
 				continue
 			}
 			if len(rule.Protocols) > 0 {
@@ -115,9 +110,7 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 				continue
 			}
 			if blockOmitted && rule.Action == protocol.RuleAllow {
-				stopped = true
-			}
-			if stopped {
+				leftOut = append(leftOut, policyRule(planned))
 				continue
 			}
 		}
@@ -128,6 +121,15 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 		switch rule.Action {
 		case protocol.RuleBlock:
 			out["action"] = "reject"
+			if len(leftOut) > 0 {
+				out = map[string]any{
+					"type": "logical", "mode": "and", "action": "reject",
+					"rules": []map[string]any{
+						policyRuleWithout(out),
+						{"type": "logical", "mode": "or", "invert": true, "rules": leftOut},
+					},
+				}
+			}
 		case protocol.RuleObserve:
 			tag := "psp-watch-" + rule.ID
 			if !beforeSniff {
@@ -231,3 +233,14 @@ func splitPorts(text string) ([]int, []string) {
 // username to make the sing-box user name, and sing-box's auth_user matches that
 // name literally.
 func singboxUsername(username string) (string, bool) { return strings.TrimSpace(username), true }
+
+// policyRuleWithout is the match part of a rule: its fields without the action.
+func policyRuleWithout(rule map[string]any) map[string]any {
+	out := make(map[string]any, len(rule))
+	for key, value := range rule {
+		if key != "action" {
+			out[key] = value
+		}
+	}
+	return out
+}
