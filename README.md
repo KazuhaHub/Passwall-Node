@@ -73,6 +73,23 @@ goroutines and descriptors stayed bounded and returned to baseline, but one
 unexplained burst lost 4 of 300,000 hits. Counts are therefore a record, not an
 invoice: enforcement never depends on them.
 
+### Per-site usage
+
+With the `audit.usage.v1` capability, an Xray node whose policy asks for
+`hits_and_usage` also counts connections per hour, account and site (the
+registrable domain, or `(ip)` for a connection to an address). It is a count of
+connections, not of bytes, and it keeps no port, path, full host name or source
+address. Xray reports it through a webhook on every rule that sends traffic to
+`direct` (the exempt step and the allow rules) and on a final `psp-usage` rule
+that matches the rest, so `log.access` stays `none` and no access log is ever
+written. Blocked and report-only connections are counted as rule hits only.
+sing-box has no webhook and records no usage.
+
+The record is as best-effort as the rule hits: a lost post is not retried, a
+restart loses what has not been sent, and every loss that the node can see is
+counted (`unmatched`, `dropped_usage`). The receiver holds at most 50,000
+distinct (hour, account, site) rows between two reports.
+
 ### Destination policy: hostnames and IP rules
 
 A destination rule that names addresses (`cidrs`, `private`) is tried on the
