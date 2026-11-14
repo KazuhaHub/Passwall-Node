@@ -358,17 +358,138 @@ func TestCompilerWithPolicyButNoSurvivingRulesStillPinsAsIs(t *testing.T) {
 	}
 }
 
-func TestCompilerWritesNoWebhookInBatchOne(t *testing.T) {
+func compileWithAudit(t *testing.T, compiler Compiler, policy *protocol.DestinationPolicy) (policyConfig, agentcore.Artifact) {
+	t.Helper()
+	artifact, err := compiler.Compile(context.Background(), policySnapshot(t, policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config policyConfig
+	if err := json.Unmarshal(artifact.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	return config, artifact
+}
+
+func webhookPolicy(collect protocol.CollectLevel) *protocol.DestinationPolicy {
+	return &protocol.DestinationPolicy{Collect: collect, Rules: []protocol.DestinationRule{
+		{ID: "s1", Action: protocol.RuleBlock, SourceCIDRs: []string{"192.0.2.0/24"}},
+		{ID: "p1", Action: protocol.RuleAllow, Domains: []string{"full:ok.example"}},
+		{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:a.example"}, CIDRs: []string{"203.0.113.0/24"}},
+		{ID: "g9", Action: protocol.RuleObserve, CatchAll: true, Subjects: []protocol.SubjectKey{"usr_6"}},
+		{ID: "p3", Action: protocol.RuleObserve, Ports: "26"},
+		{ID: "s2", Action: protocol.RuleObserve, SourceCIDRs: []string{"198.51.100.0/24"}},
+	}, Exempt: []protocol.SubjectKey{"usr_5"}}
+}
+
+// The webhook goes on every rule whose outbound is a deny or a watch outbound,
+// source rules and the halves of a split rule included, and on nothing else:
+// not on an allow, not on the exempt step and not on the builtin trailing-dot
+// guard, which is not the operator's rule.
+func TestCompilerWebhookIsOnlyOnDenyAndWatchRules(t *testing.T) {
 	t.Parallel()
-	policy := &protocol.DestinationPolicy{Collect: protocol.CollectHitsAndUsage, Rules: []protocol.DestinationRule{
-		{ID: "p1", Action: protocol.RuleBlock, Ports: "25"},
-		{ID: "p2", Action: protocol.RuleObserve, Ports: "26"},
-	}}
-	config, _ := compilePolicy(t, policySnapshot(t, policy))
+	compiler := Compiler{AuditSocket: "/data/runtime/audit.sock", AuditToken: "tok-1"}
+	config, _ := compileWithAudit(t, compiler, webhookPolicy(protocol.CollectHits))
+	want := map[string]any{
+		"url": "/data/runtime/audit.sock:/hit", "headers": map[string]any{"X-PSP-Audit": "tok-1"},
+	}
+	seen := 0
 	for _, rule := range config.rules(t) {
-		if _, present := rule["webhook"]; present {
-			t.Fatalf("rule %v carries a webhook; collection is not part of batch 1", rule["ruleTag"])
+		outbound, _ := rule["outboundTag"].(string)
+		hooked := strings.HasPrefix(outbound, "psp-deny-") || strings.HasPrefix(outbound, "psp-watch-")
+		webhook, present := rule["webhook"]
+		if present != hooked {
+			t.Errorf("rule %v (outbound %v): webhook present = %v, want %v", rule["ruleTag"], outbound, present, hooked)
 		}
+		if present {
+			seen++
+			if !reflect.DeepEqual(webhook, any(want)) {
+				t.Errorf("rule %v webhook = %v, want %v", rule["ruleTag"], webhook, want)
+			}
+		}
+		if rule["ruleTag"] == "psp-trailing-dot" || rule["ruleTag"] == "psp-exempt" || rule["ruleTag"] == "psp-p1" {
+			if present {
+				t.Errorf("%v must not carry a webhook", rule["ruleTag"])
+			}
+		}
+	}
+	// s1, p2a, p2b, g9, p3, s2.
+	if seen != 6 {
+		t.Fatalf("%d rules carry a webhook, want 6: %v", seen, ruleSummary(config.rules(t)))
+	}
+}
+
+func TestCompilerWebhookNeedsCollectionAndASocket(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		compiler Compiler
+		collect  protocol.CollectLevel
+	}{
+		{"collect off", Compiler{AuditSocket: "/d/audit.sock", AuditToken: "t"}, protocol.CollectOff},
+		{"no socket", Compiler{AuditToken: "t"}, protocol.CollectHits},
+		{"no token", Compiler{AuditSocket: "/d/audit.sock"}, protocol.CollectHits},
+		{"neither", Compiler{}, protocol.CollectHitsAndUsage},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config, _ := compileWithAudit(t, test.compiler, webhookPolicy(test.collect))
+			for _, rule := range config.rules(t) {
+				if _, present := rule["webhook"]; present {
+					t.Fatalf("rule %v carries a webhook", rule["ruleTag"])
+				}
+			}
+		})
+	}
+	// hits_and_usage still attaches it: usage rides on the log filter, the
+	// webhook is the hit channel of both levels.
+	config, _ := compileWithAudit(t, Compiler{AuditSocket: "/d/audit.sock", AuditToken: "t"}, webhookPolicy(protocol.CollectHitsAndUsage))
+	found := false
+	for _, rule := range config.rules(t) {
+		_, present := rule["webhook"]
+		found = found || present
+	}
+	if !found {
+		t.Fatal("hits_and_usage attached no webhook")
+	}
+}
+
+// A webhook never changes which outbound is first, what the routing strategy
+// is, or whether deduplication is on: every event has to be counted.
+func TestCompilerWebhookLeavesOutboundOrderStrategyAndDedupAlone(t *testing.T) {
+	t.Parallel()
+	config, _ := compileWithAudit(t, Compiler{AuditSocket: "/d/audit.sock", AuditToken: "t"}, webhookPolicy(protocol.CollectHits))
+	if config.Outbounds[0]["tag"] != "direct" {
+		t.Fatalf("outbounds[0] = %v, want direct", config.Outbounds[0])
+	}
+	if string(config.Routing["domainStrategy"]) != `"AsIs"` {
+		t.Fatalf("domainStrategy = %s", config.Routing["domainStrategy"])
+	}
+	for _, rule := range config.rules(t) {
+		if webhook, ok := rule["webhook"].(map[string]any); ok {
+			if _, dedup := webhook["deduplication"]; dedup {
+				t.Fatalf("rule %v sets deduplication", rule["ruleTag"])
+			}
+		}
+	}
+}
+
+// The token is in the artifact, so it is in the digest: a token that changed
+// would restart the core on every agent restart. A fixed token compiles to a
+// fixed digest, and a different one is a different artifact.
+func TestCompilerWebhookDigestFollowsTheTokenOnly(t *testing.T) {
+	t.Parallel()
+	policy := webhookPolicy(protocol.CollectHits)
+	_, first := compileWithAudit(t, Compiler{AuditSocket: "/d/audit.sock", AuditToken: "tok-1"}, policy)
+	_, again := compileWithAudit(t, Compiler{AuditSocket: "/d/audit.sock", AuditToken: "tok-1"}, policy)
+	_, other := compileWithAudit(t, Compiler{AuditSocket: "/d/audit.sock", AuditToken: "tok-2"}, policy)
+	_, none := compileWithAudit(t, Compiler{}, policy)
+	if first.Digest != again.Digest {
+		t.Fatal("the same token compiled to two digests")
+	}
+	if first.Digest == other.Digest || first.Digest == none.Digest {
+		t.Fatal("a different token or no webhook compiled to the same digest")
 	}
 }
 
@@ -550,7 +671,12 @@ func TestCompilerPolicyArtifactPassesPinnedXrayValidation(t *testing.T) {
 			if !ok {
 				t.Skipf("set %s to the audited Xray binary", test.env)
 			}
-			artifact, err := (Compiler{CoreVersion: test.version, AllowRestrictedReality: test.restricted}).Compile(
+			// With the webhook on every deny and watch rule: the audited core has
+			// to accept the object and its headers, on every catalog version.
+			artifact, err := (Compiler{
+				CoreVersion: test.version, AllowRestrictedReality: test.restricted,
+				AuditSocket: filepath.Join(t.TempDir(), "audit.sock"), AuditToken: "test-token",
+			}).Compile(
 				context.Background(), policySnapshot(t, everyFieldPolicy()),
 			)
 			if err != nil {

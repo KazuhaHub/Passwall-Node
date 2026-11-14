@@ -54,6 +54,25 @@ disabled.
 digest of its content. Unchanged means no body. Minting is content-idempotent:
 recomputing the same bytes mints no new version.
 
+### Rule-hit records
+
+With the `audit.hits.v1` capability the Node reports which destination rules
+fired (`NodeReport.Audit`): hits per hour, rule, action, account, destination
+and port, with no source address. The receiver is a unix socket in the data
+directory; a node that cannot listen on one declares no capability and records
+nothing. The record is not durable: a restart loses what has not been sent.
+
+A batch that has only counters (events dropped because a table was full, or
+that could not be attributed) and no rows is never sent on its own. The counters
+stay on the node and ride with the next batch that has rows.
+
+Delivery from the core is best-effort. Xray posts each hit once and does not
+retry a failed post, and it logs the failure only at `info`. In a 5-minute load
+test at 1000 blocked connections per second (Xray 26.6.27, linux/arm64)
+goroutines and descriptors stayed bounded and returned to baseline, but one
+unexplained burst lost 4 of 300,000 hits. Counts are therefore a record, not an
+invoice: enforcement never depends on them.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real

@@ -31,6 +31,20 @@ type Installer interface {
 	Install(context.Context, install.Request) (install.Installation, error)
 }
 
+// AuditRoster receives the snapshot hits are attributed against. The runtime
+// pushes it whenever a deployment is confirmed and when the node starts, so what
+// the receiver holds is the roster and the rules that are DEPLOYED, which is
+// what the running core attributes a hit to, and not whatever was stored last.
+type AuditRoster interface {
+	// StageRoster is called before a candidate is deployed, with the candidate's
+	// snapshot, so that hits from the new core are attributed from its first
+	// moment; DiscardStaged when that deployment failed; SetRoster once a
+	// deployment is confirmed.
+	StageRoster(users map[string]protocol.SubjectKey, ruleIDs []string)
+	DiscardStaged()
+	SetRoster(users map[string]protocol.SubjectKey, ruleIDs []string)
+}
+
 type CompilerFactory func(protocol.CoreSelection) (agentcore.Compiler, error)
 
 type Options struct {
@@ -41,6 +55,9 @@ type Options struct {
 	Now             func() time.Time
 	// Warnf receives operator-facing warnings. Nil discards them.
 	Warnf func(format string, args ...any)
+	// Audit, when set, is given the deployed roster and rule IDs. Nil means this
+	// node records no hits.
+	Audit AuditRoster
 }
 
 type Runtime struct {
@@ -50,6 +67,7 @@ type Runtime struct {
 	compilerFactory CompilerFactory
 	now             func() time.Time
 	warnf           func(format string, args ...any)
+	audit           AuditRoster
 	convergeMu      sync.Mutex
 	scheduleWake    chan struct{}
 	// idle describes the last successful convergence. converge reads and writes
@@ -84,7 +102,7 @@ func New(options Options) (*Runtime, error) {
 	}
 	return &Runtime{
 		store: options.Store, installer: options.Installer, supervisor: options.Supervisor,
-		compilerFactory: options.CompilerFactory, now: options.Now, warnf: options.Warnf, scheduleWake: make(chan struct{}, 1),
+		compilerFactory: options.CompilerFactory, now: options.Now, warnf: options.Warnf, audit: options.Audit, scheduleWake: make(chan struct{}, 1),
 		policyStatus: protocol.PolicyStatus{State: protocol.PolicyStateApplied},
 	}, nil
 }
@@ -124,6 +142,7 @@ func (r *Runtime) RestoreStatus(ctx context.Context) error {
 	deployment, err := r.store.CoreDeployment(ctx)
 	if errors.Is(err, state.ErrNotFound) {
 		r.setPolicyStatus(appliedPolicy(""))
+		r.publishAudit(nil, nil)
 		return nil
 	}
 	if err != nil {
@@ -138,10 +157,55 @@ func (r *Runtime) RestoreStatus(ctx context.Context) error {
 			r.warnf("the last confirmed config could not be decoded; reporting no destination policy until the next deployment: %v", err)
 		}
 		r.setPolicyStatus(appliedPolicy(""))
+		r.publishAudit(nil, nil)
 		return nil
 	}
 	r.setPolicyStatus(appliedPolicy(protocol.PolicyDigest(config.Policy)))
+	// An undecodable roster restores no one: a hit is then unmatched instead of
+	// being attributed to someone it may not belong to.
+	var roster protocol.RosterBody
+	if err := json.Unmarshal(deployment.RosterBody, &roster); err != nil {
+		r.publishAudit(&config, nil)
+		return nil
+	}
+	r.publishAudit(&config, &roster)
 	return nil
+}
+
+// publishAudit hands the audit receiver the emails of the deployed roster, as
+// the core knows them (the credential username), and the IDs of the deployed
+// policy's rules. Both nil means nothing is deployed.
+func (r *Runtime) publishAudit(config *protocol.ConfigBody, roster *protocol.RosterBody) {
+	if r.audit == nil {
+		return
+	}
+	users, ruleIDs := auditSnapshot(config, roster)
+	r.audit.SetRoster(users, ruleIDs)
+}
+
+// stageAudit hands the receiver the snapshot of a deployment about to start.
+func (r *Runtime) stageAudit(config *protocol.ConfigBody, roster *protocol.RosterBody) {
+	if r.audit == nil {
+		return
+	}
+	users, ruleIDs := auditSnapshot(config, roster)
+	r.audit.StageRoster(users, ruleIDs)
+}
+
+func auditSnapshot(config *protocol.ConfigBody, roster *protocol.RosterBody) (map[string]protocol.SubjectKey, []string) {
+	users := map[string]protocol.SubjectKey{}
+	if roster != nil {
+		for _, client := range roster.Clients {
+			users[client.Credentials.Username] = client.Subject
+		}
+	}
+	var ruleIDs []string
+	if config != nil && config.Policy != nil {
+		for _, rule := range config.Policy.Rules {
+			ruleIDs = append(ruleIDs, rule.ID)
+		}
+	}
+	return users, ruleIDs
 }
 
 func defaultCompilerFactory(selection protocol.CoreSelection) (agentcore.Compiler, error) {
@@ -457,7 +521,12 @@ func (r *Runtime) converge(ctx context.Context) error {
 		Artifact: artifact, Engine: installed.Engine,
 		BinaryPath: installed.BinaryPath, Version: installed.Version,
 	}
+	// Before the core starts, not after: it sends hits as soon as it is up.
+	r.stageAudit(config, roster)
 	if err := r.supervisor.Deploy(ctx, deployment); err != nil {
+		if r.audit != nil {
+			r.audit.DiscardStaged()
+		}
 		if config.Policy != nil && errors.Is(err, process.ErrCandidateRejected) &&
 			r.policyCausedRejection(ctx, compiler, snapshot, deployment) {
 			r.setPolicyStatus(protocol.PolicyStatus{
@@ -466,7 +535,16 @@ func (r *Runtime) converge(ctx context.Context) error {
 		}
 		return fmt.Errorf("deploy %s %s: %w", selection.Engine, selection.Version, err)
 	}
-	return r.saveDeployment(ctx, selection, artifact, config, roster, record)
+	if err := r.saveDeployment(ctx, selection, artifact, config, roster, record); err != nil {
+		// The core is running the staged snapshot, so the union stays correct
+		// until the next converge; clear it anyway so the sink never keeps a
+		// stage that no confirmed deployment owns.
+		if r.audit != nil {
+			r.audit.DiscardStaged()
+		}
+		return err
+	}
+	return nil
 }
 
 // policyCausedRejection answers whether the core's refusal of a candidate was
@@ -557,6 +635,7 @@ func (r *Runtime) saveDeployment(
 	}
 	r.idle = record
 	r.setPolicyStatus(appliedPolicy(record.policy))
+	r.publishAudit(config, roster)
 	r.wakeExpirySchedule()
 	return nil
 }

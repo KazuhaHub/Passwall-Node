@@ -42,6 +42,15 @@ type Compiler struct {
 	// or compatible Mihomo with chrome plus support-x25519mlkem768. It remains
 	// false by default because PSP also advertises sing-box and URI clients.
 	AllowRestrictedReality bool
+	// AuditSocket is the absolute path of the unix socket the hit receiver
+	// listens on, and AuditToken the secret that receiver requires in the
+	// X-PSP-Audit header. They are set only by a caller whose receiver is
+	// already listening: a webhook towards a socket nobody holds would fail
+	// every event while the panel believed hits were being recorded. Both are
+	// needed for a webhook to be written, and the policy has to ask for
+	// collection too.
+	AuditSocket string
+	AuditToken  string
 }
 
 type listenerSpec struct {

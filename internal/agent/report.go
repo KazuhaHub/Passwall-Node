@@ -58,9 +58,38 @@ type BuiltReport struct {
 	// cadence must NOT advance for such a round — nothing was delivered — so the
 	// caller retries on the next one and records the episode.
 	HostDropped bool
+
+	// The Audit fields say what became of the attachment, for the AuditReporter
+	// that owns it and for tests. They are about the attachment given to Build,
+	// not about the report: whether the batch is sent is Report.Audit.
+	//
+	// AuditHitsTrimmed and AuditUsageTrimmed count rows of a batch that was not
+	// frozen yet and did not fit; those rows go back to the aggregator.
+	AuditHitsTrimmed  int
+	AuditUsageTrimmed int
+	// AuditDeferred means a batch was left out of this report and stays as it
+	// is: a frozen batch that does not fit the wire, or a node that does not
+	// declare the capability the rows need.
+	AuditDeferred bool
+	// AuditInvalid means the subtree failed validation and was dropped whole.
+	AuditInvalid bool
 }
 
-func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.HostObservation) (BuiltReport, error) {
+// BuildOptions is what varies from one report to the next. It is a struct so
+// that the next thing a report carries is a field and not another positional
+// argument.
+type BuildOptions struct {
+	// Partial asks for a report without the full enumerations.
+	Partial bool
+	// Host is the telemetry sample to attach, if this round carries one.
+	Host *protocol.HostObservation
+	// Audit is the destination-rule hits to attach, from AuditReporter.Prepare.
+	// Nil attaches nothing.
+	Audit *AuditAttachment
+}
+
+func (b ReportBuilder) Build(ctx context.Context, options BuildOptions) (BuiltReport, error) {
+	partial, host := options.Partial, options.Host
 	if b.AgentID == "" {
 		return BuiltReport{}, fmt.Errorf("agent id is required")
 	}
@@ -169,15 +198,124 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.H
 			report.PolicyStatus = &status
 		}
 	}
-	droppedHost, err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit())
+	built := BuiltReport{OutboxIDs: batch.IDs}
+	frozen := b.attachAudit(&report, options.Audit, &built)
+	fit, err := fitReportToWire(&report, len(batch.IDs) != 0, b.bodyLimit(), frozen)
 	if err != nil {
 		return BuiltReport{}, err
 	}
-	return BuiltReport{Report: report, OutboxIDs: batch.IDs, HostDropped: droppedHost}, nil
+	built.Report = report
+	built.HostDropped = fit.HostDropped
+	built.AuditUsageTrimmed += fit.UsageTrimmed
+	built.AuditHitsTrimmed += fit.HitsTrimmed
+	built.AuditDeferred = built.AuditDeferred || fit.AuditDeferred
+	return built, nil
 }
 
-// fitReportToWire shrinks a report to fit, in a FIXED degradation order, and
-// reports whether the telemetry sample was the casualty.
+// attachAudit puts the batch on the report if it may go, and reports whether
+// the batch is a frozen one, which fitReportToWire must not trim.
+//
+// THE SUBTREE IS VALIDATED ON ITS OWN AND DROPPED WHOLE WHEN IT FAILS, the same
+// as PolicyStatus: ValidateNodeReport runs over the report every round, a
+// report that fails it is never sent, and a node that sends nothing receives no
+// roster, so a user the panel disabled would stay able to connect here. One bad
+// row costs a batch.
+func (b ReportBuilder) attachAudit(report *protocol.NodeReport, attachment *AuditAttachment, built *BuiltReport) bool {
+	if attachment == nil {
+		return false
+	}
+	observation := attachment.Observation
+	frozen := attachment.Frozen
+	if !hasCapability(report.Capabilities, protocol.CapabilityAuditHits) {
+		built.AuditDeferred = true
+		return frozen
+	}
+	if len(observation.Usage) > 0 && !hasCapability(report.Capabilities, protocol.CapabilityAuditUsage) {
+		if frozen {
+			// The batch cannot be sent as it is, and a frozen batch is never
+			// changed.
+			built.AuditInvalid = true
+			return frozen
+		}
+		built.AuditUsageTrimmed += len(observation.Usage)
+		observation.Usage = nil
+	}
+	if !frozen {
+		// Only a batch that is not frozen yet is cut down to what one
+		// observation may carry. The oldest hours stay: the newest is still
+		// accumulating, and what is cut goes back to the aggregator.
+		hitsBefore, usageBefore := len(observation.Hits), len(observation.Usage)
+		if len(observation.Hits) > protocol.MaxAuditHits {
+			observation.Hits = observation.Hits[:protocol.MaxAuditHits]
+		}
+		if len(observation.Usage) > protocol.MaxAuditUsage {
+			observation.Usage = observation.Usage[:protocol.MaxAuditUsage]
+		}
+		fitAuditRows(&observation, func() bool {
+			encoded, err := json.Marshal(observation)
+			return err == nil && len(encoded) <= protocol.MaxAuditObservationBytes
+		})
+		built.AuditHitsTrimmed += hitsBefore - len(observation.Hits)
+		built.AuditUsageTrimmed += usageBefore - len(observation.Usage)
+		if len(observation.Hits) == 0 && len(observation.Usage) == 0 {
+			return false
+		}
+	}
+	if err := protocol.ValidateAuditObservation(observation); err != nil {
+		built.AuditInvalid = true
+		return frozen
+	}
+	report.Audit = &observation
+	return frozen
+}
+
+// fitAuditRows removes rows from the END of the observation, usage first and
+// then hits, until fits reports true: the rows kept are the oldest hours,
+// because the rows are ordered by hour. It cuts the fewest rows that do. When
+// not even an empty observation fits it removes every row.
+func fitAuditRows(observation *protocol.AuditObservation, fits func() bool) {
+	if fits() {
+		return
+	}
+	hits, usage := observation.Hits, observation.Usage
+	largest := func(total int, set func(int)) int {
+		low, high := 0, total
+		for low < high {
+			middle := (low + high + 1) / 2
+			set(middle)
+			if fits() {
+				low = middle
+			} else {
+				high = middle - 1
+			}
+		}
+		set(low)
+		return low
+	}
+	// Usage goes first: keep every hit and as much usage as fits.
+	kept := largest(len(usage), func(n int) { observation.Usage = usage[:n] })
+	if kept > 0 || fits() {
+		return
+	}
+	observation.Usage = nil
+	largest(len(hits), func(n int) { observation.Hits = hits[:n] })
+}
+
+// fitResult says what fitReportToWire removed.
+type fitResult struct {
+	// HostDropped says the telemetry sample was removed.
+	HostDropped bool
+	// UsageTrimmed and HitsTrimmed count audit rows removed from a batch that
+	// was not frozen.
+	UsageTrimmed int
+	HitsTrimmed  int
+	// AuditDeferred says a frozen batch was left out whole.
+	AuditDeferred bool
+}
+
+// fitReportToWire shrinks a report to fit, in a FIXED degradation order:
+// telemetry, then audit usage rows, then audit hit rows, then everything but
+// the outbox.
 //
 // TELEMETRY GOES FIRST, and that order is the whole point. It is the only
 // content in a report that is regenerated every interval, so losing it costs a
@@ -185,29 +323,51 @@ func (b ReportBuilder) Build(ctx context.Context, partial bool, host *protocol.H
 // control report would mean an observation the panel can live without is
 // delaying a roster or a quota decision the node needs — which is exactly the
 // coupling this feature is forbidden to introduce.
-func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64) (bool, error) {
-	body, err := encodeReport(report)
-	if err != nil {
-		return false, err
+//
+// Audit rows are cut next, newest first, row by row, and only from a batch that
+// is not frozen: a frozen batch is resent unchanged under the same BatchID and
+// is left out of the round whole instead (AuditDeferred). Rows that were cut
+// were never sent, so the caller returns them to the aggregator.
+func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64, auditFrozen bool) (fitResult, error) {
+	var result fitResult
+	fits := func() (bool, error) {
+		body, err := encodeReport(report)
+		return err == nil && int64(len(body)) <= maxBytes, err
 	}
-	if int64(len(body)) <= maxBytes {
-		return false, nil
+	if ok, err := fits(); ok || err != nil {
+		return result, err
 	}
 
-	droppedHost := false
 	if report.Host != nil {
 		report.Host = nil
-		droppedHost = true
-		body, err = encodeReport(report)
-		if err != nil {
-			return droppedHost, err
+		result.HostDropped = true
+		if ok, err := fits(); ok || err != nil {
+			return result, err
 		}
-		if int64(len(body)) <= maxBytes {
-			return droppedHost, nil
+	}
+	if report.Audit != nil {
+		if auditFrozen {
+			report.Audit = nil
+			result.AuditDeferred = true
+		} else {
+			audit := *report.Audit
+			hits, usage := len(audit.Hits), len(audit.Usage)
+			report.Audit = &audit
+			fitAuditRows(&audit, func() bool {
+				ok, _ := fits()
+				return ok
+			})
+			result.HitsTrimmed, result.UsageTrimmed = hits-len(audit.Hits), usage-len(audit.Usage)
+			if len(audit.Hits) == 0 && len(audit.Usage) == 0 {
+				report.Audit = nil
+			}
+		}
+		if ok, err := fits(); ok || err != nil {
+			return result, err
 		}
 	}
 	if report.Partial || !hasOutbox {
-		return droppedHost, fmt.Errorf("node report exceeds %d bytes", maxBytes)
+		return result, fmt.Errorf("node report exceeds %d bytes", maxBytes)
 	}
 	// Only now the durable-outbox path: a terminal result must not become
 	// trapped behind a large full enumeration forever. Flush the outbox in a
@@ -218,14 +378,14 @@ func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64
 	report.ListenerCounters = nil
 	report.Clients = nil
 	report.Subjects = nil
-	body, err = encodeReport(report)
+	body, err := encodeReport(report)
 	if err != nil {
-		return droppedHost, err
+		return result, err
 	}
 	if int64(len(body)) > maxBytes {
-		return droppedHost, fmt.Errorf("partial node report exceeds %d bytes", maxBytes)
+		return result, fmt.Errorf("partial node report exceeds %d bytes", maxBytes)
 	}
-	return droppedHost, nil
+	return result, nil
 }
 
 func encodeReport(report *protocol.NodeReport) ([]byte, error) {
