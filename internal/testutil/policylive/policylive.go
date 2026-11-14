@@ -63,7 +63,7 @@ const ClaimedHost = "claimed.example"
 
 // Hostnames are the fake names the harness uses; a server that sets
 // SOCKSDomainTargets resolves every one of them to 127.0.0.1.
-var Hostnames = []string{"blocked.example", "blocked.example.", "www.blocked.example", "allowed.example"}
+var Hostnames = []string{"blocked.example", "blocked.example.", "www.blocked.example", "allowed.example", RebindHost}
 
 // Snapshot is the roster and listener every core is compiled with.
 func Snapshot(policy *protocol.DestinationPolicy, listenerConfig []byte) core.Snapshot {
