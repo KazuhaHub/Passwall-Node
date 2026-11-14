@@ -102,7 +102,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) erro
 	synchronizer := agent.Synchronizer{
 		Reports: agent.ReportBuilder{
 			AgentID: agentID, AgentVersion: "contract", CoreEngine: "xray", CoreVersion: "coreless", CoreState: "running",
-			Capabilities: []string{protocol.CapabilityDestinationPolicy},
+			Capabilities: []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups},
 			PolicyStatus: heldPolicyStatus(store, stderr),
 			Store:        store, Now: now,
 		},
