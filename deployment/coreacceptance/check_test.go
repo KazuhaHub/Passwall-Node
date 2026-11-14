@@ -102,3 +102,28 @@ func TestCheckRejectsSkippedFailedCachedDuplicateAndMalformedEvidence(t *testing
 		}
 	}
 }
+
+func TestCheckRequiresEveryXrayVersionToRunNotSkip(t *testing.T) {
+	for _, test := range []string{
+		"TestCompilerArtifactPassesPinnedXrayValidation",
+		"TestCompilerPolicyArtifactPassesPinnedXrayValidation",
+		"TestPolicyEnforcedByRealXray",
+	} {
+		for _, version := range []string{"26.6.27", "26.7.28", "26.9.9"} {
+			identity := testIdentity{module + "xray", test + "/" + version}
+			t.Run("required-"+identity.Test, func(t *testing.T) {
+				found := false
+				for _, required := range requiredTests {
+					found = found || required == identity
+				}
+				if !found {
+					t.Fatalf("%s is not a required acceptance leaf", identity.Test)
+				}
+				events := append(passingEvents(), testEvent{Action: "skip", Package: identity.Package, Test: identity.Test})
+				if err := checkResults(eventStream(t, events)); err == nil {
+					t.Fatal("skipped Xray version accepted")
+				}
+			})
+		}
+	}
+}
