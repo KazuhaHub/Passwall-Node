@@ -31,7 +31,8 @@ func TestFitReportToWireDropsTelemetryFirst(t *testing.T) {
 	limit := wireSize(t, withoutHost)
 
 	candidate := withHost
-	dropped, err := fitReportToWire(&candidate, false, limit)
+	result, err := fitReportToWire(&candidate, false, limit, false)
+	dropped := result.HostDropped
 	if err != nil {
 		t.Fatalf("the sample should have been dropped instead of failing: %v", err)
 	}
@@ -52,7 +53,8 @@ func TestFitReportToWireKeepsTelemetryWhenItFits(t *testing.T) {
 		AgentID: "agent-1", Host: &protocol.HostObservation{SampleID: "0123456789abcdef0123456789abcdef"},
 	}
 	limit := wireSize(t, report)
-	dropped, err := fitReportToWire(&report, false, limit)
+	result, err := fitReportToWire(&report, false, limit, false)
+	dropped := result.HostDropped
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +86,8 @@ func TestFitReportToWireFlushesTheOutboxOnlyAfterDroppingTelemetry(t *testing.T)
 		t.Fatalf("the fixture does not exceed the limit: partial=%d full=%d", limit, full)
 	}
 
-	dropped, err := fitReportToWire(&report, true, limit)
+	result, err := fitReportToWire(&report, true, limit, false)
+	dropped := result.HostDropped
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +111,8 @@ func TestFitReportToWireStillFlushesWithoutTelemetry(t *testing.T) {
 	partial.Objects = nil
 	limit := wireSize(t, partial)
 
-	dropped, err := fitReportToWire(&report, true, limit)
+	result, err := fitReportToWire(&report, true, limit, false)
+	dropped := result.HostDropped
 	if err != nil {
 		t.Fatal(err)
 	}

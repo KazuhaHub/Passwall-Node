@@ -145,7 +145,7 @@ func TestUpgradeInfoDoesNotOpenStateOrRequireCredentials(t *testing.T) {
 // resend or withdraw the policy.
 func TestStaticCapabilitiesAlwaysDeclareTheDestinationPolicy(t *testing.T) {
 	for _, hostTelemetry := range []bool{false, true} {
-		capabilities := staticCapabilities(hostTelemetry)
+		capabilities := staticCapabilities(hostTelemetry, false)
 		if !slices.Contains(capabilities, protocol.CapabilityDestinationPolicy) {
 			t.Fatalf("host telemetry %v: capabilities %v lack %s", hostTelemetry, capabilities, protocol.CapabilityDestinationPolicy)
 		}
@@ -170,10 +170,10 @@ func TestNodeReportBuilderAttachesThePolicyStatusItIsGiven(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := protocol.PolicyStatus{State: protocol.PolicyStateApplied}
-	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false), worker,
+	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker,
 		func() protocol.PolicyStatus { return status })
 	for _, partial := range []bool{false, true} {
-		built, err := builder.Build(t.Context(), partial, nil)
+		built, err := builder.Build(t.Context(), agent.BuildOptions{Partial: partial})
 		if err != nil {
 			t.Fatal(err)
 		}

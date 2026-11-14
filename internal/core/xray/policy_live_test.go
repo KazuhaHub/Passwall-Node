@@ -68,7 +68,7 @@ func TestPolicyEnforcedByRealXray(t *testing.T) {
 
 // allowLoopback is the test-only rewrite: every freedom outbound may reach any
 // destination, and the harness's fake host names resolve to loopback.
-func allowLoopback(t *testing.T, compiled []byte) []byte {
+func allowLoopback(t *testing.T, compiled []byte, extraHosts ...string) []byte {
 	t.Helper()
 	var config map[string]any
 	if err := json.Unmarshal(compiled, &config); err != nil {
@@ -91,6 +91,9 @@ func allowLoopback(t *testing.T, compiled []byte) []byte {
 		hosts[name] = "127.0.0.1"
 	}
 	hosts[policylive.ClaimedHost] = "::1"
+	for _, name := range extraHosts {
+		hosts[name] = "127.0.0.1"
+	}
 	config["dns"] = map[string]any{"hosts": hosts}
 	encoded, err := json.Marshal(config)
 	if err != nil {

@@ -632,3 +632,37 @@ func Run(t *testing.T, clientBinary string, options Options, start StartFunc) {
 		})
 	}
 }
+
+// StartSOCKSClient starts the harness's Xray client in front of the server on
+// serverPort and returns the port of its local SOCKS inbound.
+func StartSOCKSClient(t *testing.T, clientBinary string, serverPort int) int {
+	t.Helper()
+	socksPort := FreePort(t)
+	client := Start(t, clientBinary, "run", "-config", WriteFile(t, "client.json", clientConfig(t, socksPort, serverPort)))
+	WaitListening(t, fmt.Sprintf("127.0.0.1:%d", socksPort), client)
+	return socksPort
+}
+
+// NewSink starts a TCP listener on loopback that reads and discards what it is
+// sent, and returns its port: somewhere for an allowed connection to land.
+func NewSink(t *testing.T) int { return newSink(t).port() }
+
+// SOCKSSend connects through the client's SOCKS inbound to host:port, writes
+// payload and closes. It returns the dial error, which is how a connection the
+// client itself refused shows; a connection the SERVER blocks is not an error
+// here, because the SOCKS handshake completes before the server routes it.
+func SOCKSSend(t *testing.T, socksPort int, host string, port int, payload []byte) error {
+	t.Helper()
+	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), nil, &net.Dialer{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_, err = conn.Write(payload)
+	return err
+}

@@ -45,6 +45,10 @@ type Synchronizer struct {
 	// BUILD HAS NO HOST COLLECTOR, which is what keeps the capability from being
 	// advertised by a binary that cannot produce a sample.
 	Host *HostReporter
+	// Audit owns the batch of destination-rule hits on its way to the panel.
+	// NIL MEANS THIS NODE IS NOT RECORDING HITS, which is what keeps the
+	// capability from being advertised by a node with no receiver.
+	Audit *AuditReporter
 	// Stats observes whether each round synced. NIL MEANS THE RUNTIME SECTION IS
 	// NOT COLLECTED, rather than one that reports zeroes it never measured.
 	Stats *RuntimeStats
@@ -118,7 +122,17 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial, includeHost bool) (
 			}
 		}
 	}
-	built, err := s.Reports.Build(ctx, partial, hostSample)
+	// Taken as late as possible, so that a failure above cannot leave rows
+	// out of the aggregator, and settled whether or not the build worked: a
+	// failed build returns what was taken.
+	var auditAttachment *AuditAttachment
+	if s.Audit != nil {
+		auditAttachment = s.Audit.Prepare()
+	}
+	built, err := s.Reports.Build(ctx, BuildOptions{Partial: partial, Host: hostSample, Audit: auditAttachment})
+	if s.Audit != nil {
+		s.Audit.Settle(auditAttachment, built)
+	}
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -136,6 +150,11 @@ func (s Synchronizer) SyncOnce(ctx context.Context, partial, includeHost bool) (
 	}
 	if err := protocol.ValidateSyncResponse(response); err != nil {
 		return SyncResult{}, s.withOfflineConvergence(ctx, fmt.Errorf("validate sync response: %w", err))
+	}
+	// The batch is released on a validated response and on nothing else: until
+	// then it is resent unchanged.
+	if s.Audit != nil && built.Report.Audit != nil {
+		s.Audit.Confirm(built.Report.Audit.BatchID)
 	}
 	// THE CADENCE ADVANCES HERE AND NOWHERE ELSE. PSP has the sample once its
 	// response validates, and waiting for the outbox acknowledgement or core

@@ -193,24 +193,18 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	coreRuntime, err := coreruntime.New(coreruntime.Options{
+	// Listening comes before everything that reads its result: the compiler is
+	// given the socket only if this worked, and the capability is declared only
+	// if it did.
+	audit := startAuditReceiver(parsed.DataDir, logger.Warnf)
+	runtimeOptions := coreruntime.Options{
 		Store: store, Installer: installer, Supervisor: supervisor, Warnf: logger.Warnf,
-		CompilerFactory: func(selection protocol.CoreSelection) (agentcore.Compiler, error) {
-			switch selection.Engine {
-			case "xray":
-				return xray.Compiler{
-					APIListen: parsed.XrayAPIListen, CoreVersion: selection.Version,
-					AllowRestrictedReality: selection.AllowRestrictedReality,
-				}, nil
-			case "sing-box":
-				return singbox.Compiler{
-					APIListen: parsed.SingBoxAPIListen, APISecret: singBoxAPISecret,
-				}, nil
-			default:
-				return nil, fmt.Errorf("core engine %q is unsupported", selection.Engine)
-			}
-		},
-	})
+		CompilerFactory: compilerFactory(parsed, singBoxAPISecret, audit),
+	}
+	if audit != nil {
+		runtimeOptions.Audit = audit.Sink
+	}
+	coreRuntime, err := coreruntime.New(runtimeOptions)
 	if err != nil {
 		return err
 	}
@@ -327,7 +321,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	hostTelemetry = hostReporter != nil
-	capabilities := staticCapabilities(hostTelemetry)
+	capabilities := staticCapabilities(hostTelemetry, audit != nil)
 	synchronizer := agent.Synchronizer{
 		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus),
 		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
@@ -335,6 +329,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		LocalConverger: coreRuntime,
 		Host:           hostReporter,
 		Stats:          runtimeStats,
+	}
+	if audit != nil {
+		synchronizer.Audit, err = agent.NewAuditReporter(agent.AuditReporterOptions{Source: audit.Sink, Warnf: logger.Warnf})
+		if err != nil {
+			return err
+		}
 	}
 	if upgradeClient != nil {
 		synchronizer.OnSynced = func(ctx context.Context) error { return upgradeClient.RecordReady(ctx, store) }
@@ -361,15 +361,23 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 
 	logger.Infof("starting agent_id=%s version=%s endpoint=%s", parsed.AgentID, buildversion.String(), parsed.Endpoint)
-	err = lifecycle.Run(ctx,
-		lifecycle.Service{Name: "core supervisor", Run: supervisor.Run},
-		lifecycle.Service{Name: "sing-box telemetry", Run: singBoxTelemetry.Run},
-		lifecycle.Service{Name: "local expiry", Run: func(ctx context.Context) error {
+	services := []lifecycle.Service{
+		{Name: "core supervisor", Run: supervisor.Run},
+		{Name: "sing-box telemetry", Run: singBoxTelemetry.Run},
+		{Name: "local expiry", Run: func(ctx context.Context) error {
 			return coreRuntime.RunExpiryLoop(ctx, func(err error) { logger.Errorf("%v", err) })
 		}},
-		lifecycle.Service{Name: "task worker", Run: taskWorker.Run},
-		lifecycle.Service{Name: "control-plane sync", Run: runner.Run},
-	)
+		{Name: "task worker", Run: taskWorker.Run},
+		{Name: "control-plane sync", Run: runner.Run},
+	}
+	if audit != nil {
+		// A service like the supervisor, with the same failure meaning: if the
+		// receiver stops, the agent exits and is restarted. Running on without
+		// it would leave the node declaring audit.hits.v1 while every webhook
+		// failed, and the panel would show hits being recorded that were not.
+		services = append(services, lifecycle.Service{Name: "audit receiver", Run: audit.Sink.Serve})
+	}
+	err = lifecycle.Run(ctx, services...)
 	if err == nil {
 		logger.Infof("stopped")
 	}
@@ -403,10 +411,18 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // CapabilitySource: both engines enforce it, and the panel can switch engine
 // under a running agent, so a declaration that followed the engine would
 // flicker and make the panel withdraw and resend the policy.
-func staticCapabilities(hostTelemetry bool) []string {
+//
+// audit.hits.v1 is among them only when the hit receiver is listening, which is
+// decided once at startup; a receiver that fails afterwards takes the agent down
+// rather than leaving the declaration untrue. audit.usage.v1 is never declared:
+// per-site usage is a later tier.
+func staticCapabilities(hostTelemetry, auditHits bool) []string {
 	capabilities := []string{protocol.CapabilityDestinationPolicy}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
+	}
+	if auditHits {
+		capabilities = append(capabilities, protocol.CapabilityAuditHits)
 	}
 	return capabilities
 }

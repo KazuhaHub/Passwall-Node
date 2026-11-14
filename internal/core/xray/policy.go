@@ -48,12 +48,30 @@ func (c Compiler) applyPolicy(config *xrayConfig, snapshot agentcore.Snapshot, s
 	if err := ensureSniffing(config.Inbounds, served, plan); err != nil {
 		return err
 	}
-	rules, outbounds := policyRouting(plan)
+	rules, outbounds := policyRouting(plan, c.auditWebhook(snapshot.DestinationPolicy))
 	config.Outbounds = append(config.Outbounds, outbounds...)
 	// An explicit AsIs because the documented limit that a hostname destination
 	// never matches an IP rule depends on it; the default is not a promise.
 	config.Routing = map[string]any{"domainStrategy": "AsIs", "rules": rules}
 	return nil
+}
+
+// auditWebhook returns the constructor of a rule's webhook object, or nil when
+// no rule should carry one. It is called once per planned rule, so rules do not
+// share a map, except that the two halves of a rule split into a domain rule and
+// an address rule are copied from one set of common fields and so share the one
+// map. Nothing mutates it; it is only encoded.
+// Deduplication is deliberately not set: the record counts connections.
+func (c Compiler) auditWebhook(policy *protocol.DestinationPolicy) func() map[string]any {
+	if policy == nil || policy.Collect == protocol.CollectOff || c.AuditSocket == "" || c.AuditToken == "" {
+		return nil
+	}
+	return func() map[string]any {
+		return map[string]any{
+			"url":     c.AuditSocket + ":/hit",
+			"headers": map[string]any{"X-PSP-Audit": c.AuditToken},
+		}
+	}
 }
 
 // ensureSniffing gives each inbound the sniffing its rules need, using the
@@ -103,7 +121,12 @@ func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, pl
 // the outbounds they name. The outbounds are appended after the existing ones
 // by the caller: Xray sends unmatched traffic to the FIRST outbound, which must
 // stay direct, so a deny outbound placed first would block everything.
-func policyRouting(plan agentcore.PolicyPlan) ([]map[string]any, []map[string]any) {
+//
+// webhook, when not nil, is attached to every rule whose outbound is a deny or
+// a watch outbound: the two outcomes that are recorded. It is not attached to
+// an allow, to the exempt step or to the builtin trailing-dot guard, none of
+// which is a rule the operator wrote or asked to see hits for.
+func policyRouting(plan agentcore.PolicyPlan, webhook func() map[string]any) ([]map[string]any, []map[string]any) {
 	rules := []map[string]any{}
 	var outbounds []map[string]any
 	// The exempt step, then the trailing-dot guard: an exempt subject is not
@@ -135,6 +158,9 @@ func policyRouting(plan agentcore.PolicyPlan) ([]map[string]any, []map[string]an
 			outbounds = append(outbounds, map[string]any{"tag": outbound, "protocol": "freedom", "settings": map[string]any{}})
 		}
 		common := map[string]any{"type": "field", "outboundTag": outbound}
+		if webhook != nil && outbound != "direct" {
+			common["webhook"] = webhook()
+		}
 		if planned.Users != nil {
 			common["user"] = planned.Users
 		}

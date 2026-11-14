@@ -23,7 +23,7 @@ func TestReportUsesLiveCoreStatus(t *testing.T) {
 		CoreStatus: func() agentcore.Status {
 			return agentcore.Status{Engine: "xray", Version: "26.6.27", State: agentcore.ProcessRunning}
 		},
-	}).Build(t.Context(), true, nil)
+	}).Build(t.Context(), BuildOptions{Partial: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestReportCoalescesRepeatedIssueEpisodesWithoutLosingFailedTaskReceipt(t *t
 				t.Fatal(err)
 			}
 			builder := ReportBuilder{AgentID: "agent-1", Store: store}
-			built, err := builder.Build(ctx, partial, nil)
+			built, err := builder.Build(ctx, BuildOptions{Partial: partial})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -79,7 +79,7 @@ func TestReportCoalescesRepeatedIssueEpisodesWithoutLosingFailedTaskReceipt(t *t
 			}
 			// A lost response must retain every original row and replay the same
 			// valid report. Only a successful receipt may acknowledge all four IDs.
-			replay, err := builder.Build(ctx, partial, nil)
+			replay, err := builder.Build(ctx, BuildOptions{Partial: partial})
 			if err != nil || len(replay.OutboxIDs) != 4 || protocol.ValidateNodeReport(replay.Report) != nil {
 				t.Fatal("coalescing prematurely acknowledged the original outbox")
 			}
@@ -117,7 +117,7 @@ func TestReportBuilderFlushesTaskResultAsPartialWhenFullCombinationExceedsWireBu
 		t.Fatal(err)
 	}
 	builder := ReportBuilder{AgentID: "agent-1", Store: store}
-	baseline, err := builder.Build(ctx, false, nil)
+	baseline, err := builder.Build(ctx, BuildOptions{Partial: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestReportBuilderFlushesTaskResultAsPartialWhenFullCombinationExceedsWireBu
 		t.Fatalf("test fixture full/partial sizes = %d/%d", len(fullBody), len(partialBody))
 	}
 	builder.maxBodyBytes = int64((len(fullBody) + len(partialBody)) / 2)
-	built, err := builder.Build(ctx, false, nil)
+	built, err := builder.Build(ctx, BuildOptions{Partial: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestReportBuilderFullAndPartialShapes(t *testing.T) {
 		AgentID: "agent-1", Store: store,
 		Capabilities: []string{protocol.TaskCapability("z.v1"), protocol.TaskCapability("a.v1"), protocol.TaskCapability("z.v1")},
 	}
-	full, err := builder.Build(ctx, false, nil)
+	full, err := builder.Build(ctx, BuildOptions{Partial: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestReportBuilderFullAndPartialShapes(t *testing.T) {
 		}
 	}
 
-	partial, err := builder.Build(ctx, true, nil)
+	partial, err := builder.Build(ctx, BuildOptions{Partial: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestReportBuilderAdvancesScheduledQuotaBeforePartialReport(t *testing.T) {
 	built, err := (ReportBuilder{
 		AgentID: "agent-1", Store: store,
 		Now: func() time.Time { return time.UnixMilli(1_000) },
-	}).Build(ctx, true, nil)
+	}).Build(ctx, BuildOptions{Partial: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestReportCarriesPolicyStatusInFullAndPartialReportsWhenCapable(t *testing.
 				Capabilities: []string{protocol.CapabilityDestinationPolicy},
 				PolicyStatus: func() protocol.PolicyStatus { return status },
 			}
-			built, err := builder.Build(t.Context(), partial, nil)
+			built, err := builder.Build(t.Context(), BuildOptions{Partial: partial})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -312,7 +312,7 @@ func TestReportDropsAnInvalidPolicyStatusInsteadOfFailingTheRound(t *testing.T) 
 			return protocol.PolicyStatus{State: protocol.PolicyStateRejected, IssueCode: "not_an_issue"}
 		},
 	}
-	built, err := builder.Build(t.Context(), false, nil)
+	built, err := builder.Build(t.Context(), BuildOptions{Partial: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestReportOmitsPolicyStatusWithoutTheCapabilityOrASource(t *testing.T) {
 		"no capability": {AgentID: "agent-1", Store: openAgentTestStore(t), PolicyStatus: applied},
 		"no source":     {AgentID: "agent-1", Store: openAgentTestStore(t), Capabilities: []string{protocol.CapabilityDestinationPolicy}},
 	} {
-		built, err := builder.Build(t.Context(), false, nil)
+		built, err := builder.Build(t.Context(), BuildOptions{Partial: false})
 		if err != nil {
 			t.Fatal(err)
 		}
