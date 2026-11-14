@@ -31,8 +31,16 @@ import (
 //   - Then the sniff, then pass B: the whole sequence. A connection that asked
 //     for an IP reaches it, and is decided by the name it claims.
 //
-// Pass A never stops early: every block after a protocol rule must still be
-// decided by the requested name. A narrower sniff for the protocols alone is not
+// Pass A may hold a terminating rule only if the reference order puts it before
+// every rule pass A leaves out. A block that follows a protocol rule is safe
+// (it ends in the same verdict), so blocks keep being decided by the requested
+// name. An ALLOW that follows a protocol BLOCK is not: the connection would end
+// there and never reach the block in pass B, so BitTorrent to a host a group
+// allows would go through. At the first such allow pass A stops and everything
+// from there on is decided in pass B alone.
+//
+// Otherwise pass A never stops early: every block after a protocol rule must
+// still be decided by the requested name. A narrower sniff for the protocols alone is not
 // an option; a second sniff action re-reads the connection, times out and sets
 // no domain, which breaks the full sniff that follows.
 //
@@ -43,10 +51,11 @@ import (
 //   - One over-block, in place of a leak: a protocol allow followed by a domain
 //     block is invisible to pass A, so that protocol sent to the blocked domain
 //     is blocked, where Xray lets it through.
-//   - A group allowlist (an allow at phase 4) follows the protocol blocks at
-//     phase 3, and pass A cannot see those. A protocol the policy blocks can pass
-//     to a destination the same policy allows by name or address. This has to be
-//     resolved before group (g*) rules are minted.
+//   - When pass A stops at an allow that follows a protocol block (a group
+//     allowlist, in practice), the rules from there on are decided by the
+//     sniffed name only, so a connection that requests a domain and claims
+//     another in its SNI or Host is judged by the claim. The same class as the
+//     first limit, widened to those rules.
 //
 // sing-box needs no sniffing check of its own: it takes no per-inbound
 // sniffing, so there is nothing an operator's inbound setting could withhold.
@@ -69,7 +78,20 @@ func (c Compiler) applyPolicy(result *config, snapshot agentcore.Snapshot, serve
 // trailing-dot guard, at the exempt position. beforeSniff selects pass A.
 func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSniff bool) []map[string]any {
 	var rules []map[string]any
+	// blockOmitted: pass A has left out a protocol block. From there on pass A
+	// may not hold an allow: the reference order evaluates that block first, and
+	// an allow that ends the evaluation here would let the protocol skip it.
+	// stopped: such an allow has been moved to pass B, so every later rule
+	// moves with it; a block that stayed could pre-empt the allow (a group's
+	// deny-the-rest would block the host the group allows).
+	blockOmitted, stopped := false, false
 	exempt := func() {
+		if beforeSniff && blockOmitted {
+			stopped = true
+		}
+		if beforeSniff && stopped {
+			return
+		}
 		if len(plan.ExemptUsers) > 0 {
 			rules = append(rules, map[string]any{"auth_user": plan.ExemptUsers, "action": "route", "outbound": "direct"})
 		}
@@ -82,8 +104,22 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 		if index == plan.ExemptAt {
 			exempt()
 		}
-		if beforeSniff && (planned.Phase == agentcore.PhaseObserve || len(rule.Protocols) > 0) {
-			continue
+		if beforeSniff {
+			if planned.Phase == agentcore.PhaseObserve {
+				continue
+			}
+			if len(rule.Protocols) > 0 {
+				if rule.Action == protocol.RuleBlock {
+					blockOmitted = true
+				}
+				continue
+			}
+			if blockOmitted && rule.Action == protocol.RuleAllow {
+				stopped = true
+			}
+			if stopped {
+				continue
+			}
 		}
 		out := policyRule(planned)
 		if beforeSniff && rule.CatchAll {
