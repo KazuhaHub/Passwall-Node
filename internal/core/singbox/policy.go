@@ -40,8 +40,9 @@ import (
 // after it is emitted as a logical rule, "the block's own match AND NOT (any
 // allow left out before it)", so the group's deny-the-rest still decides the
 // requested name without blocking the host the group allows. The allow itself
-// is decided in pass B, after the protocol block. Observe rules end the
-// evaluation too, and are always left out of pass A, a group's catch-all that
+// is decided in pass B, after the protocol block. A block excludes only the
+// allows of its own group. Observe rules end the evaluation too: once a protocol
+// block has been left out they are left out as well, a group's catch-all that
 // only observes included.
 //
 // Pass A never stops early: every block after a protocol rule must still be
@@ -85,7 +86,25 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 	// care: it sits before phase 3, and only a phase 3 rule carries a protocol
 	// block.
 	blockOmitted := false
-	var leftOut []map[string]any
+	type leftOutAllow struct {
+		group string
+		match map[string]any
+	}
+	var leftOut []leftOutAllow
+	// excluded is the left-out allows a block must not catch. A group's subjects
+	// are disjoint from every other group's, so the other groups' allows can
+	// never match its traffic; naming them would only grow the config with every
+	// group. A block outside a group excludes every allow left out before it.
+	excluded := func(block string) []map[string]any {
+		group := groupOf(block)
+		var matches []map[string]any
+		for _, allow := range leftOut {
+			if group == "" || allow.group == group {
+				matches = append(matches, allow.match)
+			}
+		}
+		return matches
+	}
 	exempt := func() {
 		if len(plan.ExemptUsers) > 0 {
 			rules = append(rules, map[string]any{"auth_user": plan.ExemptUsers, "action": "route", "outbound": "direct"})
@@ -100,7 +119,7 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 			exempt()
 		}
 		if beforeSniff {
-			if rule.Action == protocol.RuleObserve {
+			if planned.Phase == agentcore.PhaseObserve || (blockOmitted && rule.Action == protocol.RuleObserve) {
 				continue
 			}
 			if len(rule.Protocols) > 0 {
@@ -110,7 +129,7 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 				continue
 			}
 			if blockOmitted && rule.Action == protocol.RuleAllow {
-				leftOut = append(leftOut, policyRule(planned))
+				leftOut = append(leftOut, leftOutAllow{groupOf(rule.ID), policyRule(planned)})
 				continue
 			}
 		}
@@ -121,12 +140,12 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 		switch rule.Action {
 		case protocol.RuleBlock:
 			out["action"] = "reject"
-			if len(leftOut) > 0 {
+			if matches := excluded(rule.ID); len(matches) > 0 {
 				out = map[string]any{
 					"type": "logical", "mode": "and", "action": "reject",
 					"rules": []map[string]any{
 						policyRuleWithout(out),
-						{"type": "logical", "mode": "or", "invert": true, "rules": leftOut},
+						{"type": "logical", "mode": "or", "invert": true, "rules": matches},
 					},
 				}
 			}
@@ -243,4 +262,14 @@ func policyRuleWithout(rule map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// groupOf is the group id of a group rule, g<gid> or g<gid>x<k>, and "" for any
+// other rule.
+func groupOf(id string) string {
+	if !strings.HasPrefix(id, "g") {
+		return ""
+	}
+	gid, _, _ := strings.Cut(id[1:], "x")
+	return gid
 }
