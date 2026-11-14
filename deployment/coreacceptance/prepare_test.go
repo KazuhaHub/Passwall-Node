@@ -156,3 +156,94 @@ func TestCommandRejectsMissingOrUnknownArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestXrayPinsAreEverySelectableCatalogVersion(t *testing.T) {
+	releases, err := corecatalog.List("xray")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byVersion := make(map[string]corecatalog.Release, len(releases))
+	for _, release := range releases {
+		byVersion[release.Version] = release
+	}
+	if err := verifyXrayPins(releases); err != nil {
+		t.Fatal(err)
+	}
+	seenEnv := make(map[string]bool)
+	for _, pin := range xrayPins {
+		release, ok := byVersion[pin.Version]
+		if !ok {
+			t.Fatalf("pin %s is not a selectable catalog release", pin.Version)
+		}
+		if pin.AcceptRestricted != release.RequiresConfirmation {
+			t.Fatalf("pin %s AcceptRestricted = %v, catalog requires_confirmation = %v", pin.Version, pin.AcceptRestricted, release.RequiresConfirmation)
+		}
+		if seenEnv[pin.Env] || !strings.HasPrefix(pin.Env, "PSP_TEST_XRAY_") || !strings.HasSuffix(pin.Env, "_BIN") {
+			t.Fatalf("pin %s has a duplicate or malformed environment name %q", pin.Version, pin.Env)
+		}
+		seenEnv[pin.Env] = true
+		for platform := range mihomoAssets {
+			parts := strings.Split(platform, "/")
+			if _, err := release.AssetFor(parts[0], parts[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if xrayPins[0].Version != xrayVersion || xrayPins[0].Env != "PSP_TEST_XRAY_26627_BIN" {
+		t.Fatalf("first pin %#v must stay the recommended baseline %s", xrayPins[0], xrayVersion)
+	}
+}
+
+func TestVerifyXrayPinsFailsClosedWhenTheCatalogChanges(t *testing.T) {
+	releases, err := corecatalog.List("xray")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyXrayPins(releases[:len(releases)-1]); err == nil {
+		t.Fatal("a pinned version missing from the catalog was accepted")
+	}
+	extra := append(append([]corecatalog.Release(nil), releases...), corecatalog.Release{Engine: "xray", Version: "99.1.1"})
+	if err := verifyXrayPins(extra); err == nil {
+		t.Fatal("a selectable catalog version without an acceptance pin was accepted")
+	}
+}
+
+func TestAcceptanceEnvironmentExportsEveryXrayVersion(t *testing.T) {
+	var binaries []preparedBinary
+	for _, pin := range xrayPins {
+		binaries = append(binaries, preparedBinary{Engine: "xray", Version: pin.Version, BinaryPath: "/bin/xray-" + pin.Version})
+	}
+	binaries = append(binaries,
+		preparedBinary{Engine: "sing-box", Version: singBoxVersion, BinaryPath: "/bin/sing-box"},
+		preparedBinary{Engine: "mihomo", Version: mihomoVersion, BinaryPath: "/bin/mihomo"},
+	)
+	entries, err := acceptanceEnvironment(binaries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		got[entry[0]] = entry[1]
+	}
+	want := map[string]string{
+		"PSP_TEST_CORE_INSTALL":      "1",
+		"PSP_TEST_SING_BOX_INSTALL":  "1",
+		"PSP_TEST_XRAY_26627_BIN":    "/bin/xray-26.6.27",
+		"PSP_TEST_XRAY_26728_BIN":    "/bin/xray-26.7.28",
+		"PSP_TEST_XRAY_2699_BIN":     "/bin/xray-26.9.9",
+		"PSP_TEST_XRAY_CLIENT_BIN":   "/bin/xray-26.6.27",
+		"PSP_TEST_SING_BOX_BIN":      "/bin/sing-box",
+		"PSP_TEST_MIHOMO_CLIENT_BIN": "/bin/mihomo",
+	}
+	if len(got) != len(entries) || len(got) != len(want) {
+		t.Fatalf("environment = %v, want exactly %v", entries, want)
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Fatalf("%s = %q, want %q", name, got[name], value)
+		}
+	}
+	if _, err := acceptanceEnvironment(binaries[1:]); err == nil {
+		t.Fatal("environment built without the baseline Xray binary")
+	}
+}

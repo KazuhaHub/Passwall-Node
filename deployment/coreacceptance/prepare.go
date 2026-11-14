@@ -31,6 +31,82 @@ const (
 	maxClientBinarySize  = 128 << 20
 )
 
+// xrayPin is one Xray release the acceptance fixture must install and export.
+// The set is every selectable catalog release, so a version the catalog offers
+// to operators can never be validated only by skipped tests.
+type xrayPin struct {
+	Version string
+	// Env is the variable the compiler and policy tests read for this version.
+	Env string
+	// AcceptRestricted mirrors the catalog's requires_confirmation: the
+	// installer refuses a restricted release without it.
+	AcceptRestricted bool
+}
+
+var xrayPins = []xrayPin{
+	{Version: xrayVersion, Env: "PSP_TEST_XRAY_26627_BIN"},
+	{Version: "26.7.28", Env: "PSP_TEST_XRAY_26728_BIN"},
+	{Version: "26.9.9", Env: "PSP_TEST_XRAY_2699_BIN", AcceptRestricted: true},
+}
+
+// verifyXrayPins fails closed when the selectable catalog and the pins differ
+// in either direction, so adding or retiring a version is a deliberate edit.
+func verifyXrayPins(releases []corecatalog.Release) error {
+	selectable := make(map[string]bool, len(releases))
+	for _, release := range releases {
+		selectable[release.Version] = true
+	}
+	pinned := make(map[string]bool, len(xrayPins))
+	for _, pin := range xrayPins {
+		pinned[pin.Version] = true
+		if !selectable[pin.Version] {
+			return fmt.Errorf("xray acceptance pin %s is not a selectable catalog release", pin.Version)
+		}
+	}
+	for version := range selectable {
+		if !pinned[version] {
+			return fmt.Errorf("xray %s is selectable in the catalog but has no acceptance pin: update evidence deliberately", version)
+		}
+	}
+	return nil
+}
+
+// acceptanceEnvironment maps the prepared binaries to the variables the gated
+// tests read. The baseline Xray also serves as the client for the policy and
+// REALITY harnesses.
+func acceptanceEnvironment(binaries []preparedBinary) ([][2]string, error) {
+	find := func(engine, version string) (string, error) {
+		for _, binary := range binaries {
+			if binary.Engine == engine && binary.Version == version {
+				return binary.BinaryPath, nil
+			}
+		}
+		return "", fmt.Errorf("no prepared %s %s binary", engine, version)
+	}
+	environment := [][2]string{{"PSP_TEST_CORE_INSTALL", "1"}, {"PSP_TEST_SING_BOX_INSTALL", "1"}}
+	for _, pin := range xrayPins {
+		path, err := find("xray", pin.Version)
+		if err != nil {
+			return nil, err
+		}
+		environment = append(environment, [2]string{pin.Env, path})
+		if pin.Version == xrayVersion {
+			environment = append(environment, [2]string{"PSP_TEST_XRAY_CLIENT_BIN", path})
+		}
+	}
+	for _, tail := range []struct{ name, engine, version string }{
+		{"PSP_TEST_SING_BOX_BIN", "sing-box", singBoxVersion},
+		{"PSP_TEST_MIHOMO_CLIENT_BIN", "mihomo", mihomoVersion},
+	} {
+		path, err := find(tail.engine, tail.version)
+		if err != nil {
+			return nil, err
+		}
+		environment = append(environment, [2]string{tail.name, path})
+	}
+	return environment, nil
+}
+
 type clientAsset struct {
 	Name   string
 	SHA256 string
@@ -83,6 +159,13 @@ func prepare(ctx context.Context, directory, environmentFile string, output io.W
 			return fmt.Errorf("%s recommended version %s differs from acceptance pin %s: update evidence deliberately", engine, recommended.Version, expected)
 		}
 	}
+	xrayReleases, err := corecatalog.List("xray")
+	if err != nil {
+		return err
+	}
+	if err := verifyXrayPins(xrayReleases); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
@@ -90,9 +173,18 @@ func prepare(ctx context.Context, directory, environmentFile string, output io.W
 	if err != nil {
 		return err
 	}
-	binaries := make([]preparedBinary, 0, 3)
-	for _, pin := range []struct{ engine, version string }{{"xray", xrayVersion}, {"sing-box", singBoxVersion}} {
-		installed, err := installer.Install(ctx, install.Request{Engine: pin.engine, Version: pin.version})
+	type installPin struct {
+		engine, version string
+		restricted      bool
+	}
+	pins := make([]installPin, 0, len(xrayPins)+1)
+	for _, xray := range xrayPins {
+		pins = append(pins, installPin{"xray", xray.Version, xray.AcceptRestricted})
+	}
+	pins = append(pins, installPin{"sing-box", singBoxVersion, false})
+	binaries := make([]preparedBinary, 0, len(pins)+1)
+	for _, pin := range pins {
+		installed, err := installer.Install(ctx, install.Request{Engine: pin.engine, Version: pin.version, AcceptRestricted: pin.restricted})
 		if err != nil {
 			return fmt.Errorf("install official %s %s: %w", pin.engine, pin.version, err)
 		}
@@ -108,13 +200,9 @@ func prepare(ctx context.Context, directory, environmentFile string, output io.W
 		return err
 	}
 	binaries = append(binaries, preparedBinary{"mihomo", mihomoVersion, platform, clientURL, client.SHA256, clientBinary})
-	environment := [][2]string{
-		{"PSP_TEST_CORE_INSTALL", "1"},
-		{"PSP_TEST_SING_BOX_INSTALL", "1"},
-		{"PSP_TEST_XRAY_26627_BIN", binaries[0].BinaryPath},
-		{"PSP_TEST_XRAY_CLIENT_BIN", binaries[0].BinaryPath},
-		{"PSP_TEST_SING_BOX_BIN", binaries[1].BinaryPath},
-		{"PSP_TEST_MIHOMO_CLIENT_BIN", clientBinary},
+	environment, err := acceptanceEnvironment(binaries)
+	if err != nil {
+		return err
 	}
 	if err := appendEnvironment(environmentFile, environment); err != nil {
 		return err
