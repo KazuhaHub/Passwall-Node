@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
@@ -604,5 +605,230 @@ func TestCompilerPassAKeepsAGroupObserveCatchAllWithoutAProtocolBlock(t *testing
 	}
 	if got, want := shapes(passB), []string{"reject", "reject", "route>psp-watch-g1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("pass B = %v, want %v", got, want)
+	}
+}
+
+// resolveAt lists the indexes of the {"action":"resolve"} rules in a pass.
+func resolveAt(rules []map[string]any) []int {
+	var at []int
+	for index, rule := range rules {
+		if rule["action"] == "resolve" {
+			at = append(at, index)
+		}
+	}
+	return at
+}
+
+func onDemand(rules ...protocol.DestinationRule) *protocol.DestinationPolicy {
+	return &protocol.DestinationPolicy{Resolve: protocol.ResolveOnDemand, Rules: rules}
+}
+
+// TestCompilerOnDemandResolvesOnceBeforeTheFirstIPRule: sing-box matches ip_cidr
+// on a hostname only against addresses a resolve action has stored, so one
+// resolve goes immediately before the first rule that has an address
+// condition. Rules before it keep deciding without a lookup, and every later IP
+// rule reads the same stored result.
+func TestCompilerOnDemandResolvesOnceBeforeTheFirstIPRule(t *testing.T) {
+	t.Parallel()
+	config, _ := compilePolicy(t, policySnapshot(t, onDemand(
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Ports: "25"},
+		protocol.DestinationRule{ID: "p2", Action: protocol.RuleBlock, CIDRs: []string{"203.0.113.0/24"}},
+		protocol.DestinationRule{ID: "p3", Action: protocol.RuleBlock, Private: true},
+		protocol.DestinationRule{ID: "p4", Action: protocol.RuleObserve, CIDRs: []string{"198.51.100.0/24"}},
+	)))
+	rules := config.rules(t)
+	want := []string{"reject", "resolve", "reject", "reject", "route>psp-watch-p4"}
+	if got := shapes(rules); !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(rules[1], map[string]any{"action": "resolve"}) {
+		t.Fatalf("resolve rule = %v, want the bare action: no server, no strategy, no match fields", rules[1])
+	}
+}
+
+func TestCompilerOnDemandResolveComesFirstWhenTheFirstRuleIsAnIPRule(t *testing.T) {
+	t.Parallel()
+	config, _ := compilePolicy(t, policySnapshot(t, onDemand(
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Private: true},
+	)))
+	if got, want := shapes(config.rules(t)), []string{"resolve", "reject"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules = %v, want %v", got, want)
+	}
+}
+
+// A rule that names domains AND addresses is one rule (sing-box ORs them), and
+// it needs the lookup for its address half.
+func TestCompilerOnDemandResolvesBeforeARuleThatMixesDomainsAndAddresses(t *testing.T) {
+	t.Parallel()
+	config, _ := compilePolicy(t, policySnapshot(t, onDemand(
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:a.example"}, CIDRs: []string{"203.0.113.0/24"}},
+	)))
+	passA, passB, sniffed := split(config.rules(t))
+	if !sniffed {
+		t.Fatal("no sniff rule")
+	}
+	// The first reject is the builtin trailing-dot guard, which reads no address.
+	if got, want := shapes(passA), []string{"reject", "resolve", "reject"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass A = %v, want %v", got, want)
+	}
+	if len(resolveAt(passB)) != 0 {
+		t.Fatalf("pass B = %v: the addresses are already resolved, a second resolve would look the name up again", shapes(passB))
+	}
+}
+
+func TestCompilerOnDemandDoesNothingWithoutAnIPRule(t *testing.T) {
+	t.Parallel()
+	rules := []protocol.DestinationRule{
+		{ID: "s1", Action: protocol.RuleBlock, SourceCIDRs: []string{"192.0.2.0/24"}},
+		{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:a.example"}},
+		{ID: "p2", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
+		{ID: "p3", Action: protocol.RuleBlock, Ports: "25"},
+	}
+	config, onDemandArtifact := compilePolicy(t, policySnapshot(t, onDemand(rules...)))
+	passA, passB, _ := split(config.rules(t))
+	if len(resolveAt(passA))+len(resolveAt(passB)) != 0 {
+		t.Fatalf("a resolve was added to a policy with no IP rule: %v / %v", shapes(passA), shapes(passB))
+	}
+	// No IP rule, so nothing differs from AsIs but the policy digest: the route
+	// is the same bytes.
+	_, asIs := compilePolicy(t, policySnapshot(t, &protocol.DestinationPolicy{Rules: rules}))
+	var onDemandRoute, asIsRoute struct {
+		Route json.RawMessage `json:"route"`
+	}
+	if err := json.Unmarshal(onDemandArtifact.Config, &onDemandRoute); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(asIs.Config, &asIsRoute); err != nil {
+		t.Fatal(err)
+	}
+	if string(onDemandRoute.Route) != string(asIsRoute.Route) {
+		t.Fatalf("route differs without an IP rule:\n%s\n%s", onDemandRoute.Route, asIsRoute.Route)
+	}
+}
+
+func TestCompilerAsIsNeverEmitsResolve(t *testing.T) {
+	t.Parallel()
+	config, _ := compilePolicy(t, policySnapshot(t, &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"203.0.113.0/24"}},
+		{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:a.example"}},
+		{ID: "p3", Action: protocol.RuleObserve, Private: true},
+	}}))
+	passA, passB, _ := split(config.rules(t))
+	if len(resolveAt(passA))+len(resolveAt(passB)) != 0 {
+		t.Fatalf("AsIs emitted a resolve: %v / %v", shapes(passA), shapes(passB))
+	}
+}
+
+// The first IP rule in EVALUATION order is what matters, and the two passes are
+// two stretches of that order. An IP rule in pass A is resolved there, once, and
+// pass B (which runs only for what pass A did not end) reads the stored result.
+func TestCompilerOnDemandResolveIsInPassAWhenPassAHasAnIPRule(t *testing.T) {
+	t.Parallel()
+	config, _ := compilePolicy(t, policySnapshot(t, onDemand(
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleAllow, Domains: []string{"full:ok.example"}},
+		protocol.DestinationRule{ID: "p2", Action: protocol.RuleBlock, CIDRs: []string{"203.0.113.0/24"}},
+		protocol.DestinationRule{ID: "p3", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
+		protocol.DestinationRule{ID: "p4", Action: protocol.RuleObserve, Private: true},
+	)))
+	passA, passB, sniffed := split(config.rules(t))
+	if !sniffed {
+		t.Fatal("no sniff rule")
+	}
+	if got, want := shapes(passA), []string{"route>direct", "resolve", "reject"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass A = %v, want %v", got, want)
+	}
+	if got, want := shapes(passB), []string{"route>direct", "reject", "reject", "route>psp-watch-p4"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass B = %v, want %v (no second resolve)", got, want)
+	}
+}
+
+// Pass A leaves out protocol rules, observe rules and an allow that follows a
+// protocol block. When every IP rule is one of those, pass A has none, and the
+// resolve belongs before the first IP rule of pass B.
+func TestCompilerOnDemandResolveIsInPassBWhenOnlyPassBHasAnIPRule(t *testing.T) {
+	t.Parallel()
+	config, _ := compilePolicy(t, policySnapshot(t, onDemand(
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:a.example"}},
+		protocol.DestinationRule{ID: "p2", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
+		protocol.DestinationRule{ID: "p4", Action: protocol.RuleObserve, Private: true},
+	)))
+	passA, passB, sniffed := split(config.rules(t))
+	if !sniffed {
+		t.Fatal("no sniff rule")
+	}
+	if len(resolveAt(passA)) != 0 {
+		t.Fatalf("pass A = %v: it holds no IP rule, so it must not resolve", shapes(passA))
+	}
+	if got, want := shapes(passB), []string{"reject", "reject", "reject", "resolve", "route>psp-watch-p4"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass B = %v, want %v", got, want)
+	}
+}
+
+// A group allow that pass A leaves out is excluded from the group's deny-the-rest
+// with a nested NOT, and when that allow has an address condition the nested
+// rule is what needs the lookup: the resolve goes before the logical rule.
+func TestCompilerOnDemandFindsAnIPRuleInsideALogicalRule(t *testing.T) {
+	t.Parallel()
+	config, _ := compilePolicy(t, policySnapshot(t, onDemand(
+		protocol.DestinationRule{ID: "p3", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
+		protocol.DestinationRule{ID: "g1x1", Action: protocol.RuleAllow, CIDRs: []string{"203.0.113.0/24"}, Subjects: []protocol.SubjectKey{"usr_5"}},
+		protocol.DestinationRule{ID: "g1", Action: protocol.RuleBlock, CatchAll: true, Subjects: []protocol.SubjectKey{"usr_5"}},
+	)))
+	passA, passB, sniffed := split(config.rules(t))
+	if !sniffed {
+		t.Fatal("no sniff rule")
+	}
+	if got, want := shapes(passA), []string{"resolve", "reject"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass A = %v, want the resolve before the logical rule", got)
+	}
+	if passA[1]["type"] != "logical" {
+		t.Fatalf("pass A rule = %v, want the group's logical deny-the-rest", passA[1])
+	}
+	if len(resolveAt(passB)) != 0 {
+		t.Fatalf("pass B = %v, want no second resolve", shapes(passB))
+	}
+}
+
+func TestCompilerOnDemandArtifactPassesPinnedSingBoxValidation(t *testing.T) {
+	binary, ok := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
+	if !ok {
+		t.Skip("set PSP_TEST_SING_BOX_BIN to the audited sing-box binary")
+	}
+	_, artifact := compilePolicy(t, policySnapshot(t, onDemand(
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
+		protocol.DestinationRule{ID: "p3", Action: protocol.RuleBlock, CIDRs: []string{"2001:db8:1::/48"}, Private: true},
+		protocol.DestinationRule{ID: "g1x1", Action: protocol.RuleAllow, CIDRs: []string{"203.0.113.0/24"}, Domains: []string{"full:x.example"}, Subjects: []protocol.SubjectKey{"usr_5"}},
+		protocol.DestinationRule{ID: "g1", Action: protocol.RuleBlock, CatchAll: true, Subjects: []protocol.SubjectKey{"usr_5"}},
+	)))
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, artifact.Config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.CommandContext(t.Context(), binary, "check", "-c", configPath).CombinedOutput(); err != nil {
+		t.Fatalf("sing-box rejected the on_demand artifact: %v\n%s\n%s", err, output, artifact.Config)
+	}
+}
+
+// The resolve action exists from sing-box 1.11. The compiler writes native
+// 1.14 configuration and has no version of its own to check, so what stands
+// between an older core and an on_demand policy is the catalog: no release
+// older than 1.11 may be selectable.
+func TestCatalogOffersNoSingBoxWithoutTheResolveAction(t *testing.T) {
+	t.Parallel()
+	releases, err := corecatalog.List("sing-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(releases) == 0 {
+		t.Fatal("no selectable sing-box release")
+	}
+	for _, release := range releases {
+		var major, minor int
+		if _, err := fmt.Sscanf(release.Version, "%d.%d.", &major, &minor); err != nil {
+			t.Fatalf("sing-box version %q: %v", release.Version, err)
+		}
+		if major < 1 || (major == 1 && minor < 11) {
+			t.Errorf("sing-box %s is selectable but has no resolve action (added in 1.11): refuse on_demand for it in applyPolicy before shipping it", release.Version)
+		}
 	}
 }

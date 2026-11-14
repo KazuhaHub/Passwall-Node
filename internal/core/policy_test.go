@@ -287,3 +287,69 @@ func TestPlanPolicySkipsAndCountsNamesTheCoreCannotTakeLiterally(t *testing.T) {
 		t.Fatalf("skipped = %d, want 1: the number of clients whose name was refused", plan.SkippedUsers)
 	}
 }
+
+func TestPlanPolicyOnDemandAsksForResolvedIPsWhereAnIPRuleApplies(t *testing.T) {
+	t.Parallel()
+	inbounds := []protocol.ListenerKey{"lst_1", "lst_2", "lst_3"}
+	plan := func(resolve protocol.ResolveMode, rules ...protocol.DestinationRule) PolicyPlan {
+		t.Helper()
+		planned, err := PlanPolicy(&protocol.DestinationPolicy{Rules: rules, Resolve: resolve}, nil, inbounds, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return planned
+	}
+
+	scoped := plan(protocol.ResolveOnDemand,
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"10.0.0.0/8"}, Inbounds: []protocol.ListenerKey{"lst_1"}},
+		protocol.DestinationRule{ID: "p2", Action: protocol.RuleBlock, Private: true, Inbounds: []protocol.ListenerKey{"lst_2"}},
+	)
+	for key, want := range map[protocol.ListenerKey]protocol.SniffNeed{
+		"lst_1": protocol.SniffForResolvedIPs, "lst_2": protocol.SniffForResolvedIPs, "lst_3": 0,
+	} {
+		if got := scoped.SniffNeedFor(key); got != want {
+			t.Errorf("on_demand need for %s = %d, want %d (an IP rule asks only of the listeners it applies to)", key, got, want)
+		}
+	}
+	if got := scoped.SniffNeed(); got != protocol.SniffForResolvedIPs {
+		t.Errorf("overall need = %d, want the resolved-IP bit", got)
+	}
+	if scoped.Resolve != protocol.ResolveOnDemand {
+		t.Errorf("plan resolve = %q, want on_demand", scoped.Resolve)
+	}
+
+	mixed := plan(protocol.ResolveOnDemand,
+		protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:example.com"}, CIDRs: []string{"10.0.0.0/8"}},
+	)
+	if got := mixed.SniffNeedFor("lst_1"); got != protocol.SniffForDomains|protocol.SniffForResolvedIPs {
+		t.Errorf("a rule with domains and CIDRs: need = %d, want both bits", got)
+	}
+
+	for name, unaffected := range map[string]PolicyPlan{
+		"as_is with IP rules": plan("", protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Private: true}),
+		"on_demand without IP rules": plan(protocol.ResolveOnDemand,
+			protocol.DestinationRule{ID: "s1", Action: protocol.RuleBlock, SourceCIDRs: []string{"192.0.2.0/24"}},
+			protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:example.com"}},
+			protocol.DestinationRule{ID: "p2", Action: protocol.RuleBlock, Ports: "25"}),
+	} {
+		for _, key := range inbounds {
+			if unaffected.SniffNeedFor(key)&protocol.SniffForResolvedIPs != 0 {
+				t.Errorf("%s: %s must not need resolved IPs", name, key)
+			}
+		}
+	}
+}
+
+func TestPlanPolicyOnDemandIgnoresAnIPRuleThatIsSkipped(t *testing.T) {
+	t.Parallel()
+	policy := &protocol.DestinationPolicy{Resolve: protocol.ResolveOnDemand, Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"10.0.0.0/8"}, Subjects: []protocol.SubjectKey{"usr_404"}},
+	}}
+	plan, err := PlanPolicy(policy, nil, []protocol.ListenerKey{"lst_1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.SniffNeed() != 0 {
+		t.Fatalf("a skipped IP rule must not constrain a listener, got need %d", plan.SniffNeed())
+	}
+}

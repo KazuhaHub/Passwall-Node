@@ -1,7 +1,10 @@
 package policylive
 
 import (
+	"fmt"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
@@ -33,6 +36,12 @@ const (
 	// StrategyOnDemandRouteOnly is a hand-set "IPOnDemand" on an inbound whose
 	// sniffing is routeOnly:true, the combination the sniffing check refuses.
 	StrategyOnDemandRouteOnly StrategyKind = "on_demand_route_only"
+	// StrategyOnDemand is a policy whose Resolve is on_demand, compiled as it
+	// ships: nothing is hand-set.
+	StrategyOnDemand StrategyKind = "on_demand"
+	// StrategyOnDemandUnresolvable is the same, for a name that does not
+	// resolve.
+	StrategyOnDemandUnresolvable StrategyKind = "on_demand_unresolvable"
 )
 
 // blockLoopback is the policy every strategy case starts from: block the
@@ -40,6 +49,20 @@ const (
 func blockLoopback(extra ...protocol.DestinationRule) *protocol.DestinationPolicy {
 	rules := []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"127.0.0.1/32"}}}
 	return &protocol.DestinationPolicy{Rules: append(rules, extra...)}
+}
+
+// onDemand is blockLoopback with the resolve option on.
+func onDemand(policy *protocol.DestinationPolicy) *protocol.DestinationPolicy {
+	policy.Resolve = protocol.ResolveOnDemand
+	return policy
+}
+
+// routedTo is an attempt for a name no sink can be placed at, judged by the
+// core's log: it "succeeds" when the log holds text.
+func routedTo(host string, text string) attempt {
+	a := socksDomain(host)
+	a.logHas, a.timeout = text, 2500*time.Millisecond
+	return a
 }
 
 func observeRebind() protocol.DestinationRule {
@@ -91,8 +114,70 @@ func strategyCases(kind StrategyKind, engine string) []liveCase {
 				viaDomain(isBlocked("name resolving to the blocked address", socksDomain(RebindHost))),
 			}},
 		}
+	case StrategyOnDemand:
+		cases := []liveCase{
+			{name: "on_demand: a name that resolves into a private range is blocked", policy: fixed(onDemand(&protocol.DestinationPolicy{
+				Rules: []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, Private: true}},
+			})), outcomes: []outcome{
+				viaDomain(isBlocked("name resolving to loopback", socksDomain(RebindHost))),
+				isBlocked("loopback by address", plainBytes),
+			}},
+			{name: "on_demand: a name that resolves into a blocked CIDR is blocked", policy: fixed(onDemand(blockLoopback())), outcomes: []outcome{
+				viaDomain(isBlocked("name resolving to the blocked address", socksDomain(RebindHost))),
+				isBlocked("the blocked address itself", plainBytes),
+			}},
+			{name: "on_demand: a name that resolves outside the blocked CIDR is let through", policy: fixed(onDemand(&protocol.DestinationPolicy{
+				Rules: []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"198.51.100.0/24"}}},
+			})), outcomes: []outcome{
+				viaDomain(reaches("name resolving to loopback", socksDomain(RebindHost))),
+			}},
+			// The case IPIfNonMatch gets wrong: here a report-only rule changes
+			// nothing about the verdict.
+			{name: "on_demand: a report-only rule for the name does not skip the CIDR block", policy: fixed(onDemand(blockLoopback(observeRebind()))), outcomes: []outcome{
+				viaDomain(isBlocked("name resolving to the blocked address", socksDomain(RebindHost))),
+				isBlocked("the blocked address itself", plainBytes),
+			}},
+		}
+		if engine == "xray" {
+			cases = append(cases,
+				// Xray's injected sniffing rewrites the destination to the claimed
+				// name, so the claimed name is where the connection goes, and its
+				// addresses are what an IP rule has to judge. A domain rule in the
+				// policy is what makes the node inject the sniffing.
+				liveCase{name: "on_demand: a claimed name that resolves into a blocked range is blocked", claimed: true,
+					policy: fixed(onDemand(&protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
+						{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"::1/128"}},
+						{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:blocked.example"}},
+					}})), outcomes: []outcome{
+						isBlocked("by address, claiming a name that resolves into the blocked range", claimingByAddress(ClaimedHost)),
+					}},
+				liveCase{name: "AsIs: a claimed name that resolves into a blocked range is reached", claimed: true,
+					policy: policyOf(
+						protocol.DestinationRule{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"::1/128"}},
+						protocol.DestinationRule{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:blocked.example"}},
+					), outcomes: []outcome{
+						reaches("by address, claiming a name that resolves into the blocked range", claimingByAddress(ClaimedHost)),
+					}},
+			)
+		}
+		return cases
+	case StrategyOnDemandUnresolvable:
+		return []liveCase{{name: "on_demand: a name that does not resolve", policy: fixed(onDemand(blockLoopback())), outcomes: []outcome{
+			// The log lines are the cores' own and are what tells the verdicts
+			// apart: nothing reaches a sink either way.
+			forEngine("xray", viaDomain(reaches("Xray fails open: no IP rule matched, so the default route is taken", routedTo(NXHost, "default route for tcp:"+NXHost)))),
+			forEngine("sing-box", viaDomain(reaches("sing-box fails closed: the resolve action fails the connection", routedTo(NXHost, "dns: lookup failed for "+NXHost)))),
+		}}}
 	}
 	return nil
+}
+
+// claimingByAddress asks for the sink's address and claims host in the HTTP
+// request, and is satisfied only by reaching the sink where host resolves.
+func claimingByAddress(host string) attempt {
+	a := httpHost(host)
+	a.claimedHost = true
+	return a
 }
 
 // RunStrategy runs the strategy cases of kind against the core start launches.
@@ -101,6 +186,14 @@ func RunStrategy(t *testing.T, clientBinary string, options Options, kind Strate
 	for _, test := range strategyCases(kind, options.Engine) {
 		t.Run(test.name, func(t *testing.T) {
 			s := newSink(t)
+			if test.claimed {
+				probe, err := net.Listen("tcp", fmt.Sprintf("[::1]:%d", s.port()))
+				if err != nil {
+					t.Skipf("no IPv6 loopback listener at the sink's port: %v", err)
+				}
+				_ = probe.Close()
+				s.claimed = newSinkAt(t, fmt.Sprintf("[::1]:%d", s.port()))
+			}
 			serverPort := FreePort(t)
 			server := start(t, test.policy(s.port()), serverPort)
 			socksPort := StartSOCKSClient(t, clientBinary, serverPort)
@@ -111,6 +204,9 @@ func RunStrategy(t *testing.T, clientBinary string, options Options, kind Strate
 				if got := expected.attempt.run(t, socksPort, s, server); got != expected.delivered {
 					t.Errorf("%s: delivered = %v, want %v", expected.name, got, expected.delivered)
 				}
+			}
+			if t.Failed() {
+				t.Logf("core output:\n%s", server.Output())
 			}
 		})
 	}

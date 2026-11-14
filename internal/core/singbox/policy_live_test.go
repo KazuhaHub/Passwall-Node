@@ -63,6 +63,23 @@ func TestRealSingBoxAsIsDoesNotResolveForAnAddressRule(t *testing.T) {
 	policylive.RunStrategy(t, client, policylive.Options{Engine: "sing-box", SOCKSDomainTargets: true}, policylive.StrategyAsIs, startSingBox(server))
 }
 
+// TestRealSingBoxOnDemandResolvesForAnAddressRule runs the compiler's own output
+// for a policy with Resolve on_demand on a real sing-box: a name that resolves
+// into a blocked range is blocked, and a name that does not resolve fails the
+// connection.
+func TestRealSingBoxOnDemandResolvesForAnAddressRule(t *testing.T) {
+	server, serverOK := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
+	client, clientOK := os.LookupEnv("PSP_TEST_XRAY_CLIENT_BIN")
+	if !serverOK || !clientOK {
+		t.Skip("set PSP_TEST_SING_BOX_BIN and PSP_TEST_XRAY_CLIENT_BIN")
+	}
+	for _, kind := range []policylive.StrategyKind{policylive.StrategyOnDemand, policylive.StrategyOnDemandUnresolvable} {
+		t.Run(string(kind), func(t *testing.T) {
+			policylive.RunStrategy(t, client, policylive.Options{Engine: "sing-box", SOCKSDomainTargets: true}, kind, startSingBox(server))
+		})
+	}
+}
+
 // withFakeHosts is the test-only rewrite: the harness's fake host names resolve
 // to loopback through a hosts DNS server, so a connection that asks sing-box for
 // one of them can be told apart from one that simply fails to resolve.

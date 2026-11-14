@@ -152,6 +152,9 @@ func TestStaticCapabilitiesAlwaysDeclareTheDestinationPolicy(t *testing.T) {
 		if !slices.Contains(capabilities, protocol.CapabilityDestinationGroups) {
 			t.Fatalf("host telemetry %v: capabilities %v lack %s", hostTelemetry, capabilities, protocol.CapabilityDestinationGroups)
 		}
+		if !slices.Contains(capabilities, protocol.CapabilityDestinationResolve) {
+			t.Fatalf("host telemetry %v: capabilities %v lack %s", hostTelemetry, capabilities, protocol.CapabilityDestinationResolve)
+		}
 		if got := slices.Contains(capabilities, protocol.CapabilityHostTelemetry); got != hostTelemetry {
 			t.Fatalf("host telemetry %v: capabilities %v", hostTelemetry, capabilities)
 		}

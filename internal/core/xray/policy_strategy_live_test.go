@@ -45,6 +45,11 @@ func startStrategyServer(t *testing.T, binary, version string, mutate func(confi
 	}
 }
 
+// debugLog turns on the log lines that say which route a connection was given.
+func debugLog(config map[string]any) {
+	config["log"].(map[string]any)["loglevel"] = "debug"
+}
+
 func setDomainStrategy(strategy string) func(map[string]any) {
 	return func(config map[string]any) {
 		config["routing"].(map[string]any)["domainStrategy"] = strategy
@@ -72,9 +77,10 @@ func routeOnlySniffing(inner func(map[string]any)) func(map[string]any) {
 
 // TestRealXrayRoutingDomainStrategies documents what each routing.domainStrategy
 // does with a destination CIDR rule, on a real Xray, on every catalog version.
-// The strategies are set by hand in the compiled configuration: this is a live
-// test of the core's behaviour, which the product's choices rest on, and not of
-// anything the compiler emits.
+// The first four kinds set the strategy by hand in the compiled configuration:
+// they are live tests of the core's behaviour, which the product's choices rest
+// on, and not of anything the compiler emits. The last two run the compiler's
+// own output for a policy with Resolve on_demand.
 func TestRealXrayRoutingDomainStrategies(t *testing.T) {
 	client, ok := os.LookupEnv("PSP_TEST_XRAY_CLIENT_BIN")
 	if !ok {
@@ -88,6 +94,10 @@ func TestRealXrayRoutingDomainStrategies(t *testing.T) {
 		{policylive.StrategyAsIsRouteOnly, routeOnlySniffing(nil)},
 		{policylive.StrategyIfNonMatch, setDomainStrategy("IPIfNonMatch")},
 		{policylive.StrategyOnDemandRouteOnly, routeOnlySniffing(setDomainStrategy("IPOnDemand"))},
+		// Not hand-set: the compiler writes IPOnDemand for a policy whose Resolve
+		// is on_demand, which is what these two exercise.
+		{policylive.StrategyOnDemand, debugLog},
+		{policylive.StrategyOnDemandUnresolvable, debugLog},
 	}
 	for _, server := range liveAuditVersions(t) {
 		t.Run(server.name, func(t *testing.T) {

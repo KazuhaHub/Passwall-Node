@@ -274,6 +274,10 @@ type attempt struct {
 	// shows a connection to this destination and a rejecting route match after it.
 	// The core has to log routing decisions (the sing-box test turns debug on).
 	rejectedAt string
+	// logHas judges by the core's own log: the attempt "succeeds" when the log
+	// holds this text once the attempt has had its time. It is for what no sink
+	// can show, such as the route a connection was given.
+	logHas string
 	// claimedHost makes the attempt succeed only if the bytes reach the sink on
 	// [::1] (the host ClaimedHost resolves to) and NOT the one on 127.0.0.1 (the
 	// host the client requested).
@@ -303,6 +307,16 @@ func (a attempt) run(t *testing.T, socksPort int, s *sink, server *Process) bool
 	if a.claimedHost {
 		reachedClaimed := s.claimed.await(a.prefix, a.timeout)
 		return reachedClaimed && !s.await(a.prefix, 300*time.Millisecond)
+	}
+	if a.logHas != "" {
+		deadline := time.Now().Add(a.timeout)
+		for time.Now().Before(deadline) {
+			if strings.Contains(server.Output(), a.logHas) {
+				return true
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		return false
 	}
 	if a.rejectedAt != "" {
 		time.Sleep(a.timeout)

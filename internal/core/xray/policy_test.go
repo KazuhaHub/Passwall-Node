@@ -1,6 +1,7 @@
 package xray
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -590,10 +591,16 @@ func policyNeeding(need protocol.SniffNeed) *protocol.DestinationPolicy {
 	if need&protocol.SniffForProtocols != 0 {
 		rules = append(rules, protocol.DestinationRule{ID: "p2", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}})
 	}
+	policy := &protocol.DestinationPolicy{}
+	if need&protocol.SniffForResolvedIPs != 0 {
+		rules = append(rules, protocol.DestinationRule{ID: "p4", Action: protocol.RuleBlock, CIDRs: []string{"10.0.0.0/8"}})
+		policy.Resolve = protocol.ResolveOnDemand
+	}
 	if len(rules) == 0 {
 		rules = append(rules, protocol.DestinationRule{ID: "p3", Action: protocol.RuleBlock, Ports: "25"})
 	}
-	return &protocol.DestinationPolicy{Rules: rules}
+	policy.Rules = rules
+	return policy
 }
 
 func TestCompilerSniffingNeedIsScopedToTheRulesInbounds(t *testing.T) {
@@ -800,5 +807,118 @@ func TestCompilerWritesAPatternShapedNameAsAnExactMatchingPattern(t *testing.T) 
 	compiled := regexp.MustCompile(pattern[len("regexp:"):])
 	if !compiled.MatchString(name) || compiled.MatchString("u5@x") || compiled.MatchString(name+"x") {
 		t.Fatal("the pattern does not match exactly the client's email")
+	}
+}
+
+func TestCompilerDomainStrategyFollowsTheResolveMode(t *testing.T) {
+	t.Parallel()
+	rules := []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, Private: true},
+		{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:example.com"}},
+	}
+	for _, test := range []struct {
+		name    string
+		resolve protocol.ResolveMode
+		want    string
+	}{
+		{"as_is is pinned explicitly", protocol.ResolveAsIs, `"AsIs"`},
+		{"on_demand resolves when a rule first asks", protocol.ResolveOnDemand, `"IPOnDemand"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config, _ := compilePolicy(t, policySnapshot(t, &protocol.DestinationPolicy{Rules: rules, Resolve: test.resolve}))
+			if got := string(config.Routing["domainStrategy"]); got != test.want {
+				t.Fatalf("domainStrategy = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+// TestCompilerOnDemandAddsNoDNSAndLeavesFreedomAlone: the node must not change
+// the operator's DNS behaviour to resolve for routing. The localhost client has
+// no cache, so a dns block or UseIP would not close the time-of-check gap
+// either.
+func TestCompilerOnDemandAddsNoDNSAndLeavesFreedomAlone(t *testing.T) {
+	t.Parallel()
+	policy := &protocol.DestinationPolicy{Resolve: protocol.ResolveOnDemand, Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, Private: true},
+		{ID: "p2", Action: protocol.RuleObserve, CIDRs: []string{"10.0.0.0/8"}},
+	}}
+	_, onDemand := compilePolicy(t, policySnapshot(t, policy))
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(onDemand.Config, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := decoded["dns"]; present {
+		t.Fatalf("an on_demand policy added a dns block: %s", decoded["dns"])
+	}
+	var outbounds []map[string]any
+	if err := json.Unmarshal(decoded["outbounds"], &outbounds); err != nil {
+		t.Fatal(err)
+	}
+	for _, outbound := range outbounds {
+		if outbound["protocol"] != "freedom" {
+			continue
+		}
+		if _, set := outbound["settings"].(map[string]any)["domainStrategy"]; set {
+			t.Fatalf("freedom outbound %v sets a domainStrategy", outbound["tag"])
+		}
+	}
+}
+
+func TestCompilerAsIsOutputIsUnchangedByTheResolveSupport(t *testing.T) {
+	t.Parallel()
+	policy := &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, Private: true},
+		{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"domain:example.com"}},
+	}}
+	config, absent := compilePolicy(t, policySnapshot(t, policy))
+	policy.Resolve = protocol.ResolveAsIs
+	_, explicit := compilePolicy(t, policySnapshot(t, policy))
+	if !bytes.Equal(absent.Config, explicit.Config) {
+		t.Fatal("an explicit AsIs compiled differently from an absent resolve")
+	}
+	if got := string(config.Routing["domainStrategy"]); got != `"AsIs"` {
+		t.Fatalf("AsIs is not pinned: domainStrategy = %s", got)
+	}
+}
+
+func TestCompilerOnDemandRefusesARouteOnlyInboundThatAnIPRuleAppliesTo(t *testing.T) {
+	t.Parallel()
+	routeOnly := `{"enabled":true,"destOverride":["http","tls"],"routeOnly":true}`
+	policy := &protocol.DestinationPolicy{Resolve: protocol.ResolveOnDemand, Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, Private: true, Inbounds: []protocol.ListenerKey{"lst_1"}},
+	}}
+	snapshot := policySnapshot(t, policy)
+	snapshot.Listeners[0] = policyListener(t, 1, 20001, routeOnly, true)
+	snapshot.Listeners[1] = policyListener(t, 2, 20002, routeOnly, true)
+	_, err := (Compiler{}).Compile(context.Background(), snapshot)
+	var policyErr *agentcore.PolicyError
+	if !errors.As(err, &policyErr) || policyErr.Code != protocol.IssueDestinationPolicySniffingInsufficient ||
+		!reflect.DeepEqual(policyErr.Listeners, []protocol.ListenerKey{"lst_1"}) {
+		t.Fatalf("error = %v, want sniffing_insufficient naming only lst_1 (the inbound the IP rule applies to)", err)
+	}
+
+	// Under AsIs the same inbound is fine: routeOnly only matters once the
+	// router resolves a name.
+	policy.Resolve = protocol.ResolveAsIs
+	if _, err := (Compiler{}).Compile(context.Background(), snapshot); err != nil {
+		t.Fatalf("AsIs refused a routeOnly inbound: %v", err)
+	}
+}
+
+func TestCompilerOnDemandLeavesDisabledAndMetadataOnlySniffingAlone(t *testing.T) {
+	t.Parallel()
+	policy := &protocol.DestinationPolicy{Resolve: protocol.ResolveOnDemand, Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleBlock, CIDRs: []string{"10.0.0.0/8"}},
+	}}
+	snapshot := policySnapshot(t, policy)
+	snapshot.Listeners[1] = policyListener(t, 2, 20002, `{"enabled":true,"metadataOnly":true}`, true)
+	config, _ := compilePolicy(t, snapshot)
+	if got, present := config.Inbounds[0]["sniffing"]; present {
+		t.Fatalf("an IP-only policy injected sniffing into lst_1: %v", got)
+	}
+	if got := config.Inbounds[1]["sniffing"]; !reflect.DeepEqual(got, map[string]any{"enabled": true, "metadataOnly": true}) {
+		t.Fatalf("lst_2 sniffing = %v, want it untouched", got)
 	}
 }

@@ -73,6 +73,52 @@ goroutines and descriptors stayed bounded and returned to baseline, but one
 unexplained burst lost 4 of 300,000 hits. Counts are therefore a record, not an
 invoice: enforcement never depends on them.
 
+### Destination policy: hostnames and IP rules
+
+A destination rule that names addresses (`cidrs`, `private`) is tried on the
+destination as the client asked for it. By default (`resolve` absent, "AsIs")
+nothing resolves a hostname when routing, so a name that resolves into a blocked
+range is not matched by that rule, on either engine. On Xray the injected
+sniffing also rewrites a connection to the Host or SNI it carries, and no
+address rule sees the address that name resolves to.
+
+A policy whose `resolve` is `on_demand` makes both engines resolve the hostname
+the first time an address rule is reached, once per connection, and try every
+address rule on the same result in rule order; any resolved address matching is
+a match. The node declares `policy.destination.resolve.v1`, meaning it compiles
+this on every engine it runs. `if_non_match`, Xray's third strategy, is not
+offered: it runs the rules without addresses first, so an address block ahead of
+a report-only domain rule is skipped whenever the report-only rule hits, and
+report-only would change a verdict. The live tests pin that behaviour down
+(`TestRealXrayRoutingDomainStrategies`) so the reason is a fact about the
+shipped cores.
+
+| | AsIs (default) | `on_demand`, Xray | `on_demand`, sing-box |
+|---|---|---|---|
+| Compiled as | `routing.domainStrategy: "AsIs"` | `routing.domainStrategy: "IPOnDemand"` | one `{"action":"resolve"}` before the first rule with an `ip_cidr`, searched through logical rules, in pass A or pass B, whichever the connection meets first |
+| DNS cost | none | one uncached system lookup per hostname connection that reaches an address rule, plus the one freedom does when it dials | one lookup (the core's DNS cache applies), and the dial reuses it |
+| Lookup fails | not applicable | the address rules miss and the connection is let through (fail open); freedom then fails to dial the same name | the connection fails (fail closed), for every connection that reaches the resolve, not only those an address rule would have judged |
+| Address matched is the address dialed | not applicable | not guaranteed: two separate lookups, so a rebinding or round-robin name can differ | yes: the direct outbound dials the stored addresses |
+| Inbound with `routeOnly: true` sniffing | fine | refused with `sniffing_insufficient` (`route_only_resolve`) wherever an address rule applies | not applicable: sing-box takes no per-inbound sniffing |
+| Sniffing the node adds | none | none for an address-only policy (disabled or `metadataOnly` sniffing is fine); the usual injection for domain rules | none |
+
+Caveats worth repeating to an operator:
+
+- Xray's `domainStrategy` is one value for the whole router, so on Xray the
+  setting is per node, not per rule.
+- A `routeOnly: true` inbound cannot run `on_demand` on Xray: the sniffed name
+  replaces the real destination for the lookup, so a connection to a blocked
+  address that claims a harmless name would be judged on the name's addresses and
+  let through (pinned by the `on_demand_route_only` live case).
+- The node adds no `dns` block and does not change freedom's `domainStrategy`:
+  routing uses whatever DNS the operator already runs, and a failed or slow
+  resolver therefore slows or (on sing-box) breaks hostname connections.
+- A policy with `on_demand` and no address rule looks nothing up: sing-box's
+  route is byte-identical to AsIs, and Xray's `IPOnDemand` has no rule that asks
+  for addresses.
+- sing-box's `resolve` action exists from 1.11; the core catalog offers only
+  1.14 and a test fails if an older release becomes selectable.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real

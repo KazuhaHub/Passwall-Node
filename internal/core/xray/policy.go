@@ -50,10 +50,35 @@ func (c Compiler) applyPolicy(config *xrayConfig, snapshot agentcore.Snapshot, s
 	}
 	rules, outbounds := policyRouting(plan, c.auditWebhook(snapshot.DestinationPolicy))
 	config.Outbounds = append(config.Outbounds, outbounds...)
-	// An explicit AsIs because the documented limit that a hostname destination
-	// never matches an IP rule depends on it; the default is not a promise.
-	config.Routing = map[string]any{"domainStrategy": "AsIs", "rules": rules}
+	config.Routing = map[string]any{"domainStrategy": domainStrategy(plan.Resolve), "rules": rules}
 	return nil
+}
+
+// domainStrategy is routing.domainStrategy, which is one value for the whole
+// router.
+//
+// AsIs is written out explicitly because the documented limit that a hostname
+// destination never matches an IP rule depends on it; the default is not a
+// promise.
+//
+// IPOnDemand resolves the hostname once, the first time a rule asks for the
+// destination's addresses, and every later IP rule sees the same result. It is
+// the only resolving strategy offered: IPIfNonMatch runs every rule without
+// addresses first, so an IP block ahead of a report-only domain rule is skipped
+// whenever the report-only rule hits, and report-only would change a verdict.
+// Neither a dns block nor a freedom domainStrategy is added: the node does not
+// change the operator's DNS behaviour to resolve for routing.
+//
+// KNOWN LIMITS under IPOnDemand, on Xray only. The lookup is separate from the
+// one freedom does when it dials, so the address matched need not be the address
+// dialed (a rebinding or round-robin name), and a failed lookup makes the IP
+// rules miss, so the connection is let through (fail open). An inbound whose
+// sniffing is routeOnly:true cannot be used: ensureSniffing refuses it.
+func domainStrategy(resolve protocol.ResolveMode) string {
+	if resolve == protocol.ResolveOnDemand {
+		return "IPOnDemand"
+	}
+	return "AsIs"
 }
 
 // auditWebhook returns the constructor of a rule's webhook object, or nil when
@@ -111,7 +136,7 @@ func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, pl
 	if len(insufficient) > 0 {
 		return &agentcore.PolicyError{
 			Code: protocol.IssueDestinationPolicySniffingInsufficient, Listeners: insufficient,
-			Err: fmt.Errorf("sniffing on %d inbound(s) cannot supply the policy's domain or protocol rules", len(insufficient)),
+			Err: fmt.Errorf("sniffing on %d inbound(s) cannot supply the policy's domain, protocol or resolved-address rules", len(insufficient)),
 		}
 	}
 	return nil
