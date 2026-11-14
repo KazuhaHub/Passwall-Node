@@ -464,7 +464,12 @@ not the production daemon: it lets a control plane exercise the real agent
 transport/state/apply/report stack without downloading or launching Xray.
 The durable task/result protocol is implemented, but the harness advertises no
 kind-specific task capability and therefore receives no tasks from a conforming
-control plane. Reality probing remains unimplemented. The production daemon
+control plane. It does declare `policy.destination.v1` and reports a
+PolicyStatus for the destination policy it was sent: `applied` with the
+protocol's `PolicyDigest` of the stored policy (empty when it holds none), or
+`rejected` when the policy does not validate. There is no core, so nothing is
+enforced; the round trip is what the harness covers. Reality probing remains
+unimplemented. The production daemon
 registers `agent.upgrade.v1` on a managed Linux installation (systemd or
 Docker), recognised from its own process identity, and advertises
 `task.agent.upgrade.v1` only while that installation's root-owned upgrade
