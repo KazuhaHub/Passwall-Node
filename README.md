@@ -77,13 +77,19 @@ invoice: enforcement never depends on them.
 
 With the `audit.usage.v1` capability, an Xray node whose policy asks for
 `hits_and_usage` also counts connections per hour, account and site (the
-registrable domain, or `(ip)` for a connection to an address). It is a count of
-connections, not of bytes, and it keeps no port, path, full host name or source
+registrable domain, or the host itself when it has none: a single label, a
+public suffix or a rejected name; `(ip)` for a connection to an address). It is
+a count of connections, not of bytes, and it keeps no port, path, full host name or source
 address. Xray reports it through a webhook on every rule that sends traffic to
 `direct` (the exempt step and the allow rules) and on a final `psp-usage` rule
 that matches the rest, so `log.access` stays `none` and no access log is ever
 written. Blocked and report-only connections are counted as rule hits only.
 sing-box has no webhook and records no usage.
+
+Members of a group on trial get no per-account usage for traffic outside the
+group's list: it goes to the group's observe rule and is folded into the
+unattributed trial rows. An unconditional observe rule removes usage for what it
+matches.
 
 The record is as best-effort as the rule hits: a lost post is not retried, a
 restart loses what has not been sent, and every loss that the node can see is
@@ -92,7 +98,7 @@ distinct (hour, account, site) rows between two reports.
 
 **It costs proxy CPU.** Xray makes one webhook post per counted connection. In a
 worst-case measurement (Linux arm64, 4 CPUs, Xray 26.6.27, 20,000 connections at
-200 per second, every one of them counted) Xray used about 40% more CPU with
+200 per second, every one of them counted) Xray used about 43% more CPU with
 usage on than with it off; the agent's receiver adds its own share on top. Loss
 in that run was 0.005%. Usage is switched on per node, so only nodes that ask
 for it pay this; on a busy node, expect the proxy to need noticeably more CPU.
