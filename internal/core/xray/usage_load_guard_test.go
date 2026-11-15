@@ -12,23 +12,29 @@ import (
 // The load measurement opens thousands of connections. It once took down a
 // laptop's network, so it must never run unless asked for by name.
 func TestUsageLoadIsSkippedUnlessExplicitlyEnabled(t *testing.T) {
-	for _, name := range []string{"TestUsageLoadOverhead", "TestUsageLoadGenerator"} {
+	// Each test must skip at its OWN gate, not for some later reason (no Xray
+	// binary): the guard proves the switch, so it looks for the gate's message.
+	for name, gate := range map[string]string{
+		"TestUsageLoadOverhead":  "set " + usageLoadEnv + "=1",
+		"TestUsageLoadGenerator": "helper process of TestUsageLoadOverhead",
+	} {
 		command := exec.Command(os.Args[0], "-test.run=^"+name+"$", "-test.v", "-test.count=1")
 		command.Env = guardChildEnv(os.Environ())
 		output, err := command.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", name, err, output)
 		}
-		if !strings.Contains(string(output), "--- SKIP: "+name) {
-			t.Fatalf("%s was not skipped by default:\n%s", name, output)
+		if !strings.Contains(string(output), "--- SKIP: "+name) || !strings.Contains(string(output), gate) {
+			t.Fatalf("%s was not skipped at its own gate (%q) by default:\n%s", name, gate, output)
 		}
 	}
 }
 
 // guardChildEnv drops everything that could make the child run a load: the
 // switches, the load tuning, and the Xray binaries the live tests look for. If
-// the skip regressed, the child would then fail fast instead of opening
-// thousands of connections.
+// a gate regressed, the child still could not start a load (it would skip for
+// want of a binary), and the guard above, which looks for each gate's own skip
+// message, would fail.
 func guardChildEnv(environ []string) []string {
 	var env []string
 	for _, entry := range environ {
