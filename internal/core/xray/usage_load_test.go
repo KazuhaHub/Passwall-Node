@@ -1,3 +1,5 @@
+//go:build !windows
+
 package xray
 
 import (
@@ -42,18 +44,7 @@ import (
 // usageLoadEnv is the one switch that lets anything in this package open more
 // than a few dozen connections. Run it only where a runaway cannot reach the
 // owner's network: inside a VM, with the client and the server both in it.
-const usageLoadEnv = "PSP_TEST_USAGE_LOAD"
-
 const loadGeneratorEnv = "PSP_TEST_LOAD_GENERATOR"
-
-// bulkConnections is how many connections the receiver's bulk correctness test
-// sends: a small number by default, the full 2000 only with the load switch.
-func bulkConnections() int {
-	if os.Getenv(usageLoadEnv) == "1" {
-		return 2000
-	}
-	return 100
-}
 
 type loadOutcome struct {
 	OK, Failed, Peak int64
