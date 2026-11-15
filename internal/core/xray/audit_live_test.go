@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +29,8 @@ type liveAuditServer struct {
 	socksPort int
 	sinkPort  int
 	output    func() string
+	// serverPID is the process ID of the Xray under test.
+	serverPID int
 }
 
 func startLiveAuditServer(t *testing.T, binary, version string, policy *protocol.DestinationPolicy, hosts ...string) *liveAuditServer {
@@ -73,7 +78,7 @@ func startLiveAuditServer(t *testing.T, binary, version string, policy *protocol
 	process := policylive.Start(t, binary, "run", "-config", policylive.WriteFile(t, "server.json", config))
 	policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", serverPort), process)
 	return &liveAuditServer{
-		sink: sink, sinkPort: policylive.NewSink(t), output: process.Output,
+		sink: sink, sinkPort: policylive.NewSink(t), output: process.Output, serverPID: process.PID(),
 		socksPort: policylive.StartSOCKSClient(t, client, serverPort),
 	}
 }
@@ -266,6 +271,177 @@ func TestRealXrayTrialHitsAreFoldedOnTheNode(t *testing.T) {
 			}
 			if total != 2 {
 				t.Fatalf("rows = %+v, want two events folded into example.co.uk", rows)
+			}
+		})
+	}
+}
+
+// usageTotals gathers usage from the receiver until want connections have been
+// counted or the wait ends, and returns them summed per (subject, site) with the
+// counters. The webhook is asynchronous: Xray posts after it has routed.
+func (s *liveAuditServer) usageTotals(want int) (map[string]uint32, auditsink.Taken) {
+	totals := map[string]uint32{}
+	var counters auditsink.Taken
+	var seen int
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		taken := s.sink.Take()
+		for _, row := range taken.Usage {
+			if err := protocol.ValidateAuditUsage(row); err != nil {
+				panic(fmt.Sprintf("row %+v does not validate: %v", row, err))
+			}
+			totals[string(row.Subject)+" "+row.Site] += row.Count
+			seen += int(row.Count)
+		}
+		counters.Hits = append(counters.Hits, taken.Hits...)
+		counters.Unmatched += taken.Unmatched
+		counters.DroppedUsage += taken.DroppedUsage
+		if seen >= want {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Let a row that must not exist arrive, and take it.
+	time.Sleep(500 * time.Millisecond)
+	taken := s.sink.Take()
+	for _, row := range taken.Usage {
+		totals[string(row.Subject)+" "+row.Site] += row.Count
+	}
+	counters.Hits = append(counters.Hits, taken.Hits...)
+	counters.Unmatched += taken.Unmatched
+	counters.DroppedUsage += taken.DroppedUsage
+	return totals, counters
+}
+
+// At hits_and_usage a real Xray counts a connection by domain, by address and
+// through an allow rule, and a blocked connection is a hit and not usage. The
+// webhook of the catch-all and of the allow rule are the real thing, compiled
+// by this repository, posting to the real receiver over a real unix socket.
+func TestRealXrayCountsUsageByDomainByIPAndThroughAnAllowRule(t *testing.T) {
+	for _, server := range liveAuditVersions(t) {
+		t.Run(server.name, func(t *testing.T) {
+			policy := &protocol.DestinationPolicy{Collect: protocol.CollectHitsAndUsage, Rules: []protocol.DestinationRule{
+				{ID: "p2", Action: protocol.RuleAllow, Domains: []string{"domain:allowed.example"}},
+				{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"full:blocked.example"}},
+			}}
+			live := startLiveAuditServer(t, server.binary, server.version, policy,
+				"blocked.example", "www.plain.example", "plain.example", "cdn.allowed.example")
+			send := func(host string) {
+				_ = policylive.SOCKSSend(t, live.socksPort, host, live.sinkPort, httpRequest(host))
+			}
+			send("www.plain.example")
+			send("plain.example")
+			send("cdn.allowed.example") // taken by the allow rule p2
+			send("blocked.example")     // taken by the block rule p1
+			// By address: not an HTTP request, so nothing is sniffed.
+			_ = policylive.SOCKSSend(t, live.socksPort, "127.0.0.1", live.sinkPort, []byte("raw"))
+
+			totals, counters := live.usageTotals(4)
+			want := map[string]uint32{
+				string(policylive.Subject) + " plain.example":   2,
+				string(policylive.Subject) + " allowed.example": 1,
+				string(policylive.Subject) + " (ip)":            1,
+			}
+			if !reflect.DeepEqual(totals, want) {
+				t.Fatalf("usage = %v, want %v\nserver:\n%s", totals, want, live.output())
+			}
+			// The blocked connection is a hit, once, and is not in the usage.
+			if len(counters.Hits) != 1 || counters.Hits[0].RuleID != "p1" || counters.Hits[0].Dest != "blocked.example" {
+				t.Fatalf("hits = %+v, want the one block hit", counters.Hits)
+			}
+			if counters.Unmatched != 0 || counters.DroppedUsage != 0 || live.sink.Stats().Unauthorized != 0 {
+				t.Fatalf("counters = %+v, unauthorized = %d", counters, live.sink.Stats().Unauthorized)
+			}
+			// No line in the core's output names an accepted connection.
+			if strings.Contains(live.output(), " accepted ") {
+				t.Fatalf("the core wrote an access log:\n%s", live.output())
+			}
+		})
+	}
+}
+
+// An exempt account skips the blocks, and its connections are still counted.
+func TestRealXrayCountsAnExemptAccountsUsage(t *testing.T) {
+	for _, server := range liveAuditVersions(t) {
+		t.Run(server.name, func(t *testing.T) {
+			policy := &protocol.DestinationPolicy{
+				Collect: protocol.CollectHitsAndUsage,
+				Rules:   []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"full:blocked.example"}}},
+				Exempt:  []protocol.SubjectKey{policylive.Subject},
+			}
+			live := startLiveAuditServer(t, server.binary, server.version, policy, "blocked.example", "www.other.example")
+			for _, host := range []string{"blocked.example", "www.other.example"} {
+				_ = policylive.SOCKSSend(t, live.socksPort, host, live.sinkPort, httpRequest(host))
+			}
+			totals, counters := live.usageTotals(2)
+			want := map[string]uint32{
+				string(policylive.Subject) + " blocked.example": 1,
+				string(policylive.Subject) + " other.example":   1,
+			}
+			if !reflect.DeepEqual(totals, want) {
+				t.Fatalf("usage = %v, want %v\nserver:\n%s", totals, want, live.output())
+			}
+			if len(counters.Hits) != 0 || counters.Unmatched != 0 {
+				t.Fatalf("counters = %+v: an exempt account's connection is not a hit", counters)
+			}
+		})
+	}
+}
+
+// A policy with no rules at all still counts: the panel sends one to collect
+// usage without enforcing anything. And 2000 connections are all counted with
+// nothing unmatched.
+//
+// By default it sends 100 connections; PSP_TEST_USAGE_LOAD=1 sends 2000.
+// It runs on the first Xray version only. A connection through the client and
+// the server uses three loopback ports that stay in TIME_WAIT after it closes,
+// so 2000 connections spend 6000 ports; three versions in a row would run a
+// macOS runner (16k ephemeral ports, 30s TIME_WAIT) out of them and fail on the
+// third for a reason that has nothing to do with the receiver.
+func TestRealXrayCountsTwoThousandConnectionsWithNothingUnmatched(t *testing.T) {
+	for _, server := range liveAuditVersions(t)[:1] {
+		t.Run(server.name, func(t *testing.T) {
+			policy := &protocol.DestinationPolicy{Collect: protocol.CollectHitsAndUsage, Rules: []protocol.DestinationRule{}}
+			live := startLiveAuditServer(t, server.binary, server.version, policy, "a.bulk.example", "b.bulk.example")
+			total, workers := bulkConnections(), 16
+			var next atomic.Int64
+			var wg sync.WaitGroup
+			var failed atomic.Int64
+			for w := 0; w < workers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						n := next.Add(1)
+						if n > int64(total) {
+							return
+						}
+						host := "a.bulk.example"
+						if n%2 == 0 {
+							host = "b.bulk.example"
+						}
+						if err := policylive.SOCKSSend(t, live.socksPort, host, live.sinkPort, httpRequest(host)); err != nil {
+							if failed.Add(1) == 1 {
+								t.Logf("first client-side failure: %v", err)
+							}
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			totals, counters := live.usageTotals(total)
+			var counted uint32
+			for _, count := range totals {
+				counted += count
+			}
+			if failed.Load() != 0 {
+				t.Fatalf("%d connections failed on the client side", failed.Load())
+			}
+			if counters.Unmatched != 0 || counters.DroppedUsage != 0 {
+				t.Fatalf("counters = unmatched %d, dropped %d", counters.Unmatched, counters.DroppedUsage)
+			}
+			if counted != uint32(total) || len(totals) != 1 || totals[string(policylive.Subject)+" bulk.example"] != uint32(total) {
+				t.Fatalf("counted %d in %v, want %d for bulk.example", counted, totals, total)
 			}
 		})
 	}

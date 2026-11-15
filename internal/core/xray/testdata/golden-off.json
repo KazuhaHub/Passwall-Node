@@ -1,0 +1,211 @@
+{
+  "log": {
+    "access": "none",
+    "loglevel": "warning"
+  },
+  "api": {
+    "listen": "127.0.0.1:10085",
+    "services": [
+      "StatsService"
+    ],
+    "tag": "psp-api"
+  },
+  "stats": {},
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserOnline": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true
+    }
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 20001,
+      "protocol": "shadowsocks",
+      "settings": {
+        "clients": [
+          {
+            "email": "u5@x",
+            "level": 0,
+            "password": "EBESExQVFhcYGRobHB0eHw=="
+          },
+          {
+            "email": "u5-k2@x",
+            "level": 0,
+            "password": "EBESExQVFhcYGRobHB0eHw=="
+          },
+          {
+            "email": "u6@x",
+            "level": 0,
+            "password": "EBESExQVFhcYGRobHB0eHw=="
+          }
+        ],
+        "method": "2022-blake3-aes-128-gcm",
+        "network": "tcp,udp",
+        "password": "AAECAwQFBgcICQoLDA0ODw=="
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "enabled": true,
+        "routeOnly": false
+      },
+      "tag": "psp-lst_1"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 20002,
+      "protocol": "shadowsocks",
+      "settings": {
+        "clients": [
+          {
+            "email": "u5@x",
+            "level": 0,
+            "password": "EBESExQVFhcYGRobHB0eHw=="
+          },
+          {
+            "email": "u6@x",
+            "level": 0,
+            "password": "EBESExQVFhcYGRobHB0eHw=="
+          }
+        ],
+        "method": "2022-blake3-aes-128-gcm",
+        "network": "tcp,udp",
+        "password": "AAECAwQFBgcICQoLDA0ODw=="
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "enabled": true,
+        "routeOnly": false
+      },
+      "tag": "psp-lst_2"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-s1"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p2"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "psp-watch-g9"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "psp-watch-p3"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "psp-watch-s2"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "outboundTag": "psp-deny-s1",
+        "ruleTag": "psp-s1",
+        "sourceIP": [
+          "192.0.2.0/24"
+        ],
+        "type": "field"
+      },
+      {
+        "domain": [
+          "full:ok.example"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "psp-p1",
+        "type": "field"
+      },
+      {
+        "outboundTag": "direct",
+        "ruleTag": "psp-exempt",
+        "type": "field",
+        "user": [
+          "u5-k2@x",
+          "u5@x"
+        ]
+      },
+      {
+        "domain": [
+          "regexp:\\.$"
+        ],
+        "outboundTag": "blocked",
+        "ruleTag": "psp-trailing-dot",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "domain:a.example"
+        ],
+        "outboundTag": "psp-deny-p2",
+        "ruleTag": "psp-p2a",
+        "type": "field"
+      },
+      {
+        "ip": [
+          "203.0.113.0/24"
+        ],
+        "outboundTag": "psp-deny-p2",
+        "ruleTag": "psp-p2b",
+        "type": "field"
+      },
+      {
+        "outboundTag": "psp-watch-g9",
+        "ruleTag": "psp-g9",
+        "type": "field",
+        "user": [
+          "u6@x"
+        ]
+      },
+      {
+        "outboundTag": "psp-watch-p3",
+        "port": "26",
+        "ruleTag": "psp-p3",
+        "type": "field"
+      },
+      {
+        "outboundTag": "psp-watch-s2",
+        "ruleTag": "psp-s2",
+        "sourceIP": [
+          "198.51.100.0/24"
+        ],
+        "type": "field"
+      }
+    ]
+  }
+}

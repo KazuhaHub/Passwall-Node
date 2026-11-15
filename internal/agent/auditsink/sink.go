@@ -1,5 +1,6 @@
 // Package auditsink receives the hits Xray reports for the rules that carry a
-// webhook, and aggregates them for the next report.
+// webhook, and the per-site usage it reports for the connections that are let
+// through, and aggregates both for the next report.
 //
 // WHAT IT KEEPS IS DELIBERATELY SMALL. Xray's event names the client's source
 // address; the receiver decodes only the fields it uses, so the address is never
@@ -7,6 +8,10 @@
 // (hour, rule, action, subject, destination, port); a group on trial is folded
 // further, to (hour, rule, site), so that who went where never leaves this
 // package for those rows.
+//
+// Usage is counted per (hour, subject, site): the same registrable domain a trial
+// row is folded to, or "(ip)" where the destination was an address, so neither
+// an address nor a port nor a full host name is kept for it.
 //
 // NOTHING IS WRITTEN TO DISK AND NOTHING IS LOGGED. A hit names an account and a
 // destination. The receiver exposes counts only.
@@ -41,6 +46,9 @@ const (
 	HeaderName = "X-PSP-Audit"
 	// HitPath is the path a webhook posts to.
 	HitPath = "/hit"
+	// UsagePath is the path the usage webhook posts to: every connection that
+	// was let through, one event each, with no rule behind it.
+	UsagePath = "/usage"
 
 	// MaxSocketPathBytes is the longest socket path the receiver listens on.
 	// sun_path is 104 bytes on macOS and 108 on Linux, and Xray's own use of the
@@ -51,8 +59,12 @@ const (
 	// are separate on purpose: the fallback rule of a group on trial matches
 	// most of the connections its members make outside the list, and must not
 	// be able to take the room a real block needs.
+	// The usage table is its own as well: a site visited by many people would
+	// otherwise take room from the hits.
 	DefaultMaxHitKeys   = 20000
 	DefaultMaxTrialKeys = 10000
+	// DefaultMaxUsageKeys bounds (hour, subject, site) rows between two takes.
+	DefaultMaxUsageKeys = 50000
 
 	maxBodyBytes        = 4 << 10
 	maxHeaderBytes      = 8 << 10
@@ -79,6 +91,7 @@ type Options struct {
 	// defaults.
 	MaxHitKeys   int
 	MaxTrialKeys int
+	MaxUsageKeys int
 }
 
 // Stats are the receiver's own counters, for tests and diagnostics. None of
@@ -92,7 +105,7 @@ type Stats struct {
 type Taken struct {
 	// Hits holds every aggregated row, trial rows included, oldest hour first.
 	Hits []protocol.AuditHit
-	// Usage is reserved for the per-site record, which is not collected yet.
+	// Usage holds every per-site row, oldest hour first.
 	Usage []protocol.AuditUsage
 	// The counters are events that never became a row.
 	DroppedHits  uint64
@@ -114,6 +127,12 @@ type trialKey struct {
 	hour int64
 	rule string
 	dest string
+}
+
+type usageKey struct {
+	hour    int64
+	subject protocol.SubjectKey
+	site    string
 }
 
 type counted struct {
@@ -146,10 +165,13 @@ type Sink struct {
 	stagedRules  map[string]struct{}
 	hits         map[hitKey]counted
 	trial        map[trialKey]counted
+	usage        map[usageKey]uint32
 	maxHitKeys   int
 	maxTrialKeys int
+	maxUsageKeys int
 	droppedHits  uint64
 	droppedTrial uint64
+	droppedUsage uint64
 	unmatched    uint64
 }
 
@@ -171,11 +193,15 @@ func New(options Options) (*Sink, error) {
 	if options.MaxTrialKeys <= 0 {
 		options.MaxTrialKeys = DefaultMaxTrialKeys
 	}
+	if options.MaxUsageKeys <= 0 {
+		options.MaxUsageKeys = DefaultMaxUsageKeys
+	}
 	sink := &Sink{
 		path: options.Path, token: []byte(options.Token), now: options.Now,
 		subjects: map[string]protocol.SubjectKey{}, rules: map[string]struct{}{},
 		hits: map[hitKey]counted{}, trial: map[trialKey]counted{}, broken: make(chan error, 1),
-		maxHitKeys: options.MaxHitKeys, maxTrialKeys: options.MaxTrialKeys,
+		usage:      map[usageKey]uint32{},
+		maxHitKeys: options.MaxHitKeys, maxTrialKeys: options.MaxTrialKeys, maxUsageKeys: options.MaxUsageKeys,
 	}
 	sink.server = &http.Server{
 		Handler:           http.HandlerFunc(sink.serveHTTP),
@@ -321,6 +347,15 @@ type webhookEvent struct {
 	OutboundTag string `json:"outboundTag"`
 }
 
+// usageEvent is the part of Xray's event the usage path reads: the account and
+// the destination, and nothing else. The source address is in the event and is
+// deliberately not a field here, and neither is the outbound: a usage event
+// names no rule.
+type usageEvent struct {
+	Email       string `json:"email"`
+	Destination string `json:"destination"`
+}
+
 // serveHTTP wraps the handler so that a panic is not swallowed. net/http would
 // recover it, log it and carry on, and a receiver whose handler panics on every
 // event would keep declaring a capability while recording nothing. The failure
@@ -340,7 +375,7 @@ func (s *Sink) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Sink) handle(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != HitPath {
+	if r.URL.Path != HitPath && r.URL.Path != UsagePath {
 		http.NotFound(w, r)
 		return
 	}
@@ -369,6 +404,17 @@ func (s *Sink) handle(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "bad request", http.StatusBadRequest)
 		}
+		return
+	}
+	if r.URL.Path == UsagePath {
+		var event usageEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			s.countUnmatched()
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		s.recordUsage(event)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	var event webhookEvent
@@ -463,6 +509,50 @@ func (s *Sink) record(event webhookEvent) {
 	s.add(hit)
 }
 
+// recordUsage turns one let-through connection into at most one counted key. Like
+// record it is a few map operations and no I/O. The site is the registrable
+// domain of the destination, the same fold the trial rows use, so the port is
+// not kept and an address becomes "(ip)".
+func (s *Sink) recordUsage(event usageEvent) {
+	now := s.now().UTC()
+	dest, _, ok := splitDestination(event.Destination)
+	if !ok {
+		s.countUnmatched()
+		return
+	}
+	row := protocol.AuditUsage{Hour: now.Truncate(time.Hour).UnixMilli(), Site: registrable(dest), Count: 1}
+	subject, _, known := s.lookup("", event.Email)
+	if !known {
+		s.countUnmatched()
+		return
+	}
+	row.Subject = subject
+	if err := protocol.ValidateAuditUsage(row); err != nil {
+		s.countUnmatched()
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addUsageLocked(row)
+}
+
+// addUsageLocked adds one row. A new key in a full table is dropped and its
+// events counted; an existing key always counts, and saturates.
+func (s *Sink) addUsageLocked(row protocol.AuditUsage) {
+	key := usageKey{row.Hour, row.Subject, row.Site}
+	count, exists := s.usage[key]
+	if !exists && len(s.usage) >= s.maxUsageKeys {
+		s.droppedUsage += uint64(row.Count)
+		return
+	}
+	if sum := uint64(count) + uint64(row.Count); sum > uint64(^uint32(0)) {
+		count = ^uint32(0)
+	} else {
+		count = uint32(sum)
+	}
+	s.usage[key] = count
+}
+
 // addLocked folds one row into the table it belongs to. A new key in a full
 // table is dropped and its events counted; an existing key always counts.
 func (s *Sink) addLocked(hit protocol.AuditHit) {
@@ -511,10 +601,10 @@ func merge(entry counted, hit protocol.AuditHit) counted {
 // which restart from zero. Rows are ordered oldest hour first.
 func (s *Sink) Take() Taken {
 	s.mu.Lock()
-	hits, trial := s.hits, s.trial
-	taken := Taken{DroppedHits: s.droppedHits, DroppedTrial: s.droppedTrial, Unmatched: s.unmatched}
-	s.hits, s.trial = map[hitKey]counted{}, map[trialKey]counted{}
-	s.droppedHits, s.droppedTrial, s.unmatched = 0, 0, 0
+	hits, trial, usage := s.hits, s.trial, s.usage
+	taken := Taken{DroppedHits: s.droppedHits, DroppedTrial: s.droppedTrial, DroppedUsage: s.droppedUsage, Unmatched: s.unmatched}
+	s.hits, s.trial, s.usage = map[hitKey]counted{}, map[trialKey]counted{}, map[usageKey]uint32{}
+	s.droppedHits, s.droppedTrial, s.droppedUsage, s.unmatched = 0, 0, 0, 0
 	s.mu.Unlock()
 
 	taken.Hits = make([]protocol.AuditHit, 0, len(hits)+len(trial))
@@ -531,7 +621,27 @@ func (s *Sink) Take() Taken {
 		})
 	}
 	SortHits(taken.Hits)
+	taken.Usage = make([]protocol.AuditUsage, 0, len(usage))
+	for key, count := range usage {
+		taken.Usage = append(taken.Usage, protocol.AuditUsage{Hour: key.hour, Subject: key.subject, Site: key.site, Count: count})
+	}
+	SortUsage(taken.Usage)
 	return taken
+}
+
+// SortUsage orders rows oldest hour first, then by subject and site, so a batch
+// is deterministic.
+func SortUsage(usage []protocol.AuditUsage) {
+	sort.Slice(usage, func(i, j int) bool {
+		a, b := usage[i], usage[j]
+		switch {
+		case a.Hour != b.Hour:
+			return a.Hour < b.Hour
+		case a.Subject != b.Subject:
+			return a.Subject < b.Subject
+		}
+		return a.Site < b.Site
+	})
 }
 
 // SortHits orders rows oldest hour first, then by the rest of the key, so a
@@ -562,8 +672,12 @@ func (s *Sink) Return(taken Taken) {
 	for _, hit := range taken.Hits {
 		s.addLocked(hit)
 	}
+	for _, row := range taken.Usage {
+		s.addUsageLocked(row)
+	}
 	s.droppedHits += taken.DroppedHits
 	s.droppedTrial += taken.DroppedTrial
+	s.droppedUsage += taken.DroppedUsage
 	s.unmatched += taken.Unmatched
 }
 

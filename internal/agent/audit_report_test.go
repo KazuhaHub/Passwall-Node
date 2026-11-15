@@ -612,3 +612,41 @@ func TestNewAuditReporterNeedsASource(t *testing.T) {
 		t.Fatal("a reporter with no source was accepted")
 	}
 }
+
+// A batch that holds usage and nothing else is a batch: it is attached when the
+// agent declares both capabilities, the report validates, and rows that did not
+// go out come back to the real aggregator with their counters.
+func TestAUsageOnlyBatchIsAttachedAndAnUnsentOneReturnsToTheSink(t *testing.T) {
+	sink, err := auditsink.New(auditsink.Options{Path: "/tmp/unused.sock", Token: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink.Return(auditsink.Taken{
+		Usage:        []protocol.AuditUsage{usageRow(auditHour0, 1), usageRow(auditHour0, 2)},
+		DroppedUsage: 7, Unmatched: 2,
+	})
+	reporter, _ := newAuditReporter(t, sink)
+	builder := auditBuilder(t)
+	builder.Capabilities = []string{protocol.CapabilityAuditHits, protocol.CapabilityAuditUsage}
+	built := round(t, builder, reporter, false)
+	audit := built.Report.Audit
+	if audit == nil || len(audit.Hits) != 0 || len(audit.Usage) != 2 || audit.DroppedUsage != 7 || audit.Unmatched != 2 {
+		t.Fatalf("audit = %+v", audit)
+	}
+	if err := protocol.ValidateNodeReport(built.Report); err != nil {
+		t.Fatalf("report does not validate: %v", err)
+	}
+	reporter.Confirm(audit.BatchID)
+
+	// A report that could not carry the batch gives it all back.
+	sink.Return(auditsink.Taken{Usage: []protocol.AuditUsage{usageRow(auditHour0, 3)}, DroppedUsage: 1})
+	attachment := reporter.Prepare()
+	if attachment == nil || attachment.Frozen {
+		t.Fatalf("attachment = %+v", attachment)
+	}
+	reporter.Settle(attachment, BuiltReport{})
+	back := sink.Take()
+	if len(back.Usage) != 1 || back.DroppedUsage != 1 {
+		t.Fatalf("back = %+v", back)
+	}
+}

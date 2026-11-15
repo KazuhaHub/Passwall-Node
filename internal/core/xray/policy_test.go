@@ -443,8 +443,8 @@ func TestCompilerWebhookNeedsCollectionAndASocket(t *testing.T) {
 			}
 		})
 	}
-	// hits_and_usage still attaches it: usage rides on the log filter, the
-	// webhook is the hit channel of both levels.
+	// hits_and_usage still attaches the hit webhook to the deny and watch
+	// rules; the usage webhook is covered by usage_test.go.
 	config, _ := compileWithAudit(t, Compiler{AuditSocket: "/d/audit.sock", AuditToken: "t"}, webhookPolicy(protocol.CollectHitsAndUsage))
 	found := false
 	for _, rule := range config.rules(t) {

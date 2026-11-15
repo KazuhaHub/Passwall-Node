@@ -48,7 +48,7 @@ func (c Compiler) applyPolicy(config *xrayConfig, snapshot agentcore.Snapshot, s
 	if err := ensureSniffing(config.Inbounds, served, plan); err != nil {
 		return err
 	}
-	rules, outbounds := policyRouting(plan, c.auditWebhook(snapshot.DestinationPolicy))
+	rules, outbounds := policyRouting(plan, c.auditWebhook(snapshot.DestinationPolicy), c.usageWebhook(snapshot.DestinationPolicy))
 	config.Outbounds = append(config.Outbounds, outbounds...)
 	config.Routing = map[string]any{"domainStrategy": domainStrategy(plan.Resolve), "rules": rules}
 	return nil
@@ -94,6 +94,23 @@ func (c Compiler) auditWebhook(policy *protocol.DestinationPolicy) func() map[st
 	return func() map[string]any {
 		return map[string]any{
 			"url":     c.AuditSocket + ":/hit",
+			"headers": map[string]any{"X-PSP-Audit": c.AuditToken},
+		}
+	}
+}
+
+// usageWebhook returns the constructor of the usage webhook object, or nil when
+// usage is not being collected: it needs the hits_and_usage level and the same
+// socket and token as the hit webhook. It posts to /usage, a path of its own,
+// so that a connection that is allowed is never read as a rule hit.
+// Deduplication is not set here either: the record counts connections.
+func (c Compiler) usageWebhook(policy *protocol.DestinationPolicy) func() map[string]any {
+	if policy == nil || policy.Collect != protocol.CollectHitsAndUsage || c.AuditSocket == "" || c.AuditToken == "" {
+		return nil
+	}
+	return func() map[string]any {
+		return map[string]any{
+			"url":     c.AuditSocket + ":/usage",
 			"headers": map[string]any{"X-PSP-Audit": c.AuditToken},
 		}
 	}
@@ -153,19 +170,32 @@ func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, pl
 // stay direct, so a deny outbound placed first would block everything.
 //
 // webhook, when not nil, is attached to every rule whose outbound is a deny or
-// a watch outbound: the two outcomes that are recorded. It is not attached to
-// an allow, to the exempt step or to the builtin trailing-dot guard, none of
-// which is a rule the operator wrote or asked to see hits for.
-func policyRouting(plan agentcore.PolicyPlan, webhook func() map[string]any) ([]map[string]any, []map[string]any) {
+// a watch outbound: the two outcomes that are recorded as hits. It is not
+// attached to the builtin trailing-dot guard, which is not a rule the operator
+// wrote or asked to see hits for.
+//
+// usage, when not nil, is the per-site usage record. It is attached to every
+// rule whose outbound is direct (the exempt step, the allows and the group
+// allows), and a final rule that matches every TCP and UDP connection and sends
+// it to direct is appended, so each connection that no earlier rule took is
+// reported once too. Deny and watch rules keep their hit webhook and are not
+// counted again. The catch-all changes no verdict: unmatched traffic goes to the
+// first outbound, which is direct, and the rule names no address, so it never
+// makes IPOnDemand resolve a name.
+func policyRouting(plan agentcore.PolicyPlan, webhook, usage func() map[string]any) ([]map[string]any, []map[string]any) {
 	rules := []map[string]any{}
 	var outbounds []map[string]any
 	// The exempt step, then the trailing-dot guard: an exempt subject is not
 	// subject to it, and it must precede every block.
 	exempt := func() {
 		if len(plan.ExemptUsers) > 0 {
-			rules = append(rules, map[string]any{
+			rule := map[string]any{
 				"type": "field", "ruleTag": "psp-exempt", "user": plan.ExemptUsers, "outboundTag": "direct",
-			})
+			}
+			if usage != nil {
+				rule["webhook"] = usage()
+			}
+			rules = append(rules, rule)
 		}
 		if plan.TrailingDotGuard() {
 			rules = append(rules, map[string]any{
@@ -188,8 +218,11 @@ func policyRouting(plan agentcore.PolicyPlan, webhook func() map[string]any) ([]
 			outbounds = append(outbounds, map[string]any{"tag": outbound, "protocol": "freedom", "settings": map[string]any{}})
 		}
 		common := map[string]any{"type": "field", "outboundTag": outbound}
-		if webhook != nil && outbound != "direct" {
+		switch {
+		case outbound != "direct" && webhook != nil:
 			common["webhook"] = webhook()
+		case outbound == "direct" && usage != nil:
+			common["webhook"] = usage()
 		}
 		if planned.Users != nil {
 			common["user"] = planned.Users
@@ -238,6 +271,11 @@ func policyRouting(plan agentcore.PolicyPlan, webhook func() map[string]any) ([]
 	}
 	if plan.ExemptAt == len(plan.Rules) {
 		exempt()
+	}
+	if usage != nil {
+		rules = append(rules, map[string]any{
+			"type": "field", "ruleTag": "psp-usage", "network": "tcp,udp", "outboundTag": "direct", "webhook": usage(),
+		})
 	}
 	return rules, outbounds
 }
