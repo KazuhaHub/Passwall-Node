@@ -187,6 +187,9 @@ func (p *Process) Write(value []byte) (int, error) {
 	return p.output.Write(value)
 }
 
+// PID is the process ID of the child, for measuring it from outside.
+func (p *Process) PID() int { return p.command.Process.Pid }
+
 // Output is everything the process has written so far.
 func (p *Process) Output() string {
 	p.mu.Lock()

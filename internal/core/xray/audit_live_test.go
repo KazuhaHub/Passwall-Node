@@ -29,6 +29,8 @@ type liveAuditServer struct {
 	socksPort int
 	sinkPort  int
 	output    func() string
+	// serverPID is the process ID of the Xray under test.
+	serverPID int
 }
 
 func startLiveAuditServer(t *testing.T, binary, version string, policy *protocol.DestinationPolicy, hosts ...string) *liveAuditServer {
@@ -76,7 +78,7 @@ func startLiveAuditServer(t *testing.T, binary, version string, policy *protocol
 	process := policylive.Start(t, binary, "run", "-config", policylive.WriteFile(t, "server.json", config))
 	policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", serverPort), process)
 	return &liveAuditServer{
-		sink: sink, sinkPort: policylive.NewSink(t), output: process.Output,
+		sink: sink, sinkPort: policylive.NewSink(t), output: process.Output, serverPID: process.PID(),
 		socksPort: policylive.StartSOCKSClient(t, client, serverPort),
 	}
 }
@@ -390,6 +392,7 @@ func TestRealXrayCountsAnExemptAccountsUsage(t *testing.T) {
 // usage without enforcing anything. And 2000 connections are all counted with
 // nothing unmatched.
 //
+// By default it sends 100 connections; PSP_TEST_USAGE_LOAD=1 sends 2000.
 // It runs on the first Xray version only. A connection through the client and
 // the server uses three loopback ports that stay in TIME_WAIT after it closes,
 // so 2000 connections spend 6000 ports; three versions in a row would run a
@@ -400,7 +403,7 @@ func TestRealXrayCountsTwoThousandConnectionsWithNothingUnmatched(t *testing.T) 
 		t.Run(server.name, func(t *testing.T) {
 			policy := &protocol.DestinationPolicy{Collect: protocol.CollectHitsAndUsage, Rules: []protocol.DestinationRule{}}
 			live := startLiveAuditServer(t, server.binary, server.version, policy, "a.bulk.example", "b.bulk.example")
-			const total, workers = 2000, 16
+			total, workers := bulkConnections(), 16
 			var next atomic.Int64
 			var wg sync.WaitGroup
 			var failed atomic.Int64
@@ -410,7 +413,7 @@ func TestRealXrayCountsTwoThousandConnectionsWithNothingUnmatched(t *testing.T) 
 					defer wg.Done()
 					for {
 						n := next.Add(1)
-						if n > total {
+						if n > int64(total) {
 							return
 						}
 						host := "a.bulk.example"
@@ -437,7 +440,7 @@ func TestRealXrayCountsTwoThousandConnectionsWithNothingUnmatched(t *testing.T) 
 			if counters.Unmatched != 0 || counters.DroppedUsage != 0 {
 				t.Fatalf("counters = unmatched %d, dropped %d", counters.Unmatched, counters.DroppedUsage)
 			}
-			if counted != total || len(totals) != 1 || totals[string(policylive.Subject)+" bulk.example"] != total {
+			if counted != uint32(total) || len(totals) != 1 || totals[string(policylive.Subject)+" bulk.example"] != uint32(total) {
 				t.Fatalf("counted %d in %v, want %d for bulk.example", counted, totals, total)
 			}
 		})
