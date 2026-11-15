@@ -41,9 +41,7 @@ import (
 // macOS has about 16,000 of them for 30 seconds each, so a faster pace measures
 // port exhaustion instead of Xray).
 
-// usageLoadEnv is the one switch that lets anything in this package open more
-// than a few dozen connections. Run it only where a runaway cannot reach the
-// owner's network: inside a VM, with the client and the server both in it.
+// loadGeneratorEnv marks the child process that generates the load.
 const loadGeneratorEnv = "PSP_TEST_LOAD_GENERATOR"
 
 type loadOutcome struct {

@@ -398,7 +398,7 @@ func TestRealXrayCountsAnExemptAccountsUsage(t *testing.T) {
 // so 2000 connections spend 6000 ports; three versions in a row would run a
 // macOS runner (16k ephemeral ports, 30s TIME_WAIT) out of them and fail on the
 // third for a reason that has nothing to do with the receiver.
-func TestRealXrayCountsTwoThousandConnectionsWithNothingUnmatched(t *testing.T) {
+func TestRealXrayCountsBulkConnectionsWithNothingUnmatched(t *testing.T) {
 	for _, server := range liveAuditVersions(t)[:1] {
 		t.Run(server.name, func(t *testing.T) {
 			policy := &protocol.DestinationPolicy{Collect: protocol.CollectHitsAndUsage, Rules: []protocol.DestinationRule{}}

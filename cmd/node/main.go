@@ -421,7 +421,7 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // afterwards takes the agent down rather than leaving the declaration untrue.
 // They are declared together and statically, for both engines: the receiver
 // serves both paths, and the panel works out from the engine whether usage is
-// actually collected (only Xray has a webhook, so a sing-box node enforces and
+// actually collected (only Xray has a webhook, so a sing-box node enforces but
 // records nothing).
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
 	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve}
