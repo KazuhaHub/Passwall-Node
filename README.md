@@ -90,6 +90,13 @@ restart loses what has not been sent, and every loss that the node can see is
 counted (`unmatched`, `dropped_usage`). The receiver holds at most 50,000
 distinct (hour, account, site) rows between two reports.
 
+**It costs proxy CPU.** Xray makes one webhook post per counted connection. In a
+worst-case measurement (Linux arm64, 4 CPUs, Xray 26.6.27, 20,000 connections at
+200 per second, every one of them counted) Xray used about 40% more CPU with
+usage on than with it off; the agent's receiver adds its own share on top. Loss
+in that run was 0.005%. Usage is switched on per node, so only nodes that ask
+for it pay this; on a busy node, expect the proxy to need noticeably more CPU.
+
 ### Destination policy: hostnames and IP rules
 
 A destination rule that names addresses (`cidrs`, `private`) is tried on the
