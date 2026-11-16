@@ -30,7 +30,8 @@ type ObservationService struct {
 	Issues    IssueSink
 	Status    func() agentcore.Status
 	Now       func() time.Time
-	// Forwards, when set, receives each successful sample's transit counters.
+	// Forwards, when set, receives each successful sample's transit counters
+	// (forwards and links).
 	Forwards *ForwardCounterCache
 
 	mu      sync.Mutex
@@ -82,6 +83,7 @@ func (s *ObservationService) Observe(ctx context.Context) (ObservationResult, er
 	}
 	if s.Forwards != nil {
 		s.Forwards.Set(counters.Forwards)
+		s.Forwards.SetLinks(counters.Links)
 	}
 	s.mu.Lock()
 	s.failing = false
@@ -122,6 +124,31 @@ func (s *ObservationService) fail(ctx context.Context, failure error) (Observati
 type ForwardCounterCache struct {
 	mu       sync.Mutex
 	counters []protocol.ForwardCounters
+	links    []protocol.LinkCounters
+}
+
+// SetLinks replaces the link counters of the latest sample.
+func (c *ForwardCounterCache) SetLinks(counters []agentcore.LinkCounters) {
+	next := make([]protocol.LinkCounters, 0, len(counters))
+	for _, counter := range counters {
+		next = append(next, protocol.LinkCounters{
+			Key: counter.Key, Present: counter.Present,
+			UpBytes: counter.UpBytes, DownBytes: counter.DownBytes, CounterEpoch: counter.CounterEpoch,
+		})
+	}
+	c.mu.Lock()
+	c.links = next
+	c.mu.Unlock()
+}
+
+// LinkSnapshot returns a copy; nil when there is nothing to report.
+func (c *ForwardCounterCache) LinkSnapshot() []protocol.LinkCounters {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.links) == 0 {
+		return nil
+	}
+	return append([]protocol.LinkCounters(nil), c.links...)
 }
 
 func (c *ForwardCounterCache) Set(counters []agentcore.ForwardCounters) {

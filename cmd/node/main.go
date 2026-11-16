@@ -325,7 +325,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	hostTelemetry = hostReporter != nil
 	capabilities := staticCapabilities(hostTelemetry, audit != nil)
 	synchronizer := agent.Synchronizer{
-		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters.Snapshot),
+		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters),
 		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
@@ -398,12 +398,17 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 // updater never advertised remote upgrade until it was restarted. It is a
 // function of its own so the tests build their reports through exactly this
 // wiring rather than a copy of it.
-func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, forwardCounters func() []protocol.ForwardCounters) agent.ReportBuilder {
+func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, transit *agent.ForwardCounterCache) agent.ReportBuilder {
+	var forwardCounters func() []protocol.ForwardCounters
+	var linkCounters func() []protocol.LinkCounters
+	if transit != nil {
+		forwardCounters, linkCounters = transit.Snapshot, transit.LinkSnapshot
+	}
 	return agent.ReportBuilder{
 		AgentID: agentID, AgentVersion: buildversion.String(),
 		Store: store, CoreStatus: status, Now: now,
 		Capabilities: static, CapabilitySource: worker.Capabilities,
-		PolicyStatus: policyStatus, ForwardCounters: forwardCounters,
+		PolicyStatus: policyStatus, ForwardCounters: forwardCounters, LinkCounters: linkCounters,
 	}
 }
 
@@ -418,10 +423,11 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // "on every engine this agent runs", which is why the sing-box compiler could
 // not be left out of the release.
 //
-// transit.forward.v1 is always among them: both engines relay forwards. Only
-// Xray measures them (sing-box's only traffic source is keyed by user), so a
-// sing-box node relays and reports convergence but sends no forward counters,
-// which the panel reads as "not measured".
+// transit.forward.v1 and transit.link.v1 are always among them: both engines
+// relay forwards and run links. Only Xray measures them (sing-box's only
+// traffic source is keyed by user), so a sing-box node relays and reports
+// convergence but sends no transit counters, which the panel reads as "not
+// measured". Users are charged on their listener on both engines either way.
 //
 // audit.hits.v1 and audit.usage.v1 are among them only when the audit receiver
 // is listening, which is decided once at startup; a receiver that fails
@@ -431,7 +437,7 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // actually collected (only Xray has a webhook, so a sing-box node enforces but
 // records nothing).
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
-	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward}
+	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}

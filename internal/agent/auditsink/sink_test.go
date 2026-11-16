@@ -308,6 +308,18 @@ func TestAnObserveHitCarriesTheObserveAction(t *testing.T) {
 	}
 }
 
+// An entry splits a report-only rule for the listeners that leave through a
+// link, and the copy's outbound carries the link after "~". The hit is the
+// same rule's.
+func TestAnObserveHitThroughALinkFindsItsRule(t *testing.T) {
+	sink := startTestSink(t, nil)
+	sink.hit(t, event("u6@x", "watched.example:443", "psp-watch-p2~lnk_4"))
+	taken := sink.Take()
+	if len(taken.Hits) != 1 || taken.Hits[0].RuleID != "p2" || taken.Hits[0].Action != protocol.AuditActionObserve || taken.Unmatched != 0 {
+		t.Fatalf("taken = %+v", taken)
+	}
+}
+
 func TestSourceRulesAreRecordedLikeAnyOtherRule(t *testing.T) {
 	sink := startTestSink(t, nil)
 	sink.hit(t, event("u5@x", "198.51.100.9:25", "psp-deny-s1"))

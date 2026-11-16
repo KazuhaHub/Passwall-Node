@@ -471,6 +471,12 @@ func (s *Sink) record(event webhookEvent) {
 		s.countUnmatched()
 		return
 	}
+	// A rule split for a link's listeners routes to "<outbound>~lnk_<id>": the
+	// rule is what precedes the suffix. (The suffix names the exit the
+	// traffic left through; reporting it is a separate capability.)
+	if before, _, found := strings.Cut(rule, "~"); found {
+		rule = before
+	}
 	dest, port, ok := splitDestination(event.Destination)
 	if !ok {
 		s.countUnmatched()

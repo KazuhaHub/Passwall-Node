@@ -164,21 +164,28 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for bind, key := range binds {
 		occupied[bind] = string(key)
 	}
-	forwards, err := agentcore.PlanForwards(snapshot.Transit, occupied, "::")
+	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "::")
 	if err != nil {
 		return agentcore.Artifact{}, err
+	}
+	for _, link := range transit.LinksOut {
+		result.Outbounds = append(result.Outbounds, compileLinkOut(link))
 	}
 	if snapshot.DestinationPolicy != nil {
 		if err := c.applyPolicy(&result, snapshot, served); err != nil {
 			return agentcore.Artifact{}, err
 		}
 	}
-	// Forward inbounds go after the policy: it indexes Inbounds by the
+	// Transit inbounds go after the policy: it indexes Inbounds by the
 	// position of each served listener.
-	for _, forward := range forwards {
+	for _, forward := range transit.Forwards {
 		result.Inbounds = append(result.Inbounds, compileForward(forward))
 	}
-	routeForwards(&result, forwards)
+	for _, link := range transit.LinksIn {
+		result.Inbounds = append(result.Inbounds, compileLinkIn(link))
+	}
+	applyEgress(&result, served, transit.Egress)
+	routeTransit(&result, transitInboundTags(transit))
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return agentcore.Artifact{}, fmt.Errorf("encode sing-box config: %w", err)
@@ -207,17 +214,13 @@ func compileForward(forward protocol.Forward) map[string]any {
 	return inbound
 }
 
-// routeForwards puts one rule FIRST that sends every forward straight to the
-// direct outbound, so the destination policy (and its sniff and resolve
-// actions) never judges a relayed connection, whose destination is always the
-// landing. The landing enforces its own policy.
-func routeForwards(result *config, forwards []protocol.Forward) {
-	if len(forwards) == 0 {
+// routeTransit puts one rule FIRST that sends every forward and incoming link
+// straight to the direct outbound, so the destination policy (and its sniff
+// and resolve actions) never judges relayed traffic. A forward's destination
+// is always the landing; a link's traffic was already judged by the entry.
+func routeTransit(result *config, tags []string) {
+	if len(tags) == 0 {
 		return
-	}
-	tags := make([]string, 0, len(forwards))
-	for _, forward := range forwards {
-		tags = append(tags, agentcore.ForwardTag(forward.Key))
 	}
 	rule := map[string]any{"inbound": tags, "action": "route", "outbound": "direct"}
 	rules, _ := result.Route["rules"].([]map[string]any)

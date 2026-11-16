@@ -230,13 +230,13 @@ func (r *Runtime) RemoveListener(ctx context.Context, key protocol.ListenerKey) 
 	return r.runSingle(ctx, func(scoped agent.RuntimeRound) error { return scoped.RemoveListener(ctx, key) })
 }
 
-func (r *Runtime) UpsertForward(ctx context.Context, forward protocol.Forward) error {
+func (r *Runtime) UpsertTransit(ctx context.Context, key string) error {
 	return r.runSingle(ctx, func(scoped agent.RuntimeRound) error {
-		forwards, ok := scoped.(agent.ForwardRuntime)
+		transit, ok := scoped.(agent.TransitRuntime)
 		if !ok {
-			return errors.New("runtime round cannot relay forwards")
+			return errors.New("runtime round cannot relay transit")
 		}
-		return forwards.UpsertForward(ctx, forward)
+		return transit.UpsertTransit(ctx, key)
 	})
 }
 
@@ -396,10 +396,10 @@ func (r *round) RemoveListener(ctx context.Context, key protocol.ListenerKey) er
 	return r.objectResult(ctx, protocol.StreamConfig, string(key))
 }
 
-// UpsertForward reports one forward's outcome from the round's single
+// UpsertTransit reports one transit object's outcome from the round's single
 // convergence, exactly as a listener's.
-func (r *round) UpsertForward(ctx context.Context, forward protocol.Forward) error {
-	return r.objectResult(ctx, protocol.StreamConfig, string(forward.Key))
+func (r *round) UpsertTransit(ctx context.Context, key string) error {
+	return r.objectResult(ctx, protocol.StreamConfig, key)
 }
 
 func (r *round) UpsertClient(ctx context.Context, client protocol.Client) error {
@@ -713,8 +713,8 @@ func validateArtifact(artifact agentcore.Artifact) error {
 }
 
 var (
-	_ agent.ForwardRuntime     = (*Runtime)(nil)
-	_ agent.ForwardRuntime     = (*round)(nil)
+	_ agent.TransitRuntime     = (*Runtime)(nil)
+	_ agent.TransitRuntime     = (*round)(nil)
 	_ agent.Runtime            = (*Runtime)(nil)
 	_ agent.RoundScopedRuntime = (*Runtime)(nil)
 	_ agent.RuntimeRound       = (*round)(nil)
