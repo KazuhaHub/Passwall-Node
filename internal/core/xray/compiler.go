@@ -221,11 +221,26 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 	}
 
+	occupied := make(map[string]string, len(binds))
+	for bind, key := range binds {
+		occupied[bind] = string(key)
+	}
+	forwards, err := agentcore.PlanForwards(snapshot.Transit, occupied, "0.0.0.0")
+	if err != nil {
+		return agentcore.Artifact{}, err
+	}
+
 	if snapshot.DestinationPolicy != nil {
 		if err := c.applyPolicy(&config, snapshot, served); err != nil {
 			return agentcore.Artifact{}, err
 		}
 	}
+	// Forward inbounds go after the policy: it indexes Inbounds by the
+	// position of each served listener.
+	for _, forward := range forwards {
+		config.Inbounds = append(config.Inbounds, compileForward(forward))
+	}
+	routeForwards(&config, forwards)
 
 	encoded, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -297,6 +312,44 @@ func (c Compiler) compileInbound(release corecatalog.Release, listener protocol.
 		bindHost = "0.0.0.0"
 	}
 	return inbound, true, net.JoinHostPort(bindHost, fmt.Sprintf("%d", spec.Port)), nil
+}
+
+// compileForward relays the port to the target unchanged. dokodemo-door does
+// no authentication and no sniffing: the landing behind it does both.
+func compileForward(forward protocol.Forward) map[string]any {
+	inbound := map[string]any{
+		"tag": agentcore.ForwardTag(forward.Key), "port": forward.Port, "protocol": "dokodemo-door",
+		"settings": map[string]any{
+			"address": forward.Target, "port": forward.TargetPort, "network": forward.Network,
+		},
+	}
+	if forward.Listen != "" {
+		inbound["listen"] = forward.Listen
+	}
+	return inbound
+}
+
+// routeForwards puts one rule FIRST that sends every forward straight to the
+// direct outbound. Without it, a policy rule that names no inbound (a CIDR or
+// "private" block, say) would also judge relayed connections, whose
+// destination is always the landing: a landing on a private address, the
+// usual case on a leased line, would be blocked. Forwards are never subject to
+// the destination policy; the landing enforces its own.
+func routeForwards(config *xrayConfig, forwards []protocol.Forward) {
+	if len(forwards) == 0 {
+		return
+	}
+	tags := make([]string, 0, len(forwards))
+	for _, forward := range forwards {
+		tags = append(tags, agentcore.ForwardTag(forward.Key))
+	}
+	rule := map[string]any{"type": "field", "ruleTag": "transit-forwards", "inboundTag": tags, "outboundTag": "direct"}
+	if config.Routing == nil {
+		config.Routing = map[string]any{"domainStrategy": "AsIs", "rules": []map[string]any{rule}}
+		return
+	}
+	rules, _ := config.Routing["rules"].([]map[string]any)
+	config.Routing["rules"] = append([]map[string]any{rule}, rules...)
 }
 
 func compileUser(protocolName string, client protocol.Client) (map[string]any, error) {

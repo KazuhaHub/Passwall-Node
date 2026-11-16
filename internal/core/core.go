@@ -21,6 +21,10 @@ type Snapshot struct {
 	// is not called Policy because the Xray configuration already has a Policy
 	// section (levels and statistics) that it must not be confused with.
 	DestinationPolicy *protocol.DestinationPolicy
+	// Transit is what this node relays for other servers. Nil relays nothing,
+	// and a compiler must then produce exactly what it produced before
+	// transit existed.
+	Transit *protocol.Transit
 }
 
 // Artifact is a validated, content-addressed core configuration. Digest is a
@@ -143,6 +147,17 @@ func (h ProcessHandle) Verifiable() bool { return h.PID > 0 && h.StartTicks > 0 
 type Counters struct {
 	Clients   []ClientCounters
 	Listeners []ListenerCounters
+	// Forwards is transit traffic. An engine that cannot attribute it leaves
+	// it empty; absence is "not measured", never zero.
+	Forwards []ForwardCounters
+}
+
+type ForwardCounters struct {
+	Key          protocol.ForwardKey
+	Present      bool
+	UpBytes      int64
+	DownBytes    int64
+	CounterEpoch uint64
 }
 
 type ClientCounters struct {
@@ -161,6 +176,14 @@ type ListenerCounters struct {
 	DownBytes    int64
 	CounterEpoch uint64
 }
+
+// TransitTagPrefix starts the core tag of every transit object. It is not
+// "psp-": that prefix means "a listener key follows" to every parser of a
+// compiled artifact, and a forward is not a listener.
+const TransitTagPrefix = "transit-"
+
+// ForwardTag is the core inbound tag of a forward.
+func ForwardTag(key protocol.ForwardKey) string { return TransitTagPrefix + string(key) }
 
 // Telemetry is deliberately read-only. It cannot mutate desired state or core
 // lifecycle, which keeps observation from becoming a second control plane.

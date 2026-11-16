@@ -230,6 +230,16 @@ func (r *Runtime) RemoveListener(ctx context.Context, key protocol.ListenerKey) 
 	return r.runSingle(ctx, func(scoped agent.RuntimeRound) error { return scoped.RemoveListener(ctx, key) })
 }
 
+func (r *Runtime) UpsertForward(ctx context.Context, forward protocol.Forward) error {
+	return r.runSingle(ctx, func(scoped agent.RuntimeRound) error {
+		forwards, ok := scoped.(agent.ForwardRuntime)
+		if !ok {
+			return errors.New("runtime round cannot relay forwards")
+		}
+		return forwards.UpsertForward(ctx, forward)
+	})
+}
+
 func (r *Runtime) UpsertClient(ctx context.Context, client protocol.Client) error {
 	return r.runSingle(ctx, func(scoped agent.RuntimeRound) error { return scoped.UpsertClient(ctx, client) })
 }
@@ -386,6 +396,12 @@ func (r *round) RemoveListener(ctx context.Context, key protocol.ListenerKey) er
 	return r.objectResult(ctx, protocol.StreamConfig, string(key))
 }
 
+// UpsertForward reports one forward's outcome from the round's single
+// convergence, exactly as a listener's.
+func (r *round) UpsertForward(ctx context.Context, forward protocol.Forward) error {
+	return r.objectResult(ctx, protocol.StreamConfig, string(forward.Key))
+}
+
 func (r *round) UpsertClient(ctx context.Context, client protocol.Client) error {
 	return r.objectResult(ctx, protocol.StreamRoster, string(client.Key))
 }
@@ -438,6 +454,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 		Listeners:         append([]protocol.Listener(nil), config.Listeners...),
 		Now:               r.now(),
 		DestinationPolicy: config.Policy,
+		Transit:           config.Transit,
 	}
 	if roster != nil {
 		snapshot.Clients = append([]protocol.Client(nil), roster.Clients...)
@@ -696,6 +713,8 @@ func validateArtifact(artifact agentcore.Artifact) error {
 }
 
 var (
+	_ agent.ForwardRuntime     = (*Runtime)(nil)
+	_ agent.ForwardRuntime     = (*round)(nil)
 	_ agent.Runtime            = (*Runtime)(nil)
 	_ agent.RoundScopedRuntime = (*Runtime)(nil)
 	_ agent.RuntimeRound       = (*round)(nil)

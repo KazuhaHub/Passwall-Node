@@ -177,7 +177,7 @@ func TestNodeReportBuilderAttachesThePolicyStatusItIsGiven(t *testing.T) {
 	}
 	status := protocol.PolicyStatus{State: protocol.PolicyStateApplied}
 	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker,
-		func() protocol.PolicyStatus { return status })
+		func() protocol.PolicyStatus { return status }, nil)
 	for _, partial := range []bool{false, true} {
 		built, err := builder.Build(t.Context(), agent.BuildOptions{Partial: partial})
 		if err != nil {

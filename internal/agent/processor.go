@@ -176,6 +176,9 @@ func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse)
 		if err := p.upsertListeners(ctx, runtime, oldConfig, received.Config, configVersion, nowMS); err != nil {
 			return result, err
 		}
+		if err := p.upsertForwards(ctx, runtime, oldConfig, received.Config, configVersion, nowMS); err != nil {
+			return result, err
+		}
 	}
 
 	if received.Roster != nil && !rosterVersion.Zero() {
@@ -269,6 +272,63 @@ func (p *Processor) upsertListeners(
 		}
 	}
 	return nil
+}
+
+// upsertForwards gives every forward the same four-state convergence as a
+// listener, from the same round. Forwards come after listeners so a bind
+// conflict is attributed to the forward, never to the listener it collides
+// with.
+func (p *Processor) upsertForwards(
+	ctx context.Context,
+	runtime Runtime,
+	oldBody, body *protocol.ConfigBody,
+	version protocol.Version,
+	nowMS int64,
+) error {
+	if body.Transit == nil {
+		return nil
+	}
+	old := forwardMap(oldBody)
+	forwards, canRelay := runtime.(ForwardRuntime)
+	for _, forward := range body.Transit.Forwards {
+		key := string(forward.Key)
+		current, err := optionalObject(ctx, p.store, protocol.StreamConfig, key)
+		if err != nil {
+			return err
+		}
+		status, err := acceptObject(current, protocol.StreamConfig, key, version, nowMS)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !canRelay:
+			status, err = applyRuntimeResult(status, &RejectedError{Code: "transit_unsupported", Err: errors.New("this runtime cannot relay forwards")}, nowMS)
+		case old[forward.Key] == forward && current.State == protocol.ObjectApplied:
+			status, err = conformance.AdvanceObject(status, conformance.Transition{Event: conformance.EventApplied})
+		case current.State == protocol.ObjectRejected && current.SinceVersion == version:
+			status = current
+		default:
+			status, err = applyRuntimeResult(status, forwards.UpsertForward(ctx, forward), nowMS)
+		}
+		if err != nil {
+			return fmt.Errorf("converge forward %s: %w", forward.Key, err)
+		}
+		if err := p.store.SaveObject(ctx, status, nowMS); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func forwardMap(body *protocol.ConfigBody) map[protocol.ForwardKey]protocol.Forward {
+	out := make(map[protocol.ForwardKey]protocol.Forward)
+	if body == nil || body.Transit == nil {
+		return out
+	}
+	for _, forward := range body.Transit.Forwards {
+		out[forward.Key] = forward
+	}
+	return out
 }
 
 func (p *Processor) applyRoster(
@@ -480,6 +540,12 @@ func (p *Processor) removeListeners(
 	current := listenerMap(body)
 	desiredObjectKeys := make(map[string]struct{}, len(current))
 	for key := range current {
+		desiredObjectKeys[string(key)] = struct{}{}
+	}
+	// A forward has no local row and no removal step: once the config no
+	// longer names it, the next convergence closes its port and its status
+	// is dropped with the other orphans below.
+	for key := range forwardMap(body) {
 		desiredObjectKeys[string(key)] = struct{}{}
 	}
 	localListeners, err := p.store.Listeners(ctx)

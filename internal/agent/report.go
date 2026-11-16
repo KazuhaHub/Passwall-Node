@@ -43,10 +43,14 @@ type ReportBuilder struct {
 	// attached to every report, full or partial, from an agent that declares
 	// protocol.CapabilityDestinationPolicy; nil attaches nothing.
 	PolicyStatus func() protocol.PolicyStatus
-	Store        state.Store
-	OutboxLimit  int
-	Now          func() time.Time
-	maxBodyBytes int64
+	// ForwardCounters is the latest transit sample. It is attached to full
+	// reports from an agent that declares protocol.CapabilityTransitForward;
+	// nil attaches nothing.
+	ForwardCounters func() []protocol.ForwardCounters
+	Store           state.Store
+	OutboxLimit     int
+	Now             func() time.Time
+	maxBodyBytes    int64
 }
 
 // BuiltReport retains the outbox ids that may be acknowledged only after the
@@ -160,6 +164,9 @@ func (b ReportBuilder) Build(ctx context.Context, options BuildOptions) (BuiltRe
 				CounterEpoch: client.CounterEpoch, Gate: client.Gate,
 				LiveIPs: append([]string(nil), client.LiveIPs...),
 			})
+		}
+		if b.ForwardCounters != nil && hasCapability(report.Capabilities, protocol.CapabilityTransitForward) {
+			report.ForwardCounters = b.ForwardCounters()
 		}
 	}
 
@@ -376,6 +383,7 @@ func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64
 	report.Partial = true
 	report.Objects = nil
 	report.ListenerCounters = nil
+	report.ForwardCounters = nil
 	report.Clients = nil
 	report.Subjects = nil
 	body, err := encodeReport(report)

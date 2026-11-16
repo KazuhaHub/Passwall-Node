@@ -85,7 +85,7 @@ func (t *Telemetry) Collect(ctx context.Context) (agentcore.Counters, error) {
 	if deployment.Engine != "xray" || deployment.Version != status.Version || deployment.ConfigDigest != status.ConfigDigest {
 		return agentcore.Counters{}, errors.New("running Xray status does not match the confirmed deployment snapshot")
 	}
-	listeners, err := decodeTelemetryConfig(deployment.ConfigBody)
+	listeners, forwards, err := decodeTelemetryConfig(deployment.ConfigBody)
 	if err != nil {
 		return agentcore.Counters{}, err
 	}
@@ -93,7 +93,7 @@ func (t *Telemetry) Collect(ctx context.Context) (agentcore.Counters, error) {
 	if err != nil {
 		return agentcore.Counters{}, err
 	}
-	presentListeners, presentClients, err := decodeXrayPresence(deployment.Artifact, clientByEmail)
+	presentListeners, presentClients, presentForwards, err := decodeXrayPresence(deployment.Artifact, clientByEmail)
 	if err != nil {
 		return agentcore.Counters{}, err
 	}
@@ -126,7 +126,9 @@ func (t *Telemetry) Collect(ctx context.Context) (agentcore.Counters, error) {
 	if err != nil {
 		return agentcore.Counters{}, err
 	}
-	return assembleCounters(listeners, roster, clientByEmail, presentListeners, presentClients, stats, online, epoch), nil
+	counters := assembleCounters(listeners, roster, clientByEmail, presentListeners, presentClients, stats, online, epoch)
+	counters.Forwards = assembleForwardCounters(forwards, presentForwards, stats, epoch)
+	return counters, nil
 }
 
 func (t *Telemetry) command(ctx context.Context, binary string, args ...string) ([]byte, error) {
@@ -149,24 +151,33 @@ type telemetryRoster struct {
 	Clients []protocol.Client `json:"clients"`
 }
 
-func decodeTelemetryConfig(body []byte) ([]protocol.ListenerKey, error) {
+func decodeTelemetryConfig(body []byte) ([]protocol.ListenerKey, []protocol.ForwardKey, error) {
 	var config protocol.ConfigBody
 	if err := json.Unmarshal(body, &config); err != nil {
-		return nil, fmt.Errorf("decode applied config: %w", err)
+		return nil, nil, fmt.Errorf("decode applied config: %w", err)
 	}
 	listeners := make([]protocol.ListenerKey, 0, len(config.Listeners))
 	seen := make(map[protocol.ListenerKey]struct{}, len(config.Listeners))
 	for _, listener := range config.Listeners {
 		if _, err := listener.Key.RowID(); err != nil {
-			return nil, fmt.Errorf("applied listener key %q: %w", listener.Key, err)
+			return nil, nil, fmt.Errorf("applied listener key %q: %w", listener.Key, err)
 		}
 		if _, exists := seen[listener.Key]; exists {
-			return nil, fmt.Errorf("applied listener %s is duplicated", listener.Key)
+			return nil, nil, fmt.Errorf("applied listener %s is duplicated", listener.Key)
 		}
 		seen[listener.Key] = struct{}{}
 		listeners = append(listeners, listener.Key)
 	}
-	return listeners, nil
+	var forwards []protocol.ForwardKey
+	if config.Transit != nil {
+		for _, forward := range config.Transit.Forwards {
+			if _, err := forward.Key.RowID(); err != nil {
+				return nil, nil, fmt.Errorf("applied forward key %q: %w", forward.Key, err)
+			}
+			forwards = append(forwards, forward.Key)
+		}
+	}
+	return listeners, forwards, nil
 }
 
 func decodeTelemetryRoster(body []byte) (telemetryRoster, map[string]protocol.ClientKey, error) {
@@ -188,7 +199,7 @@ func decodeTelemetryRoster(body []byte) (telemetryRoster, map[string]protocol.Cl
 	return roster, byEmail, nil
 }
 
-func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.ClientKey) (map[protocol.ListenerKey]bool, map[protocol.ClientKey]bool, error) {
+func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.ClientKey) (map[protocol.ListenerKey]bool, map[protocol.ClientKey]bool, map[protocol.ForwardKey]bool, error) {
 	var config struct {
 		Inbounds []struct {
 			Tag      string          `json:"tag"`
@@ -196,18 +207,27 @@ func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.Clien
 		} `json:"inbounds"`
 	}
 	if err := json.Unmarshal(artifact, &config); err != nil {
-		return nil, nil, fmt.Errorf("decode applied Xray artifact: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode applied Xray artifact: %w", err)
 	}
 	listeners := make(map[protocol.ListenerKey]bool)
 	clients := make(map[protocol.ClientKey]bool)
+	forwards := make(map[protocol.ForwardKey]bool)
 	for _, inbound := range config.Inbounds {
+		if forwardText, transit := strings.CutPrefix(inbound.Tag, agentcore.TransitTagPrefix); transit {
+			forward := protocol.ForwardKey(forwardText)
+			if _, err := forward.RowID(); err != nil {
+				return nil, nil, nil, fmt.Errorf("applied Xray inbound tag %q: %w", inbound.Tag, err)
+			}
+			forwards[forward] = true
+			continue
+		}
 		keyText, managed := strings.CutPrefix(inbound.Tag, "psp-")
 		if !managed {
 			continue
 		}
 		key := protocol.ListenerKey(keyText)
 		if _, err := key.RowID(); err != nil {
-			return nil, nil, fmt.Errorf("applied Xray inbound tag %q: %w", inbound.Tag, err)
+			return nil, nil, nil, fmt.Errorf("applied Xray inbound tag %q: %w", inbound.Tag, err)
 		}
 		listeners[key] = true
 		var settings struct {
@@ -217,18 +237,18 @@ func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.Clien
 		}
 		if len(inbound.Settings) != 0 {
 			if err := json.Unmarshal(inbound.Settings, &settings); err != nil {
-				return nil, nil, fmt.Errorf("decode applied Xray inbound %s clients: %w", key, err)
+				return nil, nil, nil, fmt.Errorf("decode applied Xray inbound %s clients: %w", key, err)
 			}
 		}
 		for _, user := range settings.Clients {
 			clientKey, exists := clientByEmail[user.Email]
 			if !exists {
-				return nil, nil, fmt.Errorf("applied Xray inbound %s contains unknown statistics username %q", key, user.Email)
+				return nil, nil, nil, fmt.Errorf("applied Xray inbound %s contains unknown statistics username %q", key, user.Email)
 			}
 			clients[clientKey] = true
 		}
 	}
-	return listeners, clients, nil
+	return listeners, clients, forwards, nil
 }
 
 type statValue struct {
@@ -324,6 +344,26 @@ func assembleCounters(
 	}
 	sort.Slice(result.Clients, func(i, j int) bool { return result.Clients[i].Key < result.Clients[j].Key })
 	sort.Slice(result.Listeners, func(i, j int) bool { return result.Listeners[i].Key < result.Listeners[j].Key })
+	return result
+}
+
+// assembleForwardCounters reads each forward's inbound traffic. Xray counts
+// both directions of the relayed connection on the dokodemo-door inbound.
+func assembleForwardCounters(forwards []protocol.ForwardKey, present map[protocol.ForwardKey]bool, stats map[string]int64, epoch uint64) []agentcore.ForwardCounters {
+	if len(forwards) == 0 {
+		return nil
+	}
+	result := make([]agentcore.ForwardCounters, 0, len(forwards))
+	for _, key := range forwards {
+		tag := agentcore.ForwardTag(key)
+		result = append(result, agentcore.ForwardCounters{
+			Key: key, Present: present[key],
+			UpBytes:      stats["inbound>>>"+tag+">>>traffic>>>uplink"],
+			DownBytes:    stats["inbound>>>"+tag+">>>traffic>>>downlink"],
+			CounterEpoch: epoch,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
 	return result
 }
 

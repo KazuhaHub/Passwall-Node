@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
@@ -120,7 +121,12 @@ func validateObject(status protocol.ObjectStatus, updatedAtMS int64) error {
 	}
 	switch status.Stream {
 	case protocol.StreamConfig:
-		if _, err := protocol.ListenerKey(status.Key).RowID(); err != nil {
+		// A config object is a listener or a transit forward.
+		if strings.HasPrefix(status.Key, "fwd_") {
+			if _, err := protocol.ForwardKey(status.Key).RowID(); err != nil {
+				return err
+			}
+		} else if _, err := protocol.ListenerKey(status.Key).RowID(); err != nil {
 			return err
 		}
 	case protocol.StreamRoster:

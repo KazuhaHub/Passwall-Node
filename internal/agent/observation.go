@@ -9,6 +9,7 @@ import (
 
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
+	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
 type ObservationResult struct {
@@ -29,6 +30,8 @@ type ObservationService struct {
 	Issues    IssueSink
 	Status    func() agentcore.Status
 	Now       func() time.Time
+	// Forwards, when set, receives each successful sample's transit counters.
+	Forwards *ForwardCounterCache
 
 	mu      sync.Mutex
 	failing bool
@@ -77,6 +80,9 @@ func (s *ObservationService) Observe(ctx context.Context) (ObservationResult, er
 	if err != nil {
 		return s.fail(ctx, fmt.Errorf("persist core telemetry: %w", err))
 	}
+	if s.Forwards != nil {
+		s.Forwards.Set(counters.Forwards)
+	}
 	s.mu.Lock()
 	s.failing = false
 	s.mu.Unlock()
@@ -101,6 +107,44 @@ func (s *ObservationService) fail(ctx context.Context, failure error) (Observati
 		return ObservationResult{}, fmt.Errorf("record core telemetry failure: %w", err)
 	}
 	return ObservationResult{}, nil
+}
+
+// ForwardCounterCache holds the latest transit counters between the observer
+// and the report builder.
+//
+// IT IS NOT DURABLE, ON PURPOSE. Forward traffic is nobody's usage: the landing
+// counts the same bytes per user. Each sample carries the core's counter epoch,
+// so the panel reads a core restart as a reset, and what it loses is at most
+// the traffic between the last report and the restart. That bounded gap is the
+// price of not growing the node's schema for an operational figure. Before the
+// first sample after a start the cache is empty and nothing is reported, which
+// the panel reads as "not measured", never as zero.
+type ForwardCounterCache struct {
+	mu       sync.Mutex
+	counters []protocol.ForwardCounters
+}
+
+func (c *ForwardCounterCache) Set(counters []agentcore.ForwardCounters) {
+	next := make([]protocol.ForwardCounters, 0, len(counters))
+	for _, counter := range counters {
+		next = append(next, protocol.ForwardCounters{
+			Key: counter.Key, Present: counter.Present,
+			UpBytes: counter.UpBytes, DownBytes: counter.DownBytes, CounterEpoch: counter.CounterEpoch,
+		})
+	}
+	c.mu.Lock()
+	c.counters = next
+	c.mu.Unlock()
+}
+
+// Snapshot returns a copy; nil when there is nothing to report.
+func (c *ForwardCounterCache) Snapshot() []protocol.ForwardCounters {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.counters) == 0 {
+		return nil
+	}
+	return append([]protocol.ForwardCounters(nil), c.counters...)
 }
 
 var _ Observer = (*ObservationService)(nil)

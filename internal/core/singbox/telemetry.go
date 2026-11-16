@@ -211,6 +211,10 @@ type connectionIdentity struct {
 	client   protocol.ClientKey
 	listener protocol.ListenerKey
 	sourceIP string
+	// transit marks a relayed connection. It has no user and is nobody's
+	// usage, so it never enters the ledger; it is tracked only so that its
+	// later update and close events, which carry no metadata, are recognised.
+	transit bool
 }
 
 func translateConnectionEvents(message *connectionEvents, mapping telemetryMapping, current map[string]connectionIdentity) ([]state.CoreTrafficEvent, map[string]connectionIdentity, error) {
@@ -239,6 +243,14 @@ func translateConnectionEvents(message *connectionEvents, mapping telemetryMappi
 		}
 		if !exists {
 			return nil, nil, fmt.Errorf("connection %s event arrived without metadata", event.ID)
+		}
+		if identity.transit {
+			if event.Type == connectionEventClosed || (event.Connection != nil && event.Connection.ClosedAt > 0) {
+				delete(next, event.ID)
+			} else {
+				next[event.ID] = identity
+			}
+			continue
 		}
 		translated := state.CoreTrafficEvent{
 			ConnectionID: event.ID, ClientKey: identity.client, ListenerKey: identity.listener, SourceIP: identity.sourceIP,
@@ -282,6 +294,9 @@ func translateConnectionEvents(message *connectionEvents, mapping telemetryMappi
 }
 
 func identifyConnection(value *connection, mapping telemetryMapping) (connectionIdentity, error) {
+	if strings.HasPrefix(value.Inbound, agentcore.TransitTagPrefix) {
+		return connectionIdentity{transit: true}, nil
+	}
 	listener, exists := mapping.listenerByTag[value.Inbound]
 	if !exists {
 		return connectionIdentity{}, fmt.Errorf("unknown managed inbound %q", value.Inbound)
@@ -347,6 +362,12 @@ func decodeTelemetryMapping(deployment state.CoreDeployment) (telemetryMapping, 
 		return telemetryMapping{}, fmt.Errorf("decode applied sing-box artifact: %w", err)
 	}
 	for _, inbound := range artifact.Inbounds {
+		// Forwards are not measured on sing-box: its connection API is the
+		// only traffic source, and the durable ledger behind it is keyed by
+		// client and listener, which a relayed connection has neither of.
+		if strings.HasPrefix(inbound.Tag, agentcore.TransitTagPrefix) {
+			continue
+		}
 		listener, exists := result.listenerByTag[inbound.Tag]
 		if !exists {
 			return telemetryMapping{}, fmt.Errorf("applied sing-box contains unknown inbound %q", inbound.Tag)
