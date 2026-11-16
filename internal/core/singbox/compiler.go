@@ -160,11 +160,25 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			}
 		}
 	}
+	occupied := make(map[string]string, len(binds))
+	for bind, key := range binds {
+		occupied[bind] = string(key)
+	}
+	forwards, err := agentcore.PlanForwards(snapshot.Transit, occupied, "::")
+	if err != nil {
+		return agentcore.Artifact{}, err
+	}
 	if snapshot.DestinationPolicy != nil {
 		if err := c.applyPolicy(&result, snapshot, served); err != nil {
 			return agentcore.Artifact{}, err
 		}
 	}
+	// Forward inbounds go after the policy: it indexes Inbounds by the
+	// position of each served listener.
+	for _, forward := range forwards {
+		result.Inbounds = append(result.Inbounds, compileForward(forward))
+	}
+	routeForwards(&result, forwards)
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return agentcore.Artifact{}, fmt.Errorf("encode sing-box config: %w", err)
@@ -172,6 +186,42 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	encoded = append(encoded, '\n')
 	digest := sha256.Sum256(encoded)
 	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:])}, nil
+}
+
+// compileForward relays the port to the target unchanged: a direct inbound
+// whose destination is overridden. It does no authentication; the landing
+// behind it does.
+func compileForward(forward protocol.Forward) map[string]any {
+	listen := forward.Listen
+	if listen == "" {
+		listen = "::"
+	}
+	inbound := map[string]any{
+		"type": "direct", "tag": agentcore.ForwardTag(forward.Key), "listen": listen, "listen_port": forward.Port,
+		"override_address": forward.Target, "override_port": forward.TargetPort,
+	}
+	// An absent network is both TCP and UDP in sing-box.
+	if forward.Network == protocol.ForwardNetworkTCP {
+		inbound["network"] = "tcp"
+	}
+	return inbound
+}
+
+// routeForwards puts one rule FIRST that sends every forward straight to the
+// direct outbound, so the destination policy (and its sniff and resolve
+// actions) never judges a relayed connection, whose destination is always the
+// landing. The landing enforces its own policy.
+func routeForwards(result *config, forwards []protocol.Forward) {
+	if len(forwards) == 0 {
+		return
+	}
+	tags := make([]string, 0, len(forwards))
+	for _, forward := range forwards {
+		tags = append(tags, agentcore.ForwardTag(forward.Key))
+	}
+	rule := map[string]any{"inbound": tags, "action": "route", "outbound": "direct"}
+	rules, _ := result.Route["rules"].([]map[string]any)
+	result.Route["rules"] = append([]map[string]any{rule}, rules...)
 }
 
 func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.Client) (map[string]any, bool, string, error) {

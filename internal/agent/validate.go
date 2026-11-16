@@ -40,6 +40,9 @@ func validateConfig(body *protocol.ConfigBody) error {
 	if body.Coverage.Subjects != 0 {
 		return fmt.Errorf("config coverage subjects must be zero")
 	}
+	if err := protocol.ValidateTransit(body.Transit); err != nil {
+		return fmt.Errorf("config transit: %w", err)
+	}
 	return nil
 }
 
