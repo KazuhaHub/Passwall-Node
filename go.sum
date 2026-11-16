@@ -1,5 +1,7 @@
 github.com/KazuhaHub/passwall-protocol v0.6.1-0.20261116222441-27cdebf04a73 h1:0tO0PlKrYVpzZJ8df/nN/Lk7FCyqkv3kpJNbspObiJI=
 github.com/KazuhaHub/passwall-protocol v0.6.1-0.20261116222441-27cdebf04a73/go.mod h1:IQAhUtHV50QCZFbjIKDvrQBzyQY1tZerGp7F4KfquBI=
+github.com/KazuhaHub/passwall-protocol v0.7.0 h1:iRdytkXhIuDzrhoj30q36H1zZlOiFXVqGw5eZiVfFrk=
+github.com/KazuhaHub/passwall-protocol v0.7.0/go.mod h1:IQAhUtHV50QCZFbjIKDvrQBzyQY1tZerGp7F4KfquBI=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
