@@ -588,7 +588,7 @@ func prepareInitialCore(ctx context.Context, store state.Store, installer *insta
 		if resolveErr != nil {
 			return initialCore{}, resolveErr
 		}
-		asset, assetErr := release.AssetFor(goruntime.GOOS, goruntime.GOARCH)
+		asset, assetErr := installer.AssetFor(release)
 		if assetErr != nil {
 			return initialCore{}, assetErr
 		}

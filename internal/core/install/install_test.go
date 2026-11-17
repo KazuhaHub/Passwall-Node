@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -129,6 +130,181 @@ func TestInstallExtractsNestedSingBoxTarball(t *testing.T) {
 	}
 }
 
+// A MUSL HOST GETS THE MUSL ASSET, a glibc host the glibc one, from the same
+// release: the installer downloads the variant its host can execute.
+func TestInstallSelectsTheAssetForTheHostLibc(t *testing.T) {
+	t.Parallel()
+	for _, libc := range []string{corecatalog.LibcGlibc, corecatalog.LibcMusl} {
+		t.Run(libc, func(t *testing.T) {
+			t.Parallel()
+			members := map[string]string{
+				corecatalog.LibcGlibc: "sing-box-1.14.0-linux-amd64/sing-box",
+				corecatalog.LibcMusl:  "sing-box-1.14.0-linux-amd64-musl/sing-box",
+			}
+			archives := make(map[string][]byte, len(members))
+			release := corecatalog.Release{Engine: "sing-box", Version: "1.14.0", Selectable: true}
+			for variant, member := range members {
+				archive := tarGzWithBinary(t, member, []byte("fake-sing-box-"+variant))
+				digest := sha256.Sum256(archive)
+				name := strings.SplitN(member, "/", 2)[0] + ".tar.gz"
+				archives["/SagerNet/sing-box/releases/download/v1.14.0/"+name] = archive
+				release.Assets = append(release.Assets, corecatalog.Asset{
+					OS: "linux", Arch: "amd64", Libc: variant,
+					URL:    "https://github.com/SagerNet/sing-box/releases/download/v1.14.0/" + name,
+					SHA256: hex.EncodeToString(digest[:]), Archive: "tar.gz", Binary: member,
+				})
+			}
+			var requested []string
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				requested = append(requested, request.URL.Path)
+				archive, ok := archives[request.URL.Path]
+				if !ok {
+					return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK, ContentLength: int64(len(archive)),
+					Body: io.NopCloser(bytes.NewReader(archive)), Header: make(http.Header),
+				}, nil
+			})}
+			verifier := &verifierStub{want: "fake-sing-box-" + libc}
+			installer, err := New(Options{
+				RootDir: t.TempDir(), GOOS: "linux", GOARCH: "amd64", Libc: libc, HTTPClient: client, Verifier: verifier,
+				Resolve: func(_, _ string) (corecatalog.Release, error) { return release, nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			installed, err := installer.Install(t.Context(), Request{Engine: "sing-box", Version: "1.14.0"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(requested) != 1 || !strings.HasSuffix(installed.BinaryPath, filepath.FromSlash(members[libc])) {
+				t.Fatalf("requested=%v installation=%#v", requested, installed)
+			}
+		})
+	}
+}
+
+// A HOST WHOSE DETECTED LIBC CHANGES KEEPS ITS INSTALLATION. Installing Debian's
+// musl package adds a musl loader to a glibc host; the next start must reuse the
+// glibc install it already verified, not refuse to start over a metadata mismatch.
+func TestExistingInstallOfAnotherLibcVariantIsReused(t *testing.T) {
+	t.Parallel()
+	members := map[string]string{
+		corecatalog.LibcGlibc: "sing-box-1.14.0-linux-amd64/sing-box",
+		corecatalog.LibcMusl:  "sing-box-1.14.0-linux-amd64-musl/sing-box",
+	}
+	archives := make(map[string][]byte, len(members))
+	release := corecatalog.Release{Engine: "sing-box", Version: "1.14.0", Selectable: true}
+	for variant, member := range members {
+		archive := tarGzWithBinary(t, member, []byte("fake-sing-box"))
+		digest := sha256.Sum256(archive)
+		name := strings.SplitN(member, "/", 2)[0] + ".tar.gz"
+		archives["/SagerNet/sing-box/releases/download/v1.14.0/"+name] = archive
+		release.Assets = append(release.Assets, corecatalog.Asset{
+			OS: "linux", Arch: "amd64", Libc: variant,
+			URL:    "https://github.com/SagerNet/sing-box/releases/download/v1.14.0/" + name,
+			SHA256: hex.EncodeToString(digest[:]), Archive: "tar.gz", Binary: member,
+		})
+	}
+	downloads := 0
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		downloads++
+		archive := archives[request.URL.Path]
+		return &http.Response{
+			StatusCode: http.StatusOK, ContentLength: int64(len(archive)),
+			Body: io.NopCloser(bytes.NewReader(archive)), Header: make(http.Header),
+		}, nil
+	})}
+	root := t.TempDir()
+	installer := func(libc string) *Installer {
+		installer, err := New(Options{
+			RootDir: root, GOOS: "linux", GOARCH: "amd64", Libc: libc, HTTPClient: client,
+			Verifier: &verifierStub{want: "fake-sing-box"},
+			Resolve:  func(_, _ string) (corecatalog.Release, error) { return release, nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return installer
+	}
+	first, err := installer(corecatalog.LibcGlibc).Install(t.Context(), Request{Engine: "sing-box", Version: "1.14.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := installer(corecatalog.LibcMusl).Install(t.Context(), Request{Engine: "sing-box", Version: "1.14.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if downloads != 1 || second.BinaryPath != first.BinaryPath || !strings.HasSuffix(first.BinaryPath, filepath.FromSlash(members[corecatalog.LibcGlibc])) {
+		t.Fatalf("downloads=%d first=%s second=%s", downloads, first.BinaryPath, second.BinaryPath)
+	}
+	// A recorded asset that is not one of this target's variants still fails.
+	kept := []corecatalog.Asset{}
+	for _, asset := range release.Assets {
+		if asset.Libc != corecatalog.LibcGlibc {
+			kept = append(kept, asset)
+		}
+	}
+	release.Assets = kept
+	if _, err := installer(corecatalog.LibcMusl).Install(t.Context(), Request{Engine: "sing-box", Version: "1.14.0"}); err == nil {
+		t.Fatal("an installation recorded from an asset the release no longer lists was accepted")
+	}
+}
+
+func TestDetectLibcFromTheDynamicLoader(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		files []string
+		goos  string
+		want  string
+	}{
+		{"alpine amd64", []string{"lib/ld-musl-x86_64.so.1"}, "linux", corecatalog.LibcMusl},
+		{"alpine arm64", []string{"lib/ld-musl-aarch64.so.1"}, "linux", corecatalog.LibcMusl},
+		{"debian amd64", []string{"lib64/ld-linux-x86-64.so.2"}, "linux", corecatalog.LibcGlibc},
+		{"debian arm64", []string{"lib/ld-linux-aarch64.so.1"}, "linux", corecatalog.LibcGlibc},
+		{"multiarch only", []string{"lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"}, "linux", corecatalog.LibcGlibc},
+		{"alpine with gcompat", []string{"lib/ld-musl-x86_64.so.1", "lib64/ld-linux-x86-64.so.2"}, "linux", corecatalog.LibcMusl},
+		{"no loader", nil, "linux", corecatalog.LibcMusl},
+		{"nixos stub loader", []string{"etc/NIXOS", "lib64/ld-linux-x86-64.so.2"}, "linux", corecatalog.LibcMusl},
+		{"not linux", []string{"lib64/ld-linux-x86-64.so.2"}, "darwin", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			for _, file := range tc.files {
+				path := filepath.Join(root, filepath.FromSlash(file))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := detectLibc(tc.goos, root); got != tc.want {
+				t.Fatalf("detectLibc = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// expectHostLibc lets a run that knows its host pin what HostLibc must find:
+// the container acceptance runs these tests inside the Alpine image with
+// PSP_TEST_EXPECT_LIBC=musl, so a detection that fell back to glibc there fails
+// by name instead of by an exec error.
+func expectHostLibc(t *testing.T) {
+	t.Helper()
+	want := os.Getenv("PSP_TEST_EXPECT_LIBC")
+	if want == "" {
+		return
+	}
+	if got := HostLibc(runtime.GOOS); got != want {
+		t.Fatalf("HostLibc = %q, PSP_TEST_EXPECT_LIBC = %q", got, want)
+	}
+}
+
 func TestAssetValidationRejectsTraversal(t *testing.T) {
 	t.Parallel()
 	release := testRelease(strings.Repeat("0", 64), false)
@@ -211,6 +387,7 @@ func TestOfficialXrayInstallIntegration(t *testing.T) {
 	if os.Getenv("PSP_TEST_CORE_INSTALL") != "1" {
 		t.Skip("set PSP_TEST_CORE_INSTALL=1 to download and verify the recommended official Xray release")
 	}
+	expectHostLibc(t)
 	release, err := corecatalog.Recommended("xray")
 	if err != nil {
 		t.Fatal(err)
@@ -235,6 +412,7 @@ func TestOfficialSingBoxInstallIntegration(t *testing.T) {
 	if os.Getenv("PSP_TEST_SING_BOX_INSTALL") != "1" {
 		t.Skip("set PSP_TEST_SING_BOX_INSTALL=1 to download and verify the recommended official sing-box release")
 	}
+	expectHostLibc(t)
 	release, err := corecatalog.Recommended("sing-box")
 	if err != nil {
 		t.Fatal(err)

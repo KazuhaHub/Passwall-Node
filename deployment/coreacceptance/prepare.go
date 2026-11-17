@@ -188,7 +188,7 @@ func prepare(ctx context.Context, directory, environmentFile string, output io.W
 		if err != nil {
 			return fmt.Errorf("install official %s %s: %w", pin.engine, pin.version, err)
 		}
-		asset, err := installed.Release.AssetFor(runtime.GOOS, runtime.GOARCH)
+		asset, err := installer.AssetFor(installed.Release)
 		if err != nil {
 			return err
 		}

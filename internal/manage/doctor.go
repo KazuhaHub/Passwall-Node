@@ -19,6 +19,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
+	"github.com/KazuhaHub/passwall-node/v4/internal/core/install"
 	"github.com/KazuhaHub/passwall-node/v4/internal/host"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
@@ -467,7 +468,7 @@ func inspectCoreBinary(options DoctorOptions, snapshot stateSnapshot) DoctorChec
 		return DoctorCheck{Code: code, Status: DoctorUnavailable,
 			Summary: "the selected core version is not in this binary's catalog"}
 	}
-	asset, err := release.AssetFor(runtime.GOOS, runtime.GOARCH)
+	asset, err := release.AssetFor(runtime.GOOS, runtime.GOARCH, install.HostLibc(runtime.GOOS))
 	if err != nil {
 		return DoctorCheck{Code: code, Status: DoctorUnavailable,
 			Summary: "the catalog has no asset for this platform"}

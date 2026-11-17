@@ -21,6 +21,16 @@ The fixture enables the existing gated tests and runs them with `-count=1`:
   HTTP target, exercised through Xray, Mihomo and sing-box SOCKS clients. Each
   client must carry HTTP traffic with the expected response body and header.
 
+A second job, `image-cores`, runs on the same two architectures INSIDE the
+runtime image the `Dockerfile` builds (Alpine, musl), as the image's
+unprivileged user with a read-only root: a static build of the installer tests
+downloads, checks and executes the recommended Xray and sing-box there, with
+`PSP_TEST_EXPECT_LIBC=musl` pinning what the installer must detect. The Ubuntu
+runners above are glibc hosts and cannot see a core that only fails on musl —
+sing-box's plain Linux build is linked against glibc and passed them while it
+could not start in the Docker image. That job's evidence is checked with
+`coreacceptance check --profile image`.
+
 The JSON checker requires every executable leaf test, including one subtest per
 Xray version, each parent test and all three packages to run and pass exactly
 once. Any skip, failure, missing

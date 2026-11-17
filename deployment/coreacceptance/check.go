@@ -49,6 +49,22 @@ var requiredTests = []testIdentity{
 	{module + "singbox", "TestRealityHandshakeMatrix/sing-box-1.14.0"},
 }
 
+// imageTests is the evidence the image job must produce: the production
+// installer downloading, extracting and EXECUTING both recommended official
+// cores inside the shipped Alpine runtime. The host runner is glibc and proves
+// nothing about musl; sing-box's plain Linux build passed every host test here
+// while it could not start in the image.
+var imageTests = []testIdentity{
+	{module + "install", "TestOfficialXrayInstallIntegration"},
+	{module + "install", "TestOfficialSingBoxInstallIntegration"},
+}
+
+// profiles names each fail-closed evidence set `check --profile` accepts.
+var profiles = map[string][]testIdentity{
+	"core":  requiredTests,
+	"image": imageTests,
+}
+
 type testEvent struct {
 	Action  string
 	Package string
@@ -56,7 +72,7 @@ type testEvent struct {
 	Output  string
 }
 
-func checkResults(input io.Reader) error {
+func checkResults(input io.Reader, required []testIdentity) error {
 	decoder := json.NewDecoder(input)
 	runs := make(map[testIdentity]int)
 	passes := make(map[testIdentity]int)
@@ -92,7 +108,7 @@ func checkResults(input io.Reader) error {
 			}
 		}
 	}
-	for _, identity := range requiredTests {
+	for _, identity := range required {
 		if runs[identity] != 1 || passes[identity] != 1 {
 			return fmt.Errorf("required real test did not run and pass exactly once: %s %s (run=%d pass=%d)", identity.Package, identity.Test, runs[identity], passes[identity])
 		}
