@@ -112,7 +112,7 @@ func TestCheckRequiresEveryXrayVersionToRunNotSkip(t *testing.T) {
 		"TestRealXrayCountsUsageByDomainByIPAndThroughAnAllowRule",
 		"TestRealXrayCountsAnExemptAccountsUsage",
 	} {
-		for _, version := range []string{"26.6.27", "26.7.28", "26.9.9"} {
+		for _, version := range []string{"26.6.27", "26.7.28", "26.9.9", "26.11.9"} {
 			identity := testIdentity{module + "xray", test + "/" + version}
 			t.Run("required-"+identity.Test, func(t *testing.T) {
 				found := false

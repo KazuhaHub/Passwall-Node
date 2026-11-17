@@ -225,6 +225,11 @@ amd64/arm64 Docker）、core
 不接受 `latest`，每个平台资产固定官方 SHA-256，受限版本必须显式确认。Xray 默认固定
 `26.6.27`；`26.7.28` 自动写 `minClientVer=0.0.0`，三客户端握手已核验；`26.9.9` 只允许
 Xray 与 `chrome + support-x25519mlkem768` 的 Mihomo，sing-box 的失败也已作为预期失败写进证据。
+`26.11.9`（2026-11-17 审核）与 `26.9.9` 同属受限：Linux/amd64 上 Xray 客户端与开启 ML-KEM 的
+Mihomo 通过，不开 ML-KEM 的 Mihomo 与 sing-box 1.14.0／1.14.4 客户端均落到伪装证书；它带有上游
+26.10.21（CA）与 26.10.31（默认关闭 MPTCP）的安全修复，而推荐的 `26.6.27` 没有。sing-box `1.14.4`
+为 verified（非推荐）：编译、策略、守护进程 API、链路矩阵与三客户端握手在 Linux/amd64 通过，
+musl 构建在 Alpine 镜像内以非特权只读方式安装执行通过；CI 夹具仍只固定推荐的 1.14.0。
 完整 REALITY 兼容门见 PSP ADR 0029。PSP 已接通严格 Bearer `/v1/node/sync` 生产路由；创建
 原生节点时铸造 agent ID + 长期随机凭据，认证仍读 SHA-256；PSP 另存加密副本，管理员可重复取回
 同一安装脚本，轮换仍是显式操作并立即吊销旧值。`Client.ExpiresAtMS` 已由 PSP 的单一有效到期链铸造，runtime 在 PSP 断线时仍按

@@ -27,6 +27,7 @@ func TestPolicyEnforcedByRealXray(t *testing.T) {
 		{"26.6.27", "PSP_TEST_XRAY_26627_BIN", ""},
 		{"26.7.28", "PSP_TEST_XRAY_26728_BIN", "26.7.28"},
 		{"26.9.9", "PSP_TEST_XRAY_2699_BIN", "26.9.9"},
+		{"26.11.9", "PSP_TEST_XRAY_26119_BIN", "26.11.9"},
 	}
 	ran := false
 	for _, server := range servers {

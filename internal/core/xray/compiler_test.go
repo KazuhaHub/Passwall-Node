@@ -24,6 +24,7 @@ func TestRealityCompatibilityFor(t *testing.T) {
 		{version: "v26.6.27", want: RealityBroad},
 		{version: "26.7.28", want: RealityNeedsMinClientZero},
 		{version: "26.9.9", want: RealityRestrictedClients},
+		{version: "26.11.9", want: RealityRestrictedClients},
 	}
 	for _, test := range tests {
 		test := test
@@ -150,6 +151,7 @@ func TestCompilerArtifactPassesPinnedXrayValidation(t *testing.T) {
 		{name: "26.6.27", env: "PSP_TEST_XRAY_26627_BIN"},
 		{name: "26.7.28", env: "PSP_TEST_XRAY_26728_BIN", version: "26.7.28"},
 		{name: "26.9.9", env: "PSP_TEST_XRAY_2699_BIN", version: "26.9.9", restricted: true},
+		{name: "26.11.9", env: "PSP_TEST_XRAY_26119_BIN", version: "26.11.9", restricted: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
