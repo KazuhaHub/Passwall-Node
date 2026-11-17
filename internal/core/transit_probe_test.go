@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/KazuhaHub/passwall-protocol/protocol"
@@ -108,18 +109,12 @@ func TestProbeRangeIsBelowTheEphemeralRange(t *testing.T) {
 	}
 }
 
-// A link URL with an unusable port makes the probes unavailable, never a
-// rejected configuration.
-func TestPlanTransitWithAnInvalidLinkURLPortMarksLinksUnavailable(t *testing.T) {
+func TestPlanTransitRejectsAnInvalidLinkURLPort(t *testing.T) {
 	for _, bad := range []string{"https://probe.example.com:0/", "https://probe.example.com:70000/", "https://probe.example.com:99999999999/"} {
 		transit := probeTransit(3, 4)
 		transit.Probe.LinkURL = bad
-		plan, err := PlanTransit(transit, nil, nil, "0.0.0.0")
-		if err != nil {
-			t.Fatalf("%s rejected the config: %v", bad, err)
-		}
-		if len(plan.Probes) != 0 || len(plan.ProbeUnavailable) != 2 || len(plan.LinksOut) != 2 {
-			t.Fatalf("%s: plan = %+v", bad, plan)
+		if _, err := PlanTransit(transit, nil, nil, "0.0.0.0"); err == nil || !strings.Contains(err.Error(), "port must be between 1 and 65535") {
+			t.Fatalf("%s: expected the wire validation error, got %v", bad, err)
 		}
 	}
 }
