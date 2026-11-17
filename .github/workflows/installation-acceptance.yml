@@ -62,7 +62,7 @@ jobs:
           # private installer from the checkout: main's template is not the one
           # the tag published. Empty on a dispatch, which keeps its own ref.
           ref: ${{ github.event.workflow_run.head_sha }}
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
         env:

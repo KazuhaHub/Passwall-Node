@@ -55,7 +55,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-checks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
           restore-keys: go-build-checks-${{ runner.os }}-${{ runner.arch }}-
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
         env:
@@ -117,7 +117,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
           restore-keys: go-build-race-${{ runner.os }}-${{ runner.arch }}-
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         env:
           GOTOOLCHAIN: auto
         with:
@@ -171,7 +171,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
           restore-keys: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
         env:
@@ -226,7 +226,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
           restore-keys: go-build-upgrade-systemd-${{ runner.os }}-${{ runner.arch }}-
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         env:
           GOTOOLCHAIN: auto
         with:
