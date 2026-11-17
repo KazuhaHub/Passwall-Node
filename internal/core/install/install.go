@@ -58,9 +58,12 @@ type BinaryVerifier interface {
 }
 
 type Options struct {
-	RootDir         string
-	GOOS            string
-	GOARCH          string
+	RootDir string
+	GOOS    string
+	GOARCH  string
+	// Libc is the host C library a Linux asset must match. Empty means detect
+	// it with HostLibc when GOOS is the running OS.
+	Libc            string
 	HTTPClient      *http.Client
 	Resolve         Resolver
 	Verifier        BinaryVerifier
@@ -73,6 +76,7 @@ type Installer struct {
 	rootDir         string
 	goos            string
 	goarch          string
+	libc            string
 	client          *http.Client
 	resolve         Resolver
 	verifier        BinaryVerifier
@@ -102,6 +106,10 @@ func New(options Options) (*Installer, error) {
 	if goarch == "" {
 		goarch = runtime.GOARCH
 	}
+	libc := strings.TrimSpace(options.Libc)
+	if libc == "" && goos == runtime.GOOS {
+		libc = HostLibc(goos)
+	}
 	if options.Resolve == nil {
 		options.Resolve = corecatalog.Resolve
 	}
@@ -122,7 +130,7 @@ func New(options Options) (*Installer, error) {
 		options.Verifier = execVerifier{timeout: options.CommandTimeout}
 	}
 	return &Installer{
-		rootDir: options.RootDir, goos: goos, goarch: goarch,
+		rootDir: options.RootDir, goos: goos, goarch: goarch, libc: libc,
 		client: options.HTTPClient, resolve: options.Resolve, verifier: options.Verifier,
 		maxArchiveBytes: options.MaxArchiveBytes, maxBinaryBytes: options.MaxBinaryBytes,
 	}, nil
@@ -147,7 +155,7 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 	if release.RequiresConfirmation && !request.AcceptRestricted {
 		return Installation{}, fmt.Errorf("%s %s is restricted and requires explicit confirmation", engine, release.Version)
 	}
-	asset, err := release.AssetFor(i.goos, i.goarch)
+	asset, err := i.AssetFor(release)
 	if err != nil {
 		return Installation{}, err
 	}
@@ -166,10 +174,7 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 		Release: release,
 	}
 	if _, err := os.Stat(finalDir); err == nil {
-		if err := i.verifyExisting(ctx, result, asset, request.CurrentConfiguration); err != nil {
-			return Installation{}, err
-		}
-		return result, nil
+		return i.verifyExisting(ctx, result, request.CurrentConfiguration)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Installation{}, fmt.Errorf("inspect installed core: %w", err)
 	}
@@ -206,8 +211,8 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 	}
 	if err := os.Rename(stagingDir, finalDir); err != nil {
 		if _, statErr := os.Stat(finalDir); statErr == nil {
-			if verifyErr := i.verifyExisting(ctx, result, asset, request.CurrentConfiguration); verifyErr == nil {
-				return result, nil
+			if existing, verifyErr := i.verifyExisting(ctx, result, request.CurrentConfiguration); verifyErr == nil {
+				return existing, nil
 			}
 		}
 		return Installation{}, fmt.Errorf("publish installed core: %w", err)
@@ -218,26 +223,98 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 	return result, nil
 }
 
-func (i *Installer) verifyExisting(ctx context.Context, installation Installation, asset corecatalog.Asset, config []byte) error {
+// AssetFor is the asset of release this installer would install: the one for
+// its OS, architecture and host C library.
+func (i *Installer) AssetFor(release corecatalog.Release) (corecatalog.Asset, error) {
+	return release.AssetFor(i.goos, i.goarch, i.libc)
+}
+
+// HostLibc names the C library the cores this process starts will be linked
+// against: corecatalog.LibcMusl or corecatalog.LibcGlibc on Linux, empty on any
+// other OS.
+//
+// THE DYNAMIC LOADER IS THE EVIDENCE, because it is what exec needs. A glibc
+// binary names /lib64/ld-linux-x86-64.so.2 (or /lib/ld-linux-aarch64.so.1) as
+// its interpreter, and on a host without that file exec fails with ENOENT before
+// the core prints anything — which is how sing-box's plain Linux build failed in
+// the Alpine image. A musl loader wins over a glibc one, since a glibc loader on
+// a musl system is a compatibility shim (gcompat) rather than glibc. A host with
+// neither loader, or NixOS, gets musl: the musl variants that the catalog lists
+// are statically linked, so they need no loader at all. Detection only chooses
+// what to download; an existing installation of another variant is kept (see
+// verifyExisting).
+func HostLibc(goos string) string {
+	return detectLibc(goos, "/")
+}
+
+func detectLibc(goos, root string) string {
+	if goos != "linux" {
+		return ""
+	}
+	if matches, _ := filepath.Glob(filepath.Join(root, "lib", "ld-musl-*.so.1")); len(matches) > 0 {
+		return corecatalog.LibcMusl
+	}
+	// NixOS ships /lib64/ld-linux-x86-64.so.2 as a stub that refuses to run
+	// foreign dynamic binaries; the static musl build is the one that runs there.
+	if _, err := os.Stat(filepath.Join(root, "etc", "NIXOS")); err == nil {
+		return corecatalog.LibcMusl
+	}
+	for _, pattern := range []string{"lib64/ld-linux-*.so.2", "lib/ld-linux-*.so.*", "lib/*-linux-gnu/ld-linux-*.so.*"} {
+		if matches, _ := filepath.Glob(filepath.Join(root, pattern)); len(matches) > 0 {
+			return corecatalog.LibcGlibc
+		}
+	}
+	return corecatalog.LibcMusl
+}
+
+// verifyExisting accepts an installed version directory and returns it with the
+// binary path of the asset it was installed from.
+//
+// ANY LIBC VARIANT OF THE TARGET IS ACCEPTED, not only the one HostLibc picks
+// today. The version directory is keyed by version alone, and detection reads
+// the host's files, which can change under a running node: installing Debian's
+// musl package adds a musl loader beside glibc. Holding the existing directory to
+// today's pick would fail every start after that with a metadata mismatch, and
+// Install never replaces a published directory. The recorded asset still has to
+// be one this release lists for this OS and architecture, its binary still has
+// to match the digest recorded at install time, and the verifier still has to
+// execute it here — so a variant this host cannot run fails as before.
+func (i *Installer) verifyExisting(ctx context.Context, installation Installation, config []byte) (Installation, error) {
 	var installed metadata
 	if err := readJSON(installation.MetadataPath, &installed); err != nil {
-		return fmt.Errorf("verify existing core metadata: %w", err)
+		return Installation{}, fmt.Errorf("verify existing core metadata: %w", err)
 	}
 	if installed.SchemaVersion != 1 || installed.Engine != installation.Engine || installed.Version != installation.Version ||
-		installed.SourceURL != asset.URL || installed.ArchiveSHA256 != asset.SHA256 || installed.InstalledAt.IsZero() {
-		return errors.New("existing core metadata does not match the audited release")
+		installed.InstalledAt.IsZero() {
+		return Installation{}, errors.New("existing core metadata does not match the audited release")
 	}
+	var asset corecatalog.Asset
+	found := false
+	for _, candidate := range installation.Release.Assets {
+		if candidate.OS == i.goos && candidate.Arch == i.goarch &&
+			candidate.URL == installed.SourceURL && candidate.SHA256 == installed.ArchiveSHA256 {
+			asset, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return Installation{}, errors.New("existing core metadata does not match the audited release")
+	}
+	if err := validateAssetSource(installation.Release, asset); err != nil {
+		return Installation{}, err
+	}
+	installation.BinaryPath = filepath.Join(filepath.Dir(installation.MetadataPath), asset.Binary)
 	digest, err := digestRegularFile(installation.BinaryPath, i.maxBinaryBytes)
 	if err != nil {
-		return fmt.Errorf("verify existing core binary: %w", err)
+		return Installation{}, fmt.Errorf("verify existing core binary: %w", err)
 	}
 	if digest != installed.BinarySHA256 {
-		return errors.New("existing core binary digest does not match its installation metadata")
+		return Installation{}, errors.New("existing core binary digest does not match its installation metadata")
 	}
 	if err := i.verifier.Verify(ctx, installation.Engine, installation.BinaryPath, installation.Version, config); err != nil {
-		return fmt.Errorf("verify existing %s %s: %w", installation.Engine, installation.Version, err)
+		return Installation{}, fmt.Errorf("verify existing %s %s: %w", installation.Engine, installation.Version, err)
 	}
-	return nil
+	return installation, nil
 }
 
 func (i *Installer) download(ctx context.Context, sourceURL, wantDigest, target string) error {

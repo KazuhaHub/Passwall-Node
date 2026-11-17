@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-11T00:00:00Z",
+  "updated_at": "2026-11-16T00:00:00Z",
   "releases": [
     {
       "engine": "xray",
@@ -154,8 +154,10 @@
         ]
       },
       "assets": [
-        {"os":"linux","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz","sha256":"2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63","archive":"tar.gz","binary":"sing-box-1.14.0-linux-amd64/sing-box"},
-        {"os":"linux","arch":"arm64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-arm64.tar.gz","sha256":"04d9b40bc98dc55b6f509ce3292145c65478f65866bea64826ebb2f382385088","archive":"tar.gz","binary":"sing-box-1.14.0-linux-arm64/sing-box"},
+        {"os":"linux","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz","sha256":"2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63","archive":"tar.gz","binary":"sing-box-1.14.0-linux-amd64/sing-box","libc":"glibc"},
+        {"os":"linux","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64-musl.tar.gz","sha256":"d2d6b4543d850269214ced70ffe41b13b1595baa1b6f9c016466abfba162c4d4","archive":"tar.gz","binary":"sing-box-1.14.0-linux-amd64-musl/sing-box","libc":"musl"},
+        {"os":"linux","arch":"arm64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-arm64.tar.gz","sha256":"04d9b40bc98dc55b6f509ce3292145c65478f65866bea64826ebb2f382385088","archive":"tar.gz","binary":"sing-box-1.14.0-linux-arm64/sing-box","libc":"glibc"},
+        {"os":"linux","arch":"arm64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-arm64-musl.tar.gz","sha256":"1811c446a4957edee1b62ed2363607f8e99e1f7b6d88179719251d7ed5f30169","archive":"tar.gz","binary":"sing-box-1.14.0-linux-arm64-musl/sing-box","libc":"musl"},
         {"os":"darwin","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-darwin-amd64.tar.gz","sha256":"6cf26fc3501f3117cf781e9405cf5338f60add6da5affae39421af6800ebbcb4","archive":"tar.gz","binary":"sing-box-1.14.0-darwin-amd64/sing-box"},
         {"os":"darwin","arch":"arm64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-darwin-arm64.tar.gz","sha256":"a150c94012ff768b7261939cd236b9c8554127f45137230295d23a5660225cc9","archive":"tar.gz","binary":"sing-box-1.14.0-darwin-arm64/sing-box"},
         {"os":"windows","arch":"amd64","url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-windows-amd64.zip","sha256":"3ffb56267da14e287be48bd10cf7e6505260125bad940b75101fbb4d5d58e5d6","archive":"zip","binary":"sing-box-1.14.0-windows-amd64/sing-box.exe"},

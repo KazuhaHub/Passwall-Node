@@ -35,6 +35,13 @@ const (
 
 	HandshakePass            = "pass"
 	HandshakeExpectedFailure = "expected_failure"
+
+	// LibcGlibc and LibcMusl name the C library a Linux asset was linked
+	// against. An asset without one runs on any host of its OS/arch (Xray's
+	// statically linked Go builds); an asset with one is half of a pair, and the
+	// installer picks the half that matches the host it runs on.
+	LibcGlibc = "glibc"
+	LibcMusl  = "musl"
 )
 
 //go:embed catalog.json
@@ -102,6 +109,11 @@ type Asset struct {
 	SHA256  string `json:"sha256"`
 	Archive string `json:"archive"`
 	Binary  string `json:"binary"`
+	// Libc is empty for an asset that runs on every host of its target, and
+	// LibcGlibc or LibcMusl for one that runs only where that C library is the
+	// host's. sing-box's plain Linux build is linked against glibc and cannot
+	// start in the Alpine (musl) image, so its Linux targets carry both.
+	Libc string `json:"libc,omitempty"`
 }
 
 func Load() (Catalog, error) {
@@ -181,13 +193,21 @@ func Recommended(engine string) (Release, error) {
 	return Release{}, fmt.Errorf("%s has no recommended release", engine)
 }
 
-func (r Release) AssetFor(goos, goarch string) (Asset, error) {
+// AssetFor returns the asset for one host: its OS, its architecture and, on
+// Linux, the C library it runs (see LibcGlibc and LibcMusl; empty elsewhere).
+// An asset that names a libc is chosen only for a host with that libc; one that
+// names none serves every host of its target.
+func (r Release) AssetFor(goos, goarch, libc string) (Asset, error) {
 	for _, asset := range r.Assets {
-		if asset.OS == goos && asset.Arch == goarch {
+		if asset.OS == goos && asset.Arch == goarch && (asset.Libc == "" || asset.Libc == libc) {
 			return asset, nil
 		}
 	}
-	return Asset{}, fmt.Errorf("%s %s has no asset for %s/%s", r.Engine, r.Version, goos, goarch)
+	target := goos + "/" + goarch
+	if libc != "" {
+		target += " (" + libc + ")"
+	}
+	return Asset{}, fmt.Errorf("%s %s has no asset for %s", r.Engine, r.Version, target)
 }
 
 func NormalizeVersion(raw string) (string, error) {
@@ -293,16 +313,32 @@ func validateRelease(release Release) error {
 	if err := validateHandshakes(release); err != nil {
 		return err
 	}
-	assets := make(map[string]struct{}, len(release.Assets))
+	// A TARGET IS SERVED BY ONE ASSET FOR EVERY HOST OR BY A COMPLETE LIBC PAIR.
+	// A glibc asset alone would leave a musl host with nothing it can execute, and
+	// a libc-free asset beside a variant would make the choice depend on order.
+	assets := make(map[string]map[string]struct{}, len(release.Assets))
 	for _, asset := range release.Assets {
 		if err := validateAsset(release, asset); err != nil {
 			return err
 		}
 		target := asset.OS + "/" + asset.Arch
-		if _, exists := assets[target]; exists {
-			return fmt.Errorf("duplicate asset target %s", target)
+		variants := assets[target]
+		if variants == nil {
+			variants = make(map[string]struct{}, 2)
+			assets[target] = variants
 		}
-		assets[target] = struct{}{}
+		if _, exists := variants[asset.Libc]; exists {
+			return fmt.Errorf("duplicate asset target %s", describeTarget(asset))
+		}
+		variants[asset.Libc] = struct{}{}
+	}
+	for target, variants := range assets {
+		_, universal := variants[""]
+		_, glibc := variants[LibcGlibc]
+		_, musl := variants[LibcMusl]
+		if universal && len(variants) != 1 || !universal && !(glibc && musl && len(variants) == 2) {
+			return fmt.Errorf("asset target %s needs one libc-independent asset or both a glibc and a musl asset", target)
+		}
 	}
 	wantTargets := []string{"darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"}
 	sort.Strings(wantTargets)
@@ -370,6 +406,15 @@ func validateAsset(release Release, asset Asset) error {
 	if (asset.Archive != "zip" && asset.Archive != "tar.gz") || !validArchiveMember(asset.Binary) {
 		return errors.New("asset must use a supported archive and a safe binary path")
 	}
+	switch asset.Libc {
+	case "":
+	case LibcGlibc, LibcMusl:
+		if asset.OS != "linux" {
+			return fmt.Errorf("asset %s names a libc, which only a Linux asset may", describeTarget(asset))
+		}
+	default:
+		return fmt.Errorf("asset %s names unknown libc %q", describeTarget(asset), asset.Libc)
+	}
 	decoded, err := hex.DecodeString(asset.SHA256)
 	if err != nil || len(decoded) != sha256Size {
 		return errors.New("asset sha256 must contain 64 lowercase hexadecimal characters")
@@ -396,6 +441,14 @@ func validateAsset(release Release, asset Asset) error {
 		return errors.New("asset URL suffix does not match its archive type")
 	}
 	return nil
+}
+
+func describeTarget(asset Asset) string {
+	target := asset.OS + "/" + asset.Arch
+	if asset.Libc != "" {
+		target += " (" + asset.Libc + ")"
+	}
+	return target
 }
 
 func validArchiveMember(member string) bool {

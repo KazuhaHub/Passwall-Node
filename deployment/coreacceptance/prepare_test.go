@@ -23,8 +23,10 @@ func TestAcceptancePinsAreCatalogApprovedAndPlatformComplete(t *testing.T) {
 		}
 		for platform := range mihomoAssets {
 			parts := strings.Split(platform, "/")
-			if _, err := release.AssetFor(parts[0], parts[1]); err != nil {
-				t.Fatal(err)
+			for _, libc := range []string{corecatalog.LibcGlibc, corecatalog.LibcMusl} {
+				if _, err := release.AssetFor(parts[0], parts[1], libc); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 	}
@@ -184,8 +186,10 @@ func TestXrayPinsAreEverySelectableCatalogVersion(t *testing.T) {
 		seenEnv[pin.Env] = true
 		for platform := range mihomoAssets {
 			parts := strings.Split(platform, "/")
-			if _, err := release.AssetFor(parts[0], parts[1]); err != nil {
-				t.Fatal(err)
+			for _, libc := range []string{corecatalog.LibcGlibc, corecatalog.LibcMusl} {
+				if _, err := release.AssetFor(parts[0], parts[1], libc); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 	}

@@ -43,21 +43,26 @@ func run(arguments []string, output, diagnostic io.Writer) error {
 		flags := flag.NewFlagSet("check", flag.ContinueOnError)
 		flags.SetOutput(diagnostic)
 		results := flags.String("results", "", "go test -json evidence file")
+		profile := flags.String("profile", "core", "evidence set to require: core (host runner) or image (inside the Node image)")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 0 || *results == "" {
-			return errors.New("check requires only --results FILE")
+			return errors.New("check requires only --results FILE and an optional --profile")
+		}
+		required, known := profiles[*profile]
+		if !known {
+			return fmt.Errorf("unknown check profile %q", *profile)
 		}
 		file, err := os.Open(*results)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
-		if err := checkResults(file); err != nil {
+		if err := checkResults(file, required); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(output, "Verified all %d required acceptance tests: run + pass, no skips or missing evidence.\n", len(requiredTests))
+		_, err = fmt.Fprintf(output, "Verified all %d required %s acceptance tests: run + pass, no skips or missing evidence.\n", len(required), *profile)
 		return err
 	default:
 		return fmt.Errorf("unknown command %q", arguments[0])
