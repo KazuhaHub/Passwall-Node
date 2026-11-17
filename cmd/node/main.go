@@ -424,10 +424,11 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // not be left out of the release.
 //
 // transit.forward.v1 and transit.link.v1 are always among them: both engines
-// relay forwards and run links. Only Xray measures them (sing-box's only
-// traffic source is keyed by user), so a sing-box node relays and reports
-// convergence but sends no transit counters, which the panel reads as "not
-// measured". Users are charged on their listener on both engines either way.
+// relay forwards and run links, and both measure them: Xray from its
+// statistics, sing-box from its connection ledger (a relayed connection is
+// counted under its transit key, never as a user's usage). A node that relays
+// nothing sends no transit counters, which the panel reads as "not measured".
+// Users are charged on their listener on both engines either way.
 //
 // audit.hits.v1 and audit.usage.v1 are among them only when the audit receiver
 // is listening, which is decided once at startup; a receiver that fails

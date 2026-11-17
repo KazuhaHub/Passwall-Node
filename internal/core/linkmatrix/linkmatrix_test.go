@@ -18,12 +18,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/singbox"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/xray"
+	"github.com/KazuhaHub/passwall-node/v4/internal/state"
+	statesqlite "github.com/KazuhaHub/passwall-node/v4/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-node/v4/internal/testutil/policylive"
 	"github.com/KazuhaHub/passwall-node/v4/internal/testutil/transitlive"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
@@ -44,7 +47,15 @@ type engine struct {
 	binary string
 	run    []string
 	// compile turns a snapshot into an artifact this engine runs.
-	compile func(t *testing.T, snapshot agentcore.Snapshot) []byte
+	compile func(t *testing.T, snapshot agentcore.Snapshot) compiled
+}
+
+type compiled struct {
+	config []byte
+	// meter, set for an engine whose counters come from the node's own
+	// telemetry, starts that telemetry against the running process and
+	// returns what a report would carry now.
+	meter func(t *testing.T) func() (agentcore.Counters, error)
 }
 
 func engines(t *testing.T) []engine {
@@ -58,22 +69,25 @@ func engines(t *testing.T) []engine {
 	}
 	if ok {
 		found = append(found, engine{name: "xray", binary: binary, run: []string{"run", "-config"},
-			compile: func(t *testing.T, snapshot agentcore.Snapshot) []byte {
+			compile: func(t *testing.T, snapshot agentcore.Snapshot) compiled {
 				artifact, err := (xray.Compiler{APIListen: fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t))}).Compile(context.Background(), snapshot)
 				if err != nil {
 					t.Fatal(err)
 				}
-				return allowLoopback(t, artifact.Config)
+				return compiled{config: allowLoopback(t, artifact.Config)}
 			}})
 	}
 	if binary, ok := os.LookupEnv("PSP_TEST_SING_BOX_BIN"); ok {
 		found = append(found, engine{name: "sing-box", binary: binary, run: []string{"run", "-c"},
-			compile: func(t *testing.T, snapshot agentcore.Snapshot) []byte {
-				artifact, err := (singbox.Compiler{APIListen: fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t)), APISecret: apiSecret}).Compile(context.Background(), snapshot)
+			compile: func(t *testing.T, snapshot agentcore.Snapshot) compiled {
+				apiListen := fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t))
+				artifact, err := (singbox.Compiler{APIListen: apiListen, APISecret: apiSecret}).Compile(context.Background(), snapshot)
 				if err != nil {
 					t.Fatal(err)
 				}
-				return artifact.Config
+				return compiled{config: artifact.Config, meter: func(t *testing.T) func() (agentcore.Counters, error) {
+					return startMeter(t, snapshot, artifact, apiListen)
+				}}
 			}})
 	}
 	if len(found) == 0 {
@@ -185,7 +199,7 @@ func runPair(t *testing.T, entry, exit engine, linkProtocol, client string) {
 	in, out := linkPair(linkProtocol, exitPort, decoy)
 
 	exitConfig := exit.compile(t, agentcore.Snapshot{Now: time.Now(), Transit: &protocol.Transit{LinksIn: []protocol.LinkIn{in}}})
-	exitProcess := policylive.Start(t, exit.binary, append(exit.run, policylive.WriteFile(t, "exit.json", exitConfig))...)
+	exitProcess := policylive.Start(t, exit.binary, append(exit.run, policylive.WriteFile(t, "exit.json", exitConfig.config))...)
 	policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", exitPort), exitProcess)
 
 	spec, err := json.Marshal(map[string]any{
@@ -203,7 +217,7 @@ func runPair(t *testing.T, entry, exit engine, linkProtocol, client string) {
 		Egress:   []protocol.EgressBinding{{Listener: protocol.NewListenerKey(1), Link: out.Key}},
 	}
 	entryConfig := entry.compile(t, entrySnapshot)
-	entryProcess := policylive.Start(t, entry.binary, append(entry.run, policylive.WriteFile(t, "entry.json", entryConfig))...)
+	entryProcess := policylive.Start(t, entry.binary, append(entry.run, policylive.WriteFile(t, "entry.json", entryConfig.config))...)
 	policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", entryPort), entryProcess)
 
 	clientProcess := policylive.Start(t, client, "run", "-config", policylive.WriteFile(t, "client.json", clientConfig(t, socksPort, entryPort)))
@@ -212,6 +226,13 @@ func runPair(t *testing.T, entry, exit engine, linkProtocol, client string) {
 		return "entry:\n" + entryProcess.Output() + "\nexit:\n" + exitProcess.Output() + "\nclient:\n" + clientProcess.Output()
 	}
 
+	var exitMeter, entryMeter func() (agentcore.Counters, error)
+	if exitConfig.meter != nil {
+		exitMeter = exitConfig.meter(t)
+	}
+	if entryConfig.meter != nil {
+		entryMeter = entryConfig.meter(t)
+	}
 	if err := socksTCP(socksPort, echo.Port, []byte("through the link")); err != nil {
 		t.Fatalf("TCP through the link: %v\n%s", err, dump())
 	}
@@ -227,6 +248,18 @@ func runPair(t *testing.T, entry, exit engine, linkProtocol, client string) {
 	if err := socksTCP(socksPort, blocked.Port, []byte("must be blocked")); err == nil {
 		t.Fatalf("the entry's block rule did not apply to a listener that leaves through a link\n%s", dump())
 	}
+
+	// A sing-box side meters the link itself: present, and at least the
+	// payload in each direction. A sing-box entry still counts the user's
+	// listener as well.
+	const payload = int64(len("through the link"))
+	waitCounters(t, "exit link", exitMeter, dump, func(c agentcore.Counters) bool {
+		return linkReached(c, out.Key, payload)
+	})
+	waitCounters(t, "entry link", entryMeter, dump, func(c agentcore.Counters) bool {
+		return linkReached(c, out.Key, payload) && len(c.Listeners) == 1 && c.Listeners[0].Present &&
+			c.Listeners[0].UpBytes >= payload && c.Listeners[0].DownBytes >= payload
+	})
 
 	// Stop the exit: the entry must not fall back to its own address.
 	exitProcess.Stop(t)
@@ -353,4 +386,63 @@ func socksUDP(socksPort, targetPort int, payload []byte) error {
 		return fmt.Errorf("UDP echo returned different bytes")
 	}
 	return nil
+}
+
+func linkReached(c agentcore.Counters, key protocol.LinkKey, payload int64) bool {
+	return len(c.Links) == 1 && c.Links[0].Key == key && c.Links[0].Present && c.Links[0].CounterEpoch != 0 &&
+		c.Links[0].UpBytes >= payload && c.Links[0].DownBytes >= payload
+}
+
+// waitCounters polls a side's counters until ok holds. A nil collect is an
+// engine whose counters this test does not read.
+func waitCounters(t *testing.T, what string, collect func() (agentcore.Counters, error), dump func() string, ok func(agentcore.Counters) bool) {
+	t.Helper()
+	if collect == nil {
+		return
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		counters, err := collect()
+		if err == nil && ok(counters) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s counters never reached the payload: %+v (%v)\n%s", what, counters, err, dump())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// startMeter runs the production sing-box telemetry against the running
+// process that serves artifact, with a scratch state store.
+func startMeter(t *testing.T, snapshot agentcore.Snapshot, artifact agentcore.Artifact, apiListen string) func() (agentcore.Counters, error) {
+	t.Helper()
+	store, err := statesqlite.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	configBody, _ := json.Marshal(protocol.ConfigBody{Listeners: snapshot.Listeners, Transit: snapshot.Transit})
+	rosterBody, _ := json.Marshal(protocol.RosterBody{Clients: snapshot.Clients})
+	if err := store.SaveCoreDeployment(t.Context(), state.CoreDeployment{
+		Engine: "sing-box", Version: "1.14.0", ConfigDigest: artifact.Digest, Artifact: artifact.Config,
+		ConfigBody: configBody, RosterBody: rosterBody, AppliedAtMS: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status := agentcore.Status{
+		State: agentcore.ProcessRunning, Engine: "sing-box", Version: "1.14.0", BinaryPath: "/sing-box",
+		ConfigDigest: artifact.Digest, LastChangedAt: time.Unix(2, 0),
+	}
+	telemetry, err := singbox.NewTelemetry(singbox.TelemetryOptions{
+		Store: store, Status: func() agentcore.Status { return status }, APIListen: apiListen, APISecret: apiSecret,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = telemetry.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return func() (agentcore.Counters, error) { return telemetry.Collect(ctx) }
 }

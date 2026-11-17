@@ -121,6 +121,10 @@ func (s *ObservationService) fail(ctx context.Context, failure error) (Observati
 // price of not growing the node's schema for an operational figure. Before the
 // first sample after a start the cache is empty and nothing is reported, which
 // the panel reads as "not measured", never as zero.
+//
+// On sing-box the samples come from its durable connection ledger, which still
+// starts transit totals from zero with each core process: the counter epoch
+// changes, and the panel books a new epoch's value in full.
 type ForwardCounterCache struct {
 	mu       sync.Mutex
 	counters []protocol.ForwardCounters

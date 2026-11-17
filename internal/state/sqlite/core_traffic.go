@@ -121,6 +121,8 @@ func (s *Store) CoreTrafficSnapshot(ctx context.Context, processIdentity string)
 	result := state.CoreTrafficSnapshot{
 		Ready: true, Clients: make(map[protocol.ClientKey]state.CoreTrafficValue),
 		Listeners: make(map[protocol.ListenerKey]state.CoreTrafficValue),
+		Forwards:  make(map[protocol.ForwardKey]state.CoreTrafficValue),
+		Links:     make(map[protocol.LinkKey]state.CoreTrafficValue),
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT client_key, up_bytes, down_bytes FROM core_client_traffic WHERE process_identity = ?`, processIdentity)
@@ -145,20 +147,28 @@ func (s *Store) CoreTrafficSnapshot(ctx context.Context, processIdentity string)
 		return state.CoreTrafficSnapshot{}, fmt.Errorf("query core listener traffic: %w", err)
 	}
 	for rows.Next() {
-		var key protocol.ListenerKey
+		var key string
 		var value state.CoreTrafficValue
 		if err := rows.Scan(&key, &value.UpBytes, &value.DownBytes); err != nil {
 			rows.Close()
 			return state.CoreTrafficSnapshot{}, fmt.Errorf("scan core listener traffic: %w", err)
 		}
-		result.Listeners[key] = value
+		// One table holds all three kinds of aggregate; the key says which.
+		switch {
+		case strings.HasPrefix(key, "fwd_"):
+			result.Forwards[protocol.ForwardKey(key)] = value
+		case strings.HasPrefix(key, "lnk_"):
+			result.Links[protocol.LinkKey(key)] = value
+		default:
+			result.Listeners[protocol.ListenerKey(key)] = value
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return state.CoreTrafficSnapshot{}, fmt.Errorf("close core listener traffic: %w", err)
 	}
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT client_key, source_ip FROM core_connection_traffic
-		WHERE process_identity = ? AND closed = 0 ORDER BY client_key, source_ip`, processIdentity)
+		WHERE process_identity = ? AND closed = 0 AND client_key != '' ORDER BY client_key, source_ip`, processIdentity)
 	if err != nil {
 		return state.CoreTrafficSnapshot{}, fmt.Errorf("query live core connection IPs: %w", err)
 	}
@@ -223,9 +233,15 @@ func prepareCoreTrafficStream(ctx context.Context, tx *sql.Tx, identity string, 
 			up_bytes = excluded.up_bytes, down_bytes = excluded.down_bytes`, identity, current); err != nil {
 		return fmt.Errorf("carry forward core client traffic: %w", err)
 	}
+	// Of the aggregates keyed like listeners, only listeners' are carried (user
+	// totals were carried above). A transit object's counters belong
+	// to the process that counted them: the report gives them a new counter
+	// epoch, and the panel books a new epoch's value in full, so a carried
+	// total would be counted twice.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO core_listener_traffic (process_identity, listener_key, up_bytes, down_bytes)
-		SELECT ?, listener_key, up_bytes, down_bytes FROM core_listener_traffic WHERE process_identity = ?
+		SELECT ?, listener_key, up_bytes, down_bytes FROM core_listener_traffic
+		WHERE process_identity = ? AND substr(listener_key, 1, 4) = 'lst_'
 		ON CONFLICT(process_identity, listener_key) DO UPDATE SET
 			up_bytes = excluded.up_bytes, down_bytes = excluded.down_bytes`, identity, current); err != nil {
 		return fmt.Errorf("carry forward core listener traffic: %w", err)
@@ -263,6 +279,11 @@ func applyCoreTrafficEvent(ctx context.Context, tx *sql.Tx, identity string, eve
 		return errors.New("delta arrived before absolute connection metadata")
 	}
 	clientKey, listenerKey, sourceIP := event.ClientKey, event.ListenerKey, event.SourceIP
+	if event.Transit != "" {
+		// A relayed connection is stored under its transit key, in the
+		// listener column, with no client and no source.
+		listenerKey = protocol.ListenerKey(event.Transit)
+	}
 	if !missing {
 		if clientKey != "" && clientKey != storedClient || listenerKey != "" && listenerKey != storedListener || sourceIP != "" && sourceIP != storedIP {
 			return errors.New("connection identity metadata changed")
@@ -290,11 +311,20 @@ func applyCoreTrafficEvent(ctx context.Context, tx *sql.Tx, identity string, eve
 	if missing {
 		deltaUp, deltaDown = up, down
 	}
-	if err := incrementCoreAggregate(ctx, tx, "core_client_traffic", "client_key", identity, string(clientKey), deltaUp, deltaDown); err != nil {
-		return err
+	if event.Transit == "" {
+		if err := incrementCoreAggregate(ctx, tx, "core_client_traffic", "client_key", identity, string(clientKey), deltaUp, deltaDown); err != nil {
+			return err
+		}
 	}
 	if err := incrementCoreAggregate(ctx, tx, "core_listener_traffic", "listener_key", identity, string(listenerKey), deltaUp, deltaDown); err != nil {
 		return err
+	}
+	if event.EgressLink != "" {
+		// The link is not part of the connection's stored identity; the same
+		// delta that counts for the user counts for the link it left through.
+		if err := incrementCoreAggregate(ctx, tx, "core_listener_traffic", "listener_key", identity, string(event.EgressLink), deltaUp, deltaDown); err != nil {
+			return err
+		}
 	}
 	closed := 0
 	if event.Closed || storedClosed == 1 {
@@ -354,15 +384,31 @@ func validateCoreTrafficEvent(event state.CoreTrafficEvent) error {
 	if strings.TrimSpace(event.ConnectionID) == "" || strings.TrimSpace(event.ConnectionID) != event.ConnectionID || len(event.ConnectionID) > 128 {
 		return errors.New("connection ID must contain 1..128 canonical bytes")
 	}
-	if _, err := event.ClientKey.RowID(); err != nil {
-		return fmt.Errorf("client key: %w", err)
-	}
-	if _, err := event.ListenerKey.RowID(); err != nil {
-		return fmt.Errorf("listener key: %w", err)
-	}
-	address, err := netip.ParseAddr(event.SourceIP)
-	if err != nil || address.String() != event.SourceIP {
-		return errors.New("source IP must be canonical")
+	if event.Transit != "" {
+		if event.ClientKey != "" || event.ListenerKey != "" || event.SourceIP != "" || event.EgressLink != "" {
+			return errors.New("transit event must not carry a client, listener, source IP or egress link")
+		}
+		if _, err := protocol.ForwardKey(event.Transit).RowID(); err != nil {
+			if _, linkErr := protocol.LinkKey(event.Transit).RowID(); linkErr != nil {
+				return fmt.Errorf("transit key %q is neither a forward nor a link key", event.Transit)
+			}
+		}
+	} else {
+		if _, err := event.ClientKey.RowID(); err != nil {
+			return fmt.Errorf("client key: %w", err)
+		}
+		if _, err := event.ListenerKey.RowID(); err != nil {
+			return fmt.Errorf("listener key: %w", err)
+		}
+		address, err := netip.ParseAddr(event.SourceIP)
+		if err != nil || address.String() != event.SourceIP {
+			return errors.New("source IP must be canonical")
+		}
+		if event.EgressLink != "" {
+			if _, err := event.EgressLink.RowID(); err != nil {
+				return fmt.Errorf("egress link key: %w", err)
+			}
+		}
 	}
 	if event.UpBytes < 0 || event.DownBytes < 0 || event.ClosedAtMS < 0 || event.Closed != (event.ClosedAtMS > 0) {
 		return errors.New("traffic counters and closed timestamp are invalid")
