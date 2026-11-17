@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -360,15 +361,28 @@ func socksTCP(socksPort, targetPort int, payload []byte) error {
 }
 
 func socksUDP(socksPort, targetPort int, payload []byte) error {
-	control, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), 2*time.Second)
+	reply, err := socksUDPExchange(socksPort, netip.AddrFrom4([4]byte{127, 0, 0, 1}), targetPort, payload)
 	if err != nil {
 		return err
+	}
+	if !bytes.Equal(reply, payload) {
+		return fmt.Errorf("UDP echo returned different bytes")
+	}
+	return nil
+}
+
+// socksUDPExchange sends one IPv4 datagram on a fresh SOCKS association so
+// the entry sniffs its first packet independently of preceding traffic.
+func socksUDPExchange(socksPort int, target netip.Addr, targetPort int, payload []byte) ([]byte, error) {
+	control, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), 2*time.Second)
+	if err != nil {
+		return nil, err
 	}
 	defer control.Close()
 	defer delete(relays, control)
 	_ = control.SetDeadline(time.Now().Add(4 * time.Second))
 	if err := socksHandshake(control, 3, 0); err != nil {
-		return err
+		return nil, err
 	}
 	relay := relays[control]
 	if host, _, _ := net.SplitHostPort(relay); host == "0.0.0.0" {
@@ -377,24 +391,24 @@ func socksUDP(socksPort, targetPort int, payload []byte) error {
 	}
 	udp, err := net.Dial("udp", relay)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer udp.Close()
 	_ = udp.SetDeadline(time.Now().Add(3 * time.Second))
-	datagram := []byte{0, 0, 0, 1, 127, 0, 0, 1, 0, 0}
-	binary.BigEndian.PutUint16(datagram[8:], uint16(targetPort))
+	datagram := append([]byte{0, 0, 0, 1}, target.AsSlice()...)
+	datagram = binary.BigEndian.AppendUint16(datagram, uint16(targetPort))
 	if _, err := udp.Write(append(datagram, payload...)); err != nil {
-		return err
+		return nil, err
 	}
 	buffer := make([]byte, 2048)
 	n, err := udp.Read(buffer)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if n < 10 || !bytes.Equal(buffer[10:n], payload) {
-		return fmt.Errorf("UDP echo returned different bytes")
+	if n < 10 || buffer[3] != 1 {
+		return nil, fmt.Errorf("invalid IPv4 SOCKS UDP reply")
 	}
-	return nil
+	return buffer[10:n], nil
 }
 
 func linkReached(c agentcore.Counters, key protocol.LinkKey, payload int64) bool {

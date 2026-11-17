@@ -326,27 +326,37 @@ func TestALargePolicyMatcherIsWrittenOnce(t *testing.T) {
 	}
 }
 
-// The protocol rules of a policy apply to a connection that asked for a domain
-// again: the BitTorrent sniffer, which sets the protocol and not the domain,
-// runs ahead of the routed segments, for requested domains on routed inbounds.
-func TestProtocolRulesGetABitTorrentSniffForRequestedDomains(t *testing.T) {
+// Requested names get a BitTorrent-only sniff before their routes. The UDP
+// fallback then runs after the general sniff and before the address routes.
+func TestRoutedProtocolRulesSniffBitTorrentBeforeChoosingAnExit(t *testing.T) {
 	rules := compiledRules(t, routedSnapshot(t, &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
 		{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:blocked.example"}},
 		{ID: "p2", Action: protocol.RuleBlock, Protocols: []string{"bittorrent"}},
 	}}))
-	want := `{"action":"sniff","domain_regex":["."],"inbound":["psp-lst_41"],"sniffer":["bittorrent"]}`
-	first := -1
+	requested := `{"action":"sniff","domain_regex":["."],"inbound":["psp-lst_41"],"sniffer":["bittorrent"]}`
+	fallback := `{"action":"sniff","inbound":["psp-lst_41"],"network":["udp"],"sniffer":["bittorrent"]}`
+	general := `{"action":"sniff"}`
+	first, main, udp := -1, -1, -1
 	for index, rule := range rules {
-		if rule == want {
+		switch rule {
+		case requested:
 			first = index
+		case general:
+			main = index
+		case fallback:
+			udp = index
 		}
-		if strings.Contains(rule, "psp-route-1") && first < 0 {
+		if !strings.Contains(rule, "psp-route-1") {
+			continue
+		}
+		if (main < 0 && first < 0) || (main >= 0 && udp < 0) {
 			t.Fatalf("a routed segment precedes the BitTorrent sniff:\n%s", strings.Join(rules, "\n"))
 		}
 	}
-	if first < 0 {
-		t.Fatalf("no BitTorrent sniff in\n%s", strings.Join(rules, "\n"))
+	if first < 0 || main <= first || udp <= main {
+		t.Fatalf("the BitTorrent sniffers are out of order:\n%s", strings.Join(rules, "\n"))
 	}
+
 	// Without protocol rules there is none.
 	for _, rule := range compiledRules(t, routedSnapshot(t, &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
 		{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"domain:blocked.example"}},

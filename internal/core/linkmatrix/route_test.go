@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
@@ -335,6 +337,9 @@ func runRoutes(t *testing.T, entry, exit engine, client string) {
 			t.Fatalf("%s:\n%s\n%s", stage, strings.Join(failures, "\n"), dump())
 		}
 	}
+	if entry.name == "sing-box" {
+		checkRoutedUTP(t, socksPort, p1, dump)
+	}
 	check("routes", routed(sourceC))
 	checkSniffed(t, entry.name, socksPort, p1, dump)
 	if auditSink != nil {
@@ -399,8 +404,7 @@ func checkSniffed(t *testing.T, engineName string, socksPort, port int, dump fun
 		}
 	}
 	// A BitTorrent handshake is blocked whether the client asked for a domain or
-	// an address, and an ordinary request to the same destinations is not. (UDP
-	// and uTP are not exercised: the harness's SOCKS client is TCP only.)
+	// an address, and an ordinary request to the same destinations is not.
 	for _, c := range []struct{ name, host string }{
 		{"a routed name", routedName}, {"the default exit's name", otherName}, {"an address", "127.0.0.40"},
 	} {
@@ -414,6 +418,66 @@ func checkSniffed(t *testing.T, engineName string, socksPort, port int, dump fun
 	if len(failures) > 0 {
 		t.Fatalf("sniffed names on %s:\n%s\n%s", engineName, strings.Join(failures, "\n"), dump())
 	}
+}
+
+// checkRoutedUTP uses the same r1 destination for every datagram. The ordinary
+// packets identify exit C as the sender, and the uTP SYN must never reach the
+// receiver. A final ordinary packet proves the route still works after a block.
+func checkRoutedUTP(t *testing.T, socksPort, port int, dump func() string) {
+	t.Helper()
+	target := netip.MustParseAddr("127.0.0.20")
+	receiver, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(target, uint16(port))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	received := make(chan []byte, 4)
+	go func() {
+		buffer := make([]byte, 2048)
+		for {
+			n, sender, err := receiver.ReadFromUDPAddrPort(buffer)
+			if err != nil {
+				return
+			}
+			select {
+			case received <- append([]byte(nil), buffer[:n]...):
+			default:
+			}
+			_, _ = receiver.WriteToUDPAddrPort([]byte(sender.Addr().String()), sender)
+		}
+	}()
+
+	ordinary := func() {
+		t.Helper()
+		packet := []byte("ordinary UDP")
+		reply, err := socksUDPExchange(socksPort, target, port, packet)
+		if err != nil || string(reply) != sourceC {
+			t.Fatalf("ordinary UDP used %q, want %s: %v\n%s", reply, sourceC, err, dump())
+		}
+		select {
+		case payload := <-received:
+			if string(payload) != string(packet) {
+				t.Fatalf("receiver saw an unexpected datagram: %x", payload)
+			}
+		default:
+			t.Fatal("receiver did not record the ordinary datagram")
+		}
+	}
+
+	ordinary()
+	// BEP 29 uTP v1 SYN, with no extension and a nonzero connection ID.
+	syn := [20]byte{0x41, 0, 0, 1}
+	_, err = socksUDPExchange(socksPort, target, port, syn[:])
+	var networkError net.Error
+	if !errors.As(err, &networkError) || !networkError.Timeout() {
+		t.Fatalf("uTP SYN should time out at the client, got %v\n%s", err, dump())
+	}
+	select {
+	case payload := <-received:
+		t.Fatalf("uTP reached the routed destination: %x\n%s", payload, dump())
+	default:
+	}
+	ordinary()
 }
 
 const auditToken = "route-audit-token"

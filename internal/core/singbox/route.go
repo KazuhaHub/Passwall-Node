@@ -288,13 +288,18 @@ func (c Compiler) applyRoutes(result *config, plan agentcore.PolicyPlan, groups 
 		}
 	}
 	if sniff && plan.HasProtocolRules() {
-		// Protocol rules need a protocol, and a connection that asked for a domain
-		// never reaches the full sniff. The BitTorrent sniffer sets the protocol and
-		// not the domain, so the requested name stays the one in force, and rules
-		// that name a protocol apply to it again. The policy only names bittorrent.
+		// Requested names only need the BitTorrent sniffer before pass A:
+		// it sets the protocol while keeping the requested name.
 		routed.passA = append([]map[string]any{{
 			"inbound": routed.tags, "domain_regex": []string{"."}, "action": "sniff", "sniffer": []string{"bittorrent"},
 		}}, routed.passA...)
+		// An address goes through the general sniff. Its DNS decoder can
+		// finish without naming a protocol, so retry UDP with the BitTorrent
+		// sniffer before the routed rules. sing-box keeps any protocol the
+		// general sniff has already identified.
+		routed.passB = append([]map[string]any{{
+			"inbound": routed.tags, "network": []string{"udp"}, "action": "sniff", "sniffer": []string{"bittorrent"},
+		}}, routed.passB...)
 	}
 	return routed, nil
 }

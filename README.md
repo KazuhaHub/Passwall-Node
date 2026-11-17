@@ -188,9 +188,8 @@ range with `net.ipv4.ip_local_reserved_ports=31000-31999`. A port collision
 between two links is resolved by key order, so a port can move when links are
 added or removed. The probe inbound has no authentication: any local process
 can reach the link URL's host and port through the exit (acceptable on a
-single-tenant node). A link URL with an unusable port makes the probes
-unavailable rather than rejecting the configuration. The interval is waited
-after a round ends; a round runs at most 8 attempts at once, each bounded by the
+single-tenant node). An explicit link URL port must be between 1 and 65535.
+The next interval starts after a round ends; a round runs at most 8 attempts at once, each bounded by the
 timeout, so with every line timing out it lasts about ceil(N/8) x timeout. The
 response body is never downloaded: the probe stops at the headers.
 Probe traffic is metered as the link's own and never as a user's. Without
@@ -240,12 +239,12 @@ rejects its listener (a `config` object error); nothing falls back to `local`.
   rule applies. Rules that name a protocol still apply to it: when the policy has
   one, a BitTorrent-only `sniff` (`"sniffer":["bittorrent"]`, which sets the
   protocol and not the domain) runs for requested domains on the routed inbounds
-  ahead of the segments (tested live over TCP; UDP/uTP is not exercised). A
-  connection that asked for an **address** goes through the sniff as on any
-  listener (the policy reads the name it claims, the limit the policy already has),
-  but a route rule never takes it by that claim: after the sniff the routes are
-  their addresses, ports and network only, and a route with no addresses is left
-  out. On Xray the claimed name is the one dialed, so it is the one in force.
+  ahead of the segments. A connection that asked for an **address** goes
+  through the general sniff. When that sniff leaves UDP unclassified and a
+  protocol rule is present, a BitTorrent-only sniff runs before the address
+  segments. The live test checks that a uTP SYN is blocked and ordinary UDP
+  still reaches the routed exit. After sniffing, route rules use only addresses,
+  ports and network. On Xray the claimed name is the one dialed.
 - **Xray** ANDs with `protocol.IntersectDestinations`, one (policy rule, route
   rule) pair at a time. When the result is not exact it is a superset: a **block**
   keeps it (it can only over-block); an **allow** or **report-only** copy is left
