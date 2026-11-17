@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -468,24 +467,26 @@ func inspectCoreBinary(options DoctorOptions, snapshot stateSnapshot) DoctorChec
 		return DoctorCheck{Code: code, Status: DoctorUnavailable,
 			Summary: "the selected core version is not in this binary's catalog"}
 	}
-	asset, err := release.AssetFor(runtime.GOOS, runtime.GOARCH, install.HostLibc(runtime.GOOS))
-	if err != nil {
-		return DoctorCheck{Code: code, Status: DoctorUnavailable,
-			Summary: "the catalog has no asset for this platform"}
-	}
-	directory := filepath.Join(options.DataDir, "cores", snapshot.engine, "versions", snapshot.version)
-	metadataPath := filepath.Join(directory, "metadata.json")
-	raw, err := os.ReadFile(metadataPath)
-	if err != nil {
+	// The record and the asset are read THROUGH THE INSTALLER'S OWN CODE: a
+	// second copy of its file name or layout here is how this check once read a
+	// file the installer never wrote, and reported every node as unrecorded.
+	directory := install.VersionDir(filepath.Join(options.DataDir, "cores"), release.Engine, release.Version)
+	record, err := install.ReadRecord(directory)
+	if errors.Is(err, os.ErrNotExist) {
 		return DoctorCheck{Code: code, Status: DoctorUnavailable,
 			Summary: "the installed core has no installation record"}
 	}
-	var record struct {
-		BinarySHA256 string `json:"binary_sha256"`
-	}
-	if err := json.Unmarshal(raw, &record); err != nil || !wellFormedDigest(record.BinarySHA256) {
+	if err != nil || !wellFormedDigest(record.BinarySHA256) {
 		return DoctorCheck{Code: code, Status: DoctorFailed,
 			Summary: "the installed core's installation record is unreadable"}
+	}
+	// The asset the record names, not the one HostLibc would pick today: the
+	// installer keeps an existing installation of the other libc variant, and
+	// that variant's binary sits at a different path.
+	asset, err := record.Asset(release, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return DoctorCheck{Code: code, Status: DoctorFailed,
+			Summary: "the installed core's installation record does not match the catalog for this platform"}
 	}
 	binaryPath := filepath.Join(directory, asset.Binary)
 	actual, err := digestFile(binaryPath)

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -249,6 +250,53 @@ func TestExistingInstallOfAnotherLibcVariantIsReused(t *testing.T) {
 	release.Assets = kept
 	if _, err := installer(corecatalog.LibcMusl).Install(t.Context(), Request{Engine: "sing-box", Version: "1.14.0"}); err == nil {
 		t.Fatal("an installation recorded from an asset the release no longer lists was accepted")
+	}
+}
+
+// ReadRecord, VersionDir and Record.Asset are how a read-only inspection (the
+// doctor) finds what Install published. They have to agree with Install itself,
+// or that inspection reports a healthy node as having no installation record.
+func TestReadRecordReadsWhatInstallWrote(t *testing.T) {
+	t.Parallel()
+	archive := zipWithBinary(t, "xray", []byte("fake-xray"))
+	digest := sha256.Sum256(archive)
+	release := testRelease(hex.EncodeToString(digest[:]), false)
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(archive)), Header: make(http.Header)}, nil
+	})}
+	root := t.TempDir()
+	installer, err := New(Options{
+		RootDir: root, GOOS: "linux", GOARCH: "amd64", HTTPClient: client,
+		Resolve: func(_, _ string) (corecatalog.Release, error) { return release, nil }, Verifier: &verifierStub{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err := installer.Install(t.Context(), Request{Engine: "xray", Version: release.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionDir := VersionDir(root, "xray", release.Version)
+	if filepath.Dir(installed.MetadataPath) != versionDir {
+		t.Fatalf("Install published %s, VersionDir says %s", installed.MetadataPath, versionDir)
+	}
+	record, err := ReadRecord(versionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryDigest := sha256.Sum256([]byte("fake-xray"))
+	if record.BinarySHA256 != hex.EncodeToString(binaryDigest[:]) {
+		t.Fatalf("recorded binary digest = %s", record.BinarySHA256)
+	}
+	asset, err := record.Asset(release, "linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Join(versionDir, asset.Binary) != installed.BinaryPath {
+		t.Fatalf("record names %s, Install returned %s", asset.Binary, installed.BinaryPath)
+	}
+	if _, err := ReadRecord(t.TempDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a directory without a record: %v", err)
 	}
 }
 

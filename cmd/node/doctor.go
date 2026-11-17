@@ -79,12 +79,9 @@ func runDoctor(arguments []string, stdout, stderr io.Writer) error {
 		collector = built
 	}
 
-	report := manage.RunDoctor(context.Background(), manage.DoctorOptions{
-		DataDir:        *dataDir,
-		CredentialFile: *credentialFile,
-		InstallRoot:    upgrade.InstallRoot,
-		Collector:      collector,
-	})
+	doctorOptions := localDoctorOptions(*dataDir, *credentialFile)
+	doctorOptions.Collector = collector
+	report := manage.RunDoctor(context.Background(), doctorOptions)
 
 	if *jsonOutput {
 		// Stdout carries ONE JSON document and nothing else, so it can be piped
@@ -112,4 +109,11 @@ func countFailures(report manage.DoctorReport) int {
 		}
 	}
 	return failures
+}
+
+// localDoctorOptions are the doctor's inputs that describe this node's layout.
+// The doctor subcommand and the remote diagnostic both start from them, so the
+// two cannot report the same machine differently.
+func localDoctorOptions(dataDir, credentialFile string) manage.DoctorOptions {
+	return manage.DoctorOptions{DataDir: dataDir, CredentialFile: credentialFile, InstallRoot: upgrade.InstallRoot}
 }

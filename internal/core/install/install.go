@@ -84,7 +84,11 @@ type Installer struct {
 	maxBinaryBytes  int64
 }
 
-type metadata struct {
+// Record is the installation record Install writes beside every published core,
+// as metadataName in its version directory. It is the only evidence of what the
+// directory was installed from: the binary digest in it is the one a later
+// start, and the doctor, compare the binary on disk against.
+type Record struct {
 	SchemaVersion int       `json:"schema_version"`
 	Engine        string    `json:"engine"`
 	Version       string    `json:"version"`
@@ -92,6 +96,44 @@ type metadata struct {
 	ArchiveSHA256 string    `json:"archive_sha256"`
 	BinarySHA256  string    `json:"binary_sha256"`
 	InstalledAt   time.Time `json:"installed_at"`
+}
+
+// VersionDir is the directory Install publishes engine's version into, under
+// the installer root.
+func VersionDir(rootDir, engine, version string) string {
+	return filepath.Join(rootDir, engine, "versions", version)
+}
+
+// ReadRecord reads the installation record in a version directory. It reads
+// and executes nothing else, so a read-only inspection can use it. A directory
+// without a record returns an error that wraps os.ErrNotExist.
+func ReadRecord(versionDir string) (Record, error) {
+	var record Record
+	if err := readJSON(filepath.Join(versionDir, metadataName), &record); err != nil {
+		return Record{}, err
+	}
+	return record, nil
+}
+
+// Asset is the asset of release this record was installed from, for goos and
+// goarch.
+//
+// IT MATCHES WHAT WAS RECORDED, NOT WHAT HostLibc PICKS TODAY: see
+// verifyExisting. The libc variants of one target have different binary paths
+// inside their archives, so a caller that located the binary through today's
+// pick would look in the wrong place after the host's loaders changed.
+func (r Record) Asset(release corecatalog.Release, goos, goarch string) (corecatalog.Asset, error) {
+	mismatch := errors.New("existing core metadata does not match the audited release")
+	if r.SchemaVersion != 1 || r.Engine != release.Engine || r.Version != release.Version || r.InstalledAt.IsZero() {
+		return corecatalog.Asset{}, mismatch
+	}
+	for _, candidate := range release.Assets {
+		if candidate.OS == goos && candidate.Arch == goarch &&
+			candidate.URL == r.SourceURL && candidate.SHA256 == r.ArchiveSHA256 {
+			return candidate, nil
+		}
+	}
+	return corecatalog.Asset{}, mismatch
 }
 
 func New(options Options) (*Installer, error) {
@@ -163,11 +205,11 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 		return Installation{}, err
 	}
 
-	versionsDir := filepath.Join(i.rootDir, engine, "versions")
+	finalDir := VersionDir(i.rootDir, engine, release.Version)
+	versionsDir := filepath.Dir(finalDir)
 	if err := os.MkdirAll(versionsDir, 0o700); err != nil {
 		return Installation{}, fmt.Errorf("create core versions directory: %w", err)
 	}
-	finalDir := filepath.Join(versionsDir, release.Version)
 	result := Installation{
 		Engine: engine, Version: release.Version,
 		BinaryPath: filepath.Join(finalDir, asset.Binary), MetadataPath: filepath.Join(finalDir, metadataName),
@@ -202,7 +244,7 @@ func (i *Installer) Install(ctx context.Context, request Request) (Installation,
 	if err := os.Remove(archivePath); err != nil {
 		return Installation{}, fmt.Errorf("remove staged core archive: %w", err)
 	}
-	installed := metadata{
+	installed := Record{
 		SchemaVersion: 1, Engine: engine, Version: release.Version, SourceURL: asset.URL,
 		ArchiveSHA256: asset.SHA256, BinarySHA256: binaryDigest, InstalledAt: time.Now().UTC(),
 	}
@@ -280,25 +322,13 @@ func detectLibc(goos, root string) string {
 // to match the digest recorded at install time, and the verifier still has to
 // execute it here — so a variant this host cannot run fails as before.
 func (i *Installer) verifyExisting(ctx context.Context, installation Installation, config []byte) (Installation, error) {
-	var installed metadata
-	if err := readJSON(installation.MetadataPath, &installed); err != nil {
+	installed, err := ReadRecord(filepath.Dir(installation.MetadataPath))
+	if err != nil {
 		return Installation{}, fmt.Errorf("verify existing core metadata: %w", err)
 	}
-	if installed.SchemaVersion != 1 || installed.Engine != installation.Engine || installed.Version != installation.Version ||
-		installed.InstalledAt.IsZero() {
-		return Installation{}, errors.New("existing core metadata does not match the audited release")
-	}
-	var asset corecatalog.Asset
-	found := false
-	for _, candidate := range installation.Release.Assets {
-		if candidate.OS == i.goos && candidate.Arch == i.goarch &&
-			candidate.URL == installed.SourceURL && candidate.SHA256 == installed.ArchiveSHA256 {
-			asset, found = candidate, true
-			break
-		}
-	}
-	if !found {
-		return Installation{}, errors.New("existing core metadata does not match the audited release")
+	asset, err := installed.Asset(installation.Release, i.goos, i.goarch)
+	if err != nil {
+		return Installation{}, err
 	}
 	if err := validateAssetSource(installation.Release, asset); err != nil {
 		return Installation{}, err
