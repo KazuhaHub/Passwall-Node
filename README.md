@@ -161,6 +161,41 @@ Caveats worth repeating to an operator:
 - sing-box's `resolve` action exists from 1.11; the core catalog offers only
   1.14 and a test fails if an older release becomes selectable.
 
+### Link probes
+
+An agent that declares `transit.probe.v1` (both engines do) self-tests the lines
+it is the entry of when the panel sends `Transit.Probe`, and reports the result
+in `NodeReport.Probes` on full reports only.
+
+- `transport`: a plain TCP connect from the agent to each outgoing link's exit.
+- `e2e` (only with a `link_url`): an HTTP(S) GET of the URL **through the core and
+  the link**, via a loopback probe inbound (`127.0.0.1:31000-31999`, one per link,
+  tagged `transit-probe-<link>`, routed first to that link's outbound, so the
+  destination policy never judges it and it is never audited). With no free port
+  the link reports `probe_unavailable`; the configuration is never rejected.
+- `forward`: per named forward, `tcp` (connect to the target), `quic` (a Version
+  Negotiation probe) or `tls` (a ClientHello naming the front route's server
+  name, success on a ServerHello).
+
+Each result summarizes the last 20 attempts (min/median/max RTT of the
+successes, failure count, last error class, last success time), is kept in
+memory only and starts over when the probed object's configuration changes.
+The probe port range (127.0.0.1:31000-31999) sits below Linux's default ephemeral
+range (32768-60999). The
+allocator avoids only binds the compile knows, so an unrelated local process
+listening in 31000-31999 would make the core refuse that inbound; reserve the
+range with `net.ipv4.ip_local_reserved_ports=31000-31999`. A port collision
+between two links is resolved by key order, so a port can move when links are
+added or removed. The probe inbound has no authentication: any local process
+can reach the link URL's host and port through the exit (acceptable on a
+single-tenant node). A link URL with an unusable port makes the probes
+unavailable rather than rejecting the configuration. The interval is waited
+after a round ends; a round runs at most 8 attempts at once, each bounded by the
+timeout, so with every line timing out it lasts about ceil(N/8) x timeout. The
+response body is never downloaded: the probe stops at the headers.
+Probe traffic is metered as the link's own and never as a user's. Without
+`Transit.Probe` the compiled configuration is byte-identical to before.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real

@@ -293,6 +293,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	forwardCounters := &agent.ForwardCounterCache{}
+	prober, err := agent.NewProber(agent.ProberOptions{
+		Deployment: store.CoreDeployment, Status: supervisor.Status, Warnf: logger.Warnf,
+	})
+	if err != nil {
+		return err
+	}
 	observer := &agent.ObservationService{
 		Telemetry: telemetry, Store: store, Issues: issues, Status: supervisor.Status, Now: now,
 		Forwards: forwardCounters,
@@ -325,7 +331,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	hostTelemetry = hostReporter != nil
 	capabilities := staticCapabilities(hostTelemetry, audit != nil)
 	synchronizer := agent.Synchronizer{
-		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters),
+		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters, prober.Results),
 		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
@@ -369,6 +375,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		{Name: "local expiry", Run: func(ctx context.Context) error {
 			return coreRuntime.RunExpiryLoop(ctx, func(err error) { logger.Errorf("%v", err) })
 		}},
+		{Name: "link probes", Run: prober.Run},
 		{Name: "task worker", Run: taskWorker.Run},
 		{Name: "control-plane sync", Run: runner.Run},
 	}
@@ -398,7 +405,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 // updater never advertised remote upgrade until it was restarted. It is a
 // function of its own so the tests build their reports through exactly this
 // wiring rather than a copy of it.
-func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, transit *agent.ForwardCounterCache) agent.ReportBuilder {
+func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, transit *agent.ForwardCounterCache, probes func() []protocol.ProbeResult) agent.ReportBuilder {
 	var forwardCounters func() []protocol.ForwardCounters
 	var linkCounters func() []protocol.LinkCounters
 	if transit != nil {
@@ -408,7 +415,7 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 		AgentID: agentID, AgentVersion: buildversion.String(),
 		Store: store, CoreStatus: status, Now: now,
 		Capabilities: static, CapabilitySource: worker.Capabilities,
-		PolicyStatus: policyStatus, ForwardCounters: forwardCounters, LinkCounters: linkCounters,
+		PolicyStatus: policyStatus, ForwardCounters: forwardCounters, LinkCounters: linkCounters, Probes: probes,
 	}
 }
 
@@ -430,6 +437,10 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // nothing sends no transit counters, which the panel reads as "not measured".
 // Users are charged on their listener on both engines either way.
 //
+// transit.probe.v1 is always among them: the self-test goes through whichever
+// core runs, the end-to-end probe by a loopback inbound both compilers emit,
+// and a node with no Transit.Probe simply reports no probes.
+//
 // audit.hits.v1 and audit.usage.v1 are among them only when the audit receiver
 // is listening, which is decided once at startup; a receiver that fails
 // afterwards takes the agent down rather than leaving the declaration untrue.
@@ -440,7 +451,7 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // hit's egress off the outbound tag, and which hits carry it is up to the
 // policy (audit_egress), which PSP sets only for an Xray entry with egress.
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
-	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink}
+	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink, protocol.CapabilityTransitProbe}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}

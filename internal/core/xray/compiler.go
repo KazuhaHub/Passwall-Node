@@ -225,7 +225,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for bind, key := range binds {
 		occupied[bind] = string(key)
 	}
-	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "0.0.0.0")
+	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "0.0.0.0", apiListen)
 	if err != nil {
 		return agentcore.Artifact{}, err
 	}
@@ -256,9 +256,13 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 		config.Inbounds = append(config.Inbounds, inbound)
 	}
+	for _, probe := range transit.Probes {
+		config.Inbounds = append(config.Inbounds, compileProbeInbound(probe))
+	}
 	policy := snapshot.DestinationPolicy
 	applyEgress(&config, served, transit.Egress, policy != nil && policy.AuditEgress)
 	routeTransit(&config, transitInboundTags(transit))
+	routeProbes(&config, transit.Probes)
 
 	encoded, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -365,6 +369,39 @@ func routeTransit(config *xrayConfig, tags []string) {
 	}
 	rules, _ := config.Routing["rules"].([]map[string]any)
 	config.Routing["rules"] = append([]map[string]any{rule}, rules...)
+}
+
+// compileProbeInbound is a link's probe inbound: a loopback dokodemo-door whose
+// fixed destination is the link URL's endpoint. It has no user and no sniffing.
+func compileProbeInbound(probe agentcore.ProbeInbound) map[string]any {
+	return map[string]any{
+		"tag": agentcore.ProbeTag(probe.Link), "listen": agentcore.ProbeListen, "port": probe.Port,
+		"protocol": "dokodemo-door",
+		"settings": map[string]any{"address": probe.Host, "port": probe.TargetPort, "network": "tcp"},
+	}
+}
+
+// routeProbes puts one rule per probe inbound ahead of everything, the transit
+// rule included: a probe leaves through the link it tests and is never judged
+// by the destination policy, so a policy that blocks the link URL's address
+// does not turn a healthy link into a failing one.
+func routeProbes(config *xrayConfig, probes []agentcore.ProbeInbound) {
+	if len(probes) == 0 {
+		return
+	}
+	front := make([]map[string]any, 0, len(probes))
+	for _, probe := range probes {
+		front = append(front, map[string]any{
+			"type": "field", "ruleTag": agentcore.ProbeTag(probe.Link),
+			"inboundTag": []string{agentcore.ProbeTag(probe.Link)}, "outboundTag": agentcore.LinkTag(probe.Link),
+		})
+	}
+	if config.Routing == nil {
+		config.Routing = map[string]any{"domainStrategy": "AsIs", "rules": front}
+		return
+	}
+	rules, _ := config.Routing["rules"].([]map[string]any)
+	config.Routing["rules"] = append(front, rules...)
 }
 
 func compileUser(protocolName string, client protocol.Client) (map[string]any, error) {

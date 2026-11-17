@@ -43,6 +43,43 @@ Xray 统计链路流量（出口用入站统计，入口用仅在入口开启的
 不记命中，不动。真实内核测试会把 Xray 实际发出的第一条 webhook 原文打到日志里（`t.Logf`），用来确认
 它是否带入站标签。
 
+**链路质量自测（2026-11-16，开发分支）**：能力 `transit.probe.v1`（`staticCapabilities` 静态声明，两种内核都有），
+配置流 `Transit.Probe`（间隔 30..3600 秒、单次超时 500..10000 毫秒、`link_url`、要测的转发及方法），结果经
+全量报告的 `NodeReport.Probes` 上送，部分报告不带；没有声明能力就不发（`ReportBuilder.Probes`，与计数同一套
+门），结果先单独过 `ValidateProbeResults`，不合格整体丢弃而不拖垮报告。**测的链路恰好是 `LinksOut`**。
+- **端到端（`e2e`）经过内核**：`PlanTransit` 为每条出站链路在 `127.0.0.1:31000-31999` 里确定性分配一个环回端口
+  （以链路键哈希起点线性探测，避开本次编译已知的全部绑定与核心 API 地址；起点相同的两条链路按键序先到先得，所以增删别的链路在撞起点时仍可能挪动端口）。Xray 编出
+  环回 `dokodemo-door`，sing-box 编出 `direct` 入站加 `override_address/port`，目标固定为 `link_url` 的
+  主机:端口（缺省 443/80）。入站标签 `transit-probe-<lnk>`（前缀 `core.ProbeTagPrefix`，不是 `transit-lnk_`），
+  无用户，一条路由规则**排在最前面**（先于 `transit-forwards` 与全部策略）直接指向该链路出站，所以策略不评判探测、
+  也没有 webhook（不产生审计命中）。没有空闲端口、或 `link_url` 端口非法（0/超 65535）时，相应链路不编出探测入站，e2e 记 `probe_unavailable`，**不拒绝配置**。
+  范围 31000-31999 在 Linux 默认临时端口段（32768-60999）之下，内核分配的客户端端口不会占用它。**残余风险**：
+  分配器只避开编译已知的绑定，本机无关进程若监听此范围内同一端口，核心会拒绝该入站；可用
+  `net.ipv4.ip_local_reserved_ports=31000-31999` 保留此范围。**探测入站无认证**：本机任何进程都能经它
+  以出口身份访问 `link_url` 的主机:端口（单租户节点可接受）。调度：间隔在一轮结束**之后**才开始计时，一轮最多
+  8 个并发、每个限 `timeout_ms`，全超时时约 ceil(N/8)×timeout，轮次不会叠加。e2e 只读响应头、不读也不排空响应体，直接关连接。
+  没有 `Probe`（或 `link_url` 为空）时编出的配置逐字节不变（`testdata/golden-links-no-probe.json`，两种引擎各一份，
+  由探测功能之前的版本生成）。
+- **传输（`transport`）不经内核**：agent 直接 TCP 连到 `LinkOut` 的出口地址:端口。
+- **转发（`forward`）**：`tcp` 连转发的目标；`quic` 发一个 1200 字节、未知版本的 QUIC 长包头，要求收到
+  把连接 ID 对调回显的 Version Negotiation（沉默按 `timeout` 计失败，没有第三种答案）；`tls` 连**转发自己的绑定**
+  （前置口，环回地址）发手写的 ClientHello，SNI 取 `Transit.Fronts` 顺序里第一条以该转发为目标的路由的第一个名字，
+  收到 ServerHello（记录头 0x16 + 握手类型 2）算成功。
+- **`internal/agent/prober.go`**：`Prober.Run` 按 `interval_seconds` 调度，每次尝试限 `timeout_ms`，同一轮最多 8 个
+  并发；每个（key, kind）在内存里保留最近 20 次尝试（不持久化，重启清零）。结果给最小/中位/最大 RTT（毫秒，仅成功
+  样本；偶数个取中间两个的平均）、窗口内最近一次失败的类别、最后一次成功的墙钟。对象（链路/转发/方法/链接 URL/
+  环回端口）的摘要变化时窗口重置；与它无关的配置变化不重置。错误分类：`timeout` `refused` `tls`
+  `http_status`（非 2xx/3xx）`dns` `probe_unavailable` `other`。核心没有运行当前部署（状态或摘要不符）时 e2e 不发
+  请求，直接记 `probe_unavailable`；核心接受连接后又断开（链路不通）记 `other`。e2e 是对环回端口的 HTTP(S) GET
+  （https 用 URL 主机做 SNI 并校验证书），计时到首字节。
+- **计量**：探测流量是链路自己的传输流量，不是用户的。Xray 入口的出站统计本来就覆盖；sing-box 把探测入站
+  映射成 transit 键 `lnk_<id>`（`decodeTelemetryMapping`），只记到该链路，不进任何用户或监听器，也没有在线 IP。
+- 真实内核：`internal/core/linkmatrix/probe_test.go`（入口/出口 × 两种引擎 × 两种协议）用只有出口能到的
+  `127.0.0.2` HTTP 服务，入口策略特意封掉该地址：e2e 成功；Xray 入口的审计接收端在探测期间零 POST（先用用户流量
+  证明接收端有效）；sing-box 入口链路计数增加、用户与监听器为零；停掉出口后一个窗口内两项都失败。变异：探测入站在
+  无 `Probe` 时也编出 → 两份 golden 失败；探测规则不排最前 → 编译单测与真实内核测试都失败。
+- 注意：本仓库还没有编译 `Transit.Fronts`，`tls` 探测只依赖协议数据，真正的前置口出现后才有对象可测。
+
 **托管中转·透传（2026-11-16，开发分支）**：配置流新增 `Transit.Forwards`（能力
 `transit.forward.v1`，两种内核都声明）。节点把一个端口原样转发到落地服务器，不鉴权、不解密，
 落地看到的来源是本节点。Xray 编译为 `dokodemo-door`，sing-box 编译为带 override 的 `direct`

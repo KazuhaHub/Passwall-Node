@@ -1,0 +1,397 @@
+{
+  "log": {
+    "access": "none",
+    "loglevel": "warning"
+  },
+  "api": {
+    "listen": "127.0.0.1:10085",
+    "services": [
+      "StatsService"
+    ],
+    "tag": "psp-api"
+  },
+  "stats": {},
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserOnline": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true,
+      "statsOutboundDownlink": true,
+      "statsOutboundUplink": true
+    }
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "email": "psp-u61@example.invalid",
+            "flow": "xtls-rprx-vision",
+            "id": "0f62f495-b5ca-4509-b6cd-54a040deafd5",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "enabled": true,
+        "routeOnly": false
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "dest": "example.com:443",
+          "privateKey": "kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo",
+          "serverNames": [
+            "example.com"
+          ],
+          "shortIds": [
+            ""
+          ]
+        },
+        "security": "reality"
+      },
+      "tag": "psp-lst_41"
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 8443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "enabled": true,
+        "routeOnly": false
+      },
+      "tag": "psp-lst_42"
+    },
+    {
+      "port": 20001,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "203.0.113.9",
+        "network": "tcp,udp",
+        "port": 443
+      },
+      "tag": "transit-fwd_1"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    },
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "exit.example.com",
+            "method": "2022-blake3-aes-128-gcm",
+            "password": "glwKkLUrNxQ4VbjbZG4svg==",
+            "port": 30001
+          }
+        ]
+      },
+      "tag": "transit-lnk_7"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p2"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p4"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p5"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p6"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "psp-watch-p3"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p2~lnk_7"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p4~lnk_7"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "psp-deny-p6~lnk_7"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "streamSettings": {
+        "sockopt": {
+          "dialerProxy": "transit-lnk_7"
+        }
+      },
+      "tag": "psp-watch-p3~lnk_7"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "inboundTag": [
+          "transit-fwd_1"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "transit-forwards",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "full:allowed.example"
+        ],
+        "inboundTag": [
+          "psp-lst_41"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "psp-p1",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "full:allowed.example"
+        ],
+        "inboundTag": [
+          "psp-lst_42"
+        ],
+        "outboundTag": "transit-lnk_7",
+        "ruleTag": "psp-p1~lnk_7",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "regexp:\\.$"
+        ],
+        "outboundTag": "blocked",
+        "ruleTag": "psp-trailing-dot",
+        "type": "field"
+      },
+      {
+        "domain": [
+          "full:blocked.example"
+        ],
+        "inboundTag": [
+          "psp-lst_41"
+        ],
+        "outboundTag": "psp-deny-p2",
+        "ruleTag": "psp-p2",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "domain": [
+          "full:blocked.example"
+        ],
+        "inboundTag": [
+          "psp-lst_42"
+        ],
+        "outboundTag": "psp-deny-p2~lnk_7",
+        "ruleTag": "psp-p2~lnk_7",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "domain": [
+          "full:both.example"
+        ],
+        "inboundTag": [
+          "psp-lst_41"
+        ],
+        "outboundTag": "psp-deny-p4",
+        "ruleTag": "psp-p4a",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "domain": [
+          "full:both.example"
+        ],
+        "inboundTag": [
+          "psp-lst_42"
+        ],
+        "outboundTag": "psp-deny-p4~lnk_7",
+        "ruleTag": "psp-p4a~lnk_7",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "inboundTag": [
+          "psp-lst_41"
+        ],
+        "ip": [
+          "198.51.100.0/24"
+        ],
+        "outboundTag": "psp-deny-p4",
+        "ruleTag": "psp-p4b",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "inboundTag": [
+          "psp-lst_42"
+        ],
+        "ip": [
+          "198.51.100.0/24"
+        ],
+        "outboundTag": "psp-deny-p4~lnk_7",
+        "ruleTag": "psp-p4b~lnk_7",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "domain": [
+          "full:local.example"
+        ],
+        "inboundTag": [
+          "psp-lst_41"
+        ],
+        "outboundTag": "psp-deny-p5",
+        "ruleTag": "psp-p5",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "domain": [
+          "full:linked.example"
+        ],
+        "inboundTag": [
+          "psp-lst_42"
+        ],
+        "outboundTag": "psp-deny-p6~lnk_7",
+        "ruleTag": "psp-p6~lnk_7",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "domain": [
+          "full:watched.example"
+        ],
+        "inboundTag": [
+          "psp-lst_41"
+        ],
+        "outboundTag": "psp-watch-p3",
+        "ruleTag": "psp-p3",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "domain": [
+          "full:watched.example"
+        ],
+        "inboundTag": [
+          "psp-lst_42"
+        ],
+        "outboundTag": "psp-watch-p3~lnk_7",
+        "ruleTag": "psp-p3~lnk_7",
+        "type": "field",
+        "webhook": {
+          "headers": {
+            "X-PSP-Audit": "tok"
+          },
+          "url": "/d/audit.sock:/hit"
+        }
+      },
+      {
+        "inboundTag": [
+          "psp-lst_42"
+        ],
+        "outboundTag": "transit-lnk_7",
+        "ruleTag": "transit-egress~lnk_7",
+        "type": "field"
+      }
+    ]
+  }
+}

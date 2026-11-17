@@ -2,7 +2,9 @@ package core
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +20,72 @@ type TransitPlan struct {
 	LinksIn  []protocol.LinkIn
 	LinksOut []protocol.LinkOut
 	Egress   map[protocol.ListenerKey]protocol.LinkKey
+	// Probes are the loopback inbounds that carry the end-to-end link probe,
+	// one per outgoing link, in link key order. Empty unless Transit.Probe has a
+	// link URL.
+	Probes []ProbeInbound
+	// ProbeUnavailable lists the links that wanted a probe inbound and found no
+	// free loopback port. The link is compiled without one and the agent reports
+	// its e2e probe as probe_unavailable; the configuration is never rejected
+	// for it.
+	ProbeUnavailable []protocol.LinkKey
+}
+
+// ProbeInbound is one link's probe inbound: a loopback listener whose every
+// connection is relayed to Host:Port (the link URL's endpoint) through the
+// link, so the agent can fetch the URL end to end through the core.
+type ProbeInbound struct {
+	Link protocol.LinkKey
+	// Port is the loopback port, on ProbeListen.
+	Port int
+	// Host and TargetPort are the link URL's host and port.
+	Host       string
+	TargetPort int
+}
+
+// The loopback range probe inbounds are allocated from. It lies below Linux's
+// default ephemeral range (32768-60999), so a client socket the kernel picked
+// cannot be sitting on a probe port. The allocator avoids only the binds the
+// compile knows (listeners, forwards, links, the core API); an unrelated local
+// process listening in this range is a residual risk that would make the core
+// refuse its inbound. Reserve the range with net.ipv4.ip_local_reserved_ports
+// or move such a process out of it.
+const (
+	ProbeListen    = "127.0.0.1"
+	ProbePortFirst = 31000
+	ProbePortLast  = 31999
+)
+
+// ProbeTagPrefix starts the core inbound tag of a probe inbound. It sits under
+// TransitTagPrefix, so every parser that treats "transit-" as "not a user
+// listener" treats a probe as one, and it is not "transit-lnk_", which is a
+// link's own tag.
+const ProbeTagPrefix = TransitTagPrefix + "probe-"
+
+// ProbeTag is the core inbound tag of a link's probe inbound.
+func ProbeTag(key protocol.LinkKey) string { return ProbeTagPrefix + string(key) }
+
+// ProbeEndpoint is the host and port a link URL names: the URL's own port, or
+// 443 for https and 80 for http.
+func ProbeEndpoint(linkURL string) (string, int, error) {
+	parsed, err := url.Parse(linkURL)
+	if err != nil {
+		return "", 0, err
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return "", 0, fmt.Errorf("probe link_url has no host")
+	}
+	port := 80
+	if parsed.Scheme == "https" {
+		port = 443
+	}
+	if text := parsed.Port(); text != "" {
+		if port, err = strconv.Atoi(text); err != nil || port < 1 || port > 65535 {
+			return "", 0, fmt.Errorf("probe link_url port %q is invalid", text)
+		}
+	}
+	return host, port, nil
 }
 
 // Empty reports whether there is nothing to relay.
@@ -42,7 +110,12 @@ func (p TransitPlan) Empty() bool {
 //
 // An egress binding for a listener this compile does not serve (disabled, or
 // not on this node) binds nothing and is dropped.
-func PlanTransit(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string) (TransitPlan, error) {
+//
+// reserved are further "host:port" binds that only the probe allocation avoids
+// (the core's own API address, say): the compiler does not otherwise know
+// them, and a transit object colliding with one is not this function's to
+// reject.
+func PlanTransit(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string, reserved ...string) (TransitPlan, error) {
 	if transit == nil {
 		return TransitPlan{}, nil
 	}
@@ -112,6 +185,44 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 	for _, link := range plan.LinksIn {
 		if err := claim(string(link.Key), link.Listen, link.Port); err != nil {
 			return TransitPlan{}, LinkError(link.Key, err)
+		}
+	}
+	if probe := transit.Probe; probe != nil && probe.LinkURL != "" && len(plan.LinksOut) > 0 {
+		// A URL that names no usable endpoint (a port of 0 or above 65535, say)
+		// makes the e2e probe of every link unavailable. It never rejects the
+		// configuration: the protocol validator is not this function's gate.
+		host, port, endpointErr := ProbeEndpoint(probe.LinkURL)
+		for _, bind := range reserved {
+			if reservedHost, reservedPort, err := net.SplitHostPort(bind); err == nil {
+				taken = append(taken, bound{reservedHost, reservedPort, "reserved"})
+			}
+		}
+		for _, link := range plan.LinksOut {
+			if endpointErr != nil {
+				plan.ProbeUnavailable = append(plan.ProbeUnavailable, link.Key)
+				continue
+			}
+			// The search starts at a point derived from the key and walks up,
+			// so a link normally keeps its port. When two keys start on the
+			// same port the one earlier in key order takes it, so a port can
+			// still move when another link is added or removed.
+			span := ProbePortLast - ProbePortFirst + 1
+			hash := fnv.New32a()
+			_, _ = hash.Write([]byte(link.Key))
+			start := int(hash.Sum32() % uint32(span))
+			allocated := false
+			for offset := 0; offset < span; offset++ {
+				candidate := ProbePortFirst + (start+offset)%span
+				if err := claim("probe "+string(link.Key), ProbeListen, candidate); err != nil {
+					continue
+				}
+				plan.Probes = append(plan.Probes, ProbeInbound{Link: link.Key, Port: candidate, Host: host, TargetPort: port})
+				allocated = true
+				break
+			}
+			if !allocated {
+				plan.ProbeUnavailable = append(plan.ProbeUnavailable, link.Key)
+			}
 		}
 	}
 	isServed := make(map[protocol.ListenerKey]bool, len(served))

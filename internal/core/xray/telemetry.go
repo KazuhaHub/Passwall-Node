@@ -222,6 +222,10 @@ func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.Clien
 	clients := make(map[protocol.ClientKey]bool)
 	forwards := make(map[protocol.ForwardKey]bool)
 	for _, inbound := range config.Inbounds {
+		if strings.HasPrefix(inbound.Tag, agentcore.ProbeTagPrefix) {
+			// A probe inbound is the agent's own self-test, not a forward.
+			continue
+		}
 		if forwardText, transit := strings.CutPrefix(inbound.Tag, agentcore.TransitTagPrefix); transit {
 			// An incoming link is counted by decodeXrayLinkPresence.
 			if strings.HasPrefix(forwardText, "lnk_") {

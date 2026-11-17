@@ -164,7 +164,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for bind, key := range binds {
 		occupied[bind] = string(key)
 	}
-	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "::")
+	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "::", apiListen)
 	if err != nil {
 		return agentcore.Artifact{}, err
 	}
@@ -184,8 +184,12 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for _, link := range transit.LinksIn {
 		result.Inbounds = append(result.Inbounds, compileLinkIn(link))
 	}
+	for _, probe := range transit.Probes {
+		result.Inbounds = append(result.Inbounds, compileProbeInbound(probe))
+	}
 	applyEgress(&result, served, transit.Egress)
 	routeTransit(&result, transitInboundTags(transit))
+	routeProbes(&result, transit.Probes)
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return agentcore.Artifact{}, fmt.Errorf("encode sing-box config: %w", err)
@@ -225,6 +229,32 @@ func routeTransit(result *config, tags []string) {
 	rule := map[string]any{"inbound": tags, "action": "route", "outbound": "direct"}
 	rules, _ := result.Route["rules"].([]map[string]any)
 	result.Route["rules"] = append([]map[string]any{rule}, rules...)
+}
+
+// compileProbeInbound is a link's probe inbound: a loopback direct inbound
+// whose destination is overridden to the link URL's endpoint. It has no user.
+func compileProbeInbound(probe agentcore.ProbeInbound) map[string]any {
+	return map[string]any{
+		"type": "direct", "tag": agentcore.ProbeTag(probe.Link), "listen": agentcore.ProbeListen, "listen_port": probe.Port,
+		"network": "tcp", "override_address": probe.Host, "override_port": probe.TargetPort,
+	}
+}
+
+// routeProbes puts one rule per probe inbound ahead of everything, the transit
+// rule included, so a probe leaves through the link it tests and is never
+// judged by the destination policy (or its sniff and resolve actions).
+func routeProbes(result *config, probes []agentcore.ProbeInbound) {
+	if len(probes) == 0 {
+		return
+	}
+	front := make([]map[string]any, 0, len(probes))
+	for _, probe := range probes {
+		front = append(front, map[string]any{
+			"inbound": []string{agentcore.ProbeTag(probe.Link)}, "action": "route", "outbound": agentcore.LinkTag(probe.Link),
+		})
+	}
+	rules, _ := result.Route["rules"].([]map[string]any)
+	result.Route["rules"] = append(front, rules...)
 }
 
 func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.Client) (map[string]any, bool, string, error) {
