@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -288,6 +289,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Signer: signer, AllowInsecureHTTP: parsed.AllowInsecureHTTP,
 		UserAgent: "passwall-node/" + buildversion.String(),
 		Stats:     runtimeStats,
+		SyncGzip:  slices.Contains(staticCapabilities(false, false), protocol.CapabilitySyncGzip),
 	})
 	if err != nil {
 		return err
@@ -440,6 +442,9 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // transit.probe.v1 is always among them: the self-test goes through whichever
 // core runs, the end-to-end probe by a loopback inbound both compilers emit,
 // and a node with no Transit.Probe simply reports no probes.
+// sync.gzip.v1 is always among them: the HTTP syncer implements the whole
+// negotiation (its first report is plain; it compresses only after the panel
+// advertises Accept-Encoding: gzip).
 //
 // audit.hits.v1 and audit.usage.v1 are among them only when the audit receiver
 // is listening, which is decided once at startup; a receiver that fails
@@ -451,7 +456,7 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // hit's egress off the outbound tag, and which hits carry it is up to the
 // policy (audit_egress), which PSP sets only for an Xray entry with egress.
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
-	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink, protocol.CapabilityTransitProbe}
+	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink, protocol.CapabilityTransitProbe, protocol.CapabilitySyncGzip}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}

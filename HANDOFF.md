@@ -164,6 +164,29 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 
 ## 3. 下一步做什么
 
+### 压缩 sync（`sync.gzip.v1`，protocol v0.9.0）
+
+Agent 总是声明 `sync.gzip.v1`（`staticCapabilities`），`HTTPSyncer`（`internal/agent/transport.go`）
+实现整套协商，状态机用 `protocol.SyncCompression`，不要自己再写一遍：
+
+- 首个请求一定是明文；PSP 在 2xx 响应上带 `Accept-Encoding: gzip` 后才压缩后续请求。
+  只有 2xx 会改变状态，5xx 与网络错误不动状态；对压缩请求收到 400/415 时在同一轮内用
+  明文原样重发一次，并在 1 小时内不再压缩（冷却期内的广告包括重发那次的都忽略）。
+- 请求带 `Accept-Encoding: gzip` 才允许 PSP 压缩响应；响应是 gzip 而我们没要过则拒绝。
+- `Transport.DisableCompression = true`（克隆调用方的 transport，不改原对象），否则 Go
+  会无上限自动解压，绕过两个限制（以前遇到会 gzip 的代理，Go 先无上限解压再交给我们；现在
+  线上上限卡在压缩后的字节，解压后另有 64 MiB 上限）。响应一律走 `SyncEncodingFromHeaders` +
+  `DecodeSyncBody`（线上 16 MiB、解压后 64 MiB）；`HTTPOptions.MaxResponseBytes` 只限制线上
+  字节，超过 16 MiB 的值在构造时截到 16 MiB。非 2xx 的错误体若被代理 gzip，同样有界地解开
+  （输出上限 4 KiB 摘要）。`ObserveResponse` 只在响应体完整读取并解码成功后调用：截断或
+  非法的 2xx 不会改变压缩状态。
+- 统计口径：`last_request_bytes` / `last_response_bytes` 是线上字节（可能是压缩后的）；
+  被 400/415 打回而明文重发的一轮，记录的是那次明文重发。
+- 压缩状态有互斥锁保护，但约定只有一个 sync 循环。报告构建器的体积检查不变（明文
+  JSON ≤ 16 MiB），对端不声明时行为与之前逐字节一致。
+- 测试：`transport_gzip_test.go`（老 PSP、广告后压缩、gzip 响应、超限解压、415 重发与冷却、
+  5xx/网络错误、未请求的 gzip 响应、DisableCompression）。
+
 ### 安装/重装对接（2026-09-12）
 
 `deployment.RenderLinux` 是 PSP 调用的唯一 Linux/systemd 脚本模板。默认二进制安装在

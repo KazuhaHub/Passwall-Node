@@ -202,6 +202,16 @@ func TestStaticCapabilitiesAlwaysDeclareTheTransitProbe(t *testing.T) {
 	}
 }
 
+func TestStaticCapabilitiesDeclareSyncGzip(t *testing.T) {
+	for _, hostTelemetry := range []bool{false, true} {
+		for _, audit := range []bool{false, true} {
+			if !slices.Contains(staticCapabilities(hostTelemetry, audit), protocol.CapabilitySyncGzip) {
+				t.Fatalf("host telemetry %v, audit %v: %s is not declared", hostTelemetry, audit, protocol.CapabilitySyncGzip)
+			}
+		}
+	}
+}
+
 // The wiring hands the prober's results to the report, gated by the capability.
 func TestNodeReportBuilderAttachesProbesToFullReportsOnly(t *testing.T) {
 	store, err := statesqlite.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))

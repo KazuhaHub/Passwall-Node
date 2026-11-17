@@ -196,6 +196,26 @@ response body is never downloaded: the probe stops at the headers.
 Probe traffic is metered as the link's own and never as a user's. Without
 `Transit.Probe` the compiled configuration is byte-identical to before.
 
+### Compressed sync (`sync.gzip.v1`)
+
+The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with
+`Content-Encoding: gzip`, so a roster larger than the 16 MiB wire limit still
+fits (decoded bodies are capped at 64 MiB). Negotiation is two-sided and never
+guessed: the first report is plain; a panel that accepts compressed requests says
+so with `Accept-Encoding: gzip` on a 2xx response, and only then does the agent
+compress. Only a 2xx response changes that state; a 5xx or a failed connection
+leaves it alone. If the panel answers a compressed request with 400 or 415 the
+agent resends the same report once in plain and stays plain for one hour. The
+agent sends `Accept-Encoding: gzip` on its own requests, so the panel may
+compress responses; the HTTP transport has `DisableCompression` set and every
+body is decoded by `protocol.DecodeSyncBody` under the protocol limits, never by
+Go's unlimited automatic inflation. A panel that does not advertise sees exactly
+the plain behaviour it always did. The learned state changes only after a 2xx
+body has been read and decoded in full. `last_request_bytes` and
+`last_response_bytes` are wire sizes (compressed when compressed); a round that
+was rejected and resent plain records the plain retry. `MaxResponseBytes` bounds
+wire bytes and is clamped to the 16 MiB protocol limit.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real
