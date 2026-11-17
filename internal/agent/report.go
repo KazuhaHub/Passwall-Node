@@ -47,10 +47,13 @@ type ReportBuilder struct {
 	// reports from an agent that declares protocol.CapabilityTransitForward;
 	// nil attaches nothing.
 	ForwardCounters func() []protocol.ForwardCounters
-	Store           state.Store
-	OutboxLimit     int
-	Now             func() time.Time
-	maxBodyBytes    int64
+	// LinkCounters is the latest link sample, attached to full reports from
+	// an agent that declares protocol.CapabilityTransitLink.
+	LinkCounters func() []protocol.LinkCounters
+	Store        state.Store
+	OutboxLimit  int
+	Now          func() time.Time
+	maxBodyBytes int64
 }
 
 // BuiltReport retains the outbox ids that may be acknowledged only after the
@@ -167,6 +170,9 @@ func (b ReportBuilder) Build(ctx context.Context, options BuildOptions) (BuiltRe
 		}
 		if b.ForwardCounters != nil && hasCapability(report.Capabilities, protocol.CapabilityTransitForward) {
 			report.ForwardCounters = b.ForwardCounters()
+		}
+		if b.LinkCounters != nil && hasCapability(report.Capabilities, protocol.CapabilityTransitLink) {
+			report.LinkCounters = b.LinkCounters()
 		}
 	}
 
@@ -384,6 +390,7 @@ func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64
 	report.Objects = nil
 	report.ListenerCounters = nil
 	report.ForwardCounters = nil
+	report.LinkCounters = nil
 	report.Clients = nil
 	report.Subjects = nil
 	body, err := encodeReport(report)

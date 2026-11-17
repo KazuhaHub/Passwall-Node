@@ -9,15 +9,15 @@ import (
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
 
-// forwardRuntime is a recordingRuntime that can also relay forwards.
+// forwardRuntime is a recordingRuntime that can also relay transit.
 type forwardRuntime struct {
 	recordingRuntime
 	forwardErrors map[protocol.ForwardKey]error
 }
 
-func (r *forwardRuntime) UpsertForward(_ context.Context, forward protocol.Forward) error {
-	r.calls = append(r.calls, "upsert_forward:"+string(forward.Key))
-	return r.forwardErrors[forward.Key]
+func (r *forwardRuntime) UpsertTransit(_ context.Context, key string) error {
+	r.calls = append(r.calls, "upsert_forward:"+key)
+	return r.forwardErrors[protocol.ForwardKey(key)]
 }
 
 func forwardResponse(version protocol.Version, forwards ...protocol.Forward) protocol.SyncResponse {
@@ -137,5 +137,70 @@ func TestReportCarriesForwardCountersOnlyInFullReportsWhenCapable(t *testing.T) 
 	}
 	if incapable.Report.ForwardCounters != nil {
 		t.Fatal("forward counters sent without the capability")
+	}
+}
+
+func TestProcessorConvergesLinksAndReconvergesOnANewBinding(t *testing.T) {
+	ctx := context.Background()
+	store := openAgentTestStore(t)
+	runtime := &forwardRuntime{}
+	processor := newTestProcessor(t, store, runtime, &recordingIssueSink{}, 3)
+	out := protocol.LinkOut{Key: protocol.NewLinkKey(5), Address: "exit.example.com", Port: 30001,
+		Protocol: protocol.LinkProtocolSS2022, SS: &protocol.LinkSS{Method: "2022-blake3-aes-128-gcm", Password: "glwKkLUrNxQ4VbjbZG4svg=="}}
+	in := protocol.LinkIn{Key: protocol.NewLinkKey(6), Port: 30002,
+		Protocol: protocol.LinkProtocolSS2022, SS: &protocol.LinkSS{Method: "2022-blake3-aes-128-gcm", Password: "glwKkLUrNxQ4VbjbZG4svg=="}}
+	respond := func(version protocol.Version, transit *protocol.Transit) protocol.SyncResponse {
+		response := forwardResponse(version)
+		config := *response.Config.Body
+		config.Transit = transit
+		response.Config = changedSegment(version, config)
+		return response
+	}
+	first := protocol.Version{Epoch: 1, Version: 1}
+	if _, err := processor.Process(ctx, respond(first, &protocol.Transit{LinksOut: []protocol.LinkOut{out}, LinksIn: []protocol.LinkIn{in}})); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"lnk_5", "lnk_6"} {
+		status, err := store.Object(ctx, protocol.StreamConfig, key)
+		if err != nil || status.State != protocol.ObjectApplied {
+			t.Fatalf("%s = %+v, %v", key, status, err)
+		}
+	}
+	// Binding a listener to the outgoing link changes what the link does, so
+	// it converges again; the untouched incoming link does not.
+	runtime.calls = nil
+	second := protocol.Version{Epoch: 1, Version: 2}
+	if _, err := processor.Process(ctx, respond(second, &protocol.Transit{
+		LinksOut: []protocol.LinkOut{out}, LinksIn: []protocol.LinkIn{in},
+		Egress: []protocol.EgressBinding{{Listener: protocol.NewListenerKey(9), Link: out.Key}},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if !containsCall(runtime.calls, "upsert_forward:lnk_5") || containsCall(runtime.calls, "upsert_forward:lnk_6") {
+		t.Fatalf("calls = %v", runtime.calls)
+	}
+}
+
+func TestReportCarriesLinkCountersWithTheLinkCapability(t *testing.T) {
+	ctx := context.Background()
+	cache := &ForwardCounterCache{}
+	cache.SetLinks([]agentcore.LinkCounters{{Key: protocol.NewLinkKey(5), Present: true, UpBytes: 7, CounterEpoch: 1}})
+	builder := ReportBuilder{
+		AgentID: "a1", Store: openAgentTestStore(t), Capabilities: []string{protocol.CapabilityTransitLink},
+		LinkCounters: cache.LinkSnapshot,
+	}
+	full, err := builder.Build(ctx, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := full.Report.LinkCounters; len(got) != 1 || got[0].UpBytes != 7 {
+		t.Fatalf("link counters = %+v", got)
+	}
+	if err := protocol.ValidateNodeReport(full.Report); err != nil {
+		t.Fatal(err)
+	}
+	builder.Capabilities = nil
+	if bare, err := builder.Build(ctx, BuildOptions{}); err != nil || bare.Report.LinkCounters != nil {
+		t.Fatalf("link counters without the capability: %+v, %v", bare.Report.LinkCounters, err)
 	}
 }

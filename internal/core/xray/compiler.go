@@ -225,9 +225,18 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for bind, key := range binds {
 		occupied[bind] = string(key)
 	}
-	forwards, err := agentcore.PlanForwards(snapshot.Transit, occupied, "0.0.0.0")
+	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "0.0.0.0")
 	if err != nil {
 		return agentcore.Artifact{}, err
+	}
+	// Outbound statistics are switched on only on an entry: the system policy
+	// is part of the artifact, and every other node must keep the digest it had.
+	if len(transit.LinksOut) > 0 {
+		system := config.Policy["system"].(map[string]any)
+		system["statsOutboundUplink"], system["statsOutboundDownlink"] = true, true
+	}
+	for _, link := range transit.LinksOut {
+		config.Outbounds = append(config.Outbounds, compileLinkOut(link))
 	}
 
 	if snapshot.DestinationPolicy != nil {
@@ -235,12 +244,20 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			return agentcore.Artifact{}, err
 		}
 	}
-	// Forward inbounds go after the policy: it indexes Inbounds by the
+	// Transit inbounds go after the policy: it indexes Inbounds by the
 	// position of each served listener.
-	for _, forward := range forwards {
+	for _, forward := range transit.Forwards {
 		config.Inbounds = append(config.Inbounds, compileForward(forward))
 	}
-	routeForwards(&config, forwards)
+	for _, link := range transit.LinksIn {
+		inbound, err := c.compileLinkIn(release, link)
+		if err != nil {
+			return agentcore.Artifact{}, err
+		}
+		config.Inbounds = append(config.Inbounds, inbound)
+	}
+	applyEgress(&config, served, transit.Egress)
+	routeTransit(&config, transitInboundTags(transit))
 
 	encoded, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -329,19 +346,16 @@ func compileForward(forward protocol.Forward) map[string]any {
 	return inbound
 }
 
-// routeForwards puts one rule FIRST that sends every forward straight to the
-// direct outbound. Without it, a policy rule that names no inbound (a CIDR or
-// "private" block, say) would also judge relayed connections, whose
-// destination is always the landing: a landing on a private address, the
-// usual case on a leased line, would be blocked. Forwards are never subject to
-// the destination policy; the landing enforces its own.
-func routeForwards(config *xrayConfig, forwards []protocol.Forward) {
-	if len(forwards) == 0 {
+// routeTransit puts one rule FIRST that sends every forward and incoming link
+// straight to the direct outbound. Without it, a policy rule that names no
+// inbound (a CIDR or "private" block, say) would also judge relayed traffic:
+// a forward's destination is always the landing, often on a private address on
+// a leased line, and a link's traffic was already judged by the entry, under
+// the rules of this server that PSP compiled into it. The tag stays
+// "transit-forwards" so a node that only relays forwards keeps its digest.
+func routeTransit(config *xrayConfig, tags []string) {
+	if len(tags) == 0 {
 		return
-	}
-	tags := make([]string, 0, len(forwards))
-	for _, forward := range forwards {
-		tags = append(tags, agentcore.ForwardTag(forward.Key))
 	}
 	rule := map[string]any{"type": "field", "ruleTag": "transit-forwards", "inboundTag": tags, "outboundTag": "direct"}
 	if config.Routing == nil {

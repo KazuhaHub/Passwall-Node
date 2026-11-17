@@ -128,6 +128,15 @@ func (t *Telemetry) Collect(ctx context.Context) (agentcore.Counters, error) {
 	}
 	counters := assembleCounters(listeners, roster, clientByEmail, presentListeners, presentClients, stats, online, epoch)
 	counters.Forwards = assembleForwardCounters(forwards, presentForwards, stats, epoch)
+	linksIn, linksOut, err := decodeTelemetryLinks(deployment.ConfigBody)
+	if err != nil {
+		return agentcore.Counters{}, err
+	}
+	presentLinks, err := decodeXrayLinkPresence(deployment.Artifact)
+	if err != nil {
+		return agentcore.Counters{}, err
+	}
+	counters.Links = assembleLinkCounters(linksIn, linksOut, presentLinks, stats, epoch)
 	return counters, nil
 }
 
@@ -214,6 +223,10 @@ func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.Clien
 	forwards := make(map[protocol.ForwardKey]bool)
 	for _, inbound := range config.Inbounds {
 		if forwardText, transit := strings.CutPrefix(inbound.Tag, agentcore.TransitTagPrefix); transit {
+			// An incoming link is counted by decodeXrayLinkPresence.
+			if strings.HasPrefix(forwardText, "lnk_") {
+				continue
+			}
 			forward := protocol.ForwardKey(forwardText)
 			if _, err := forward.RowID(); err != nil {
 				return nil, nil, nil, fmt.Errorf("applied Xray inbound tag %q: %w", inbound.Tag, err)
@@ -344,6 +357,90 @@ func assembleCounters(
 	}
 	sort.Slice(result.Clients, func(i, j int) bool { return result.Clients[i].Key < result.Clients[j].Key })
 	sort.Slice(result.Listeners, func(i, j int) bool { return result.Listeners[i].Key < result.Listeners[j].Key })
+	return result
+}
+
+// decodeTelemetryLinks reads the links of the applied config, by side.
+func decodeTelemetryLinks(body []byte) ([]protocol.LinkKey, []protocol.LinkKey, error) {
+	var config protocol.ConfigBody
+	if err := json.Unmarshal(body, &config); err != nil {
+		return nil, nil, fmt.Errorf("decode applied config: %w", err)
+	}
+	if config.Transit == nil {
+		return nil, nil, nil
+	}
+	var in, out []protocol.LinkKey
+	for _, link := range config.Transit.LinksIn {
+		if _, err := link.Key.RowID(); err != nil {
+			return nil, nil, fmt.Errorf("applied link key %q: %w", link.Key, err)
+		}
+		in = append(in, link.Key)
+	}
+	for _, link := range config.Transit.LinksOut {
+		if _, err := link.Key.RowID(); err != nil {
+			return nil, nil, fmt.Errorf("applied link key %q: %w", link.Key, err)
+		}
+		out = append(out, link.Key)
+	}
+	return in, out, nil
+}
+
+// decodeXrayLinkPresence finds the links the running artifact holds: an exit's
+// as inbounds, an entry's as outbounds.
+func decodeXrayLinkPresence(artifact []byte) (map[protocol.LinkKey]bool, error) {
+	var config struct {
+		Inbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"inbounds"`
+		Outbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal(artifact, &config); err != nil {
+		return nil, fmt.Errorf("decode applied Xray artifact: %w", err)
+	}
+	present := map[protocol.LinkKey]bool{}
+	for _, tags := range [][]struct {
+		Tag string `json:"tag"`
+	}{config.Inbounds, config.Outbounds} {
+		for _, entry := range tags {
+			text, ok := strings.CutPrefix(entry.Tag, agentcore.TransitTagPrefix+"lnk_")
+			if !ok {
+				continue
+			}
+			key := protocol.LinkKey("lnk_" + text)
+			if _, err := key.RowID(); err != nil {
+				return nil, fmt.Errorf("applied Xray tag %q: %w", entry.Tag, err)
+			}
+			present[key] = true
+		}
+	}
+	return present, nil
+}
+
+// assembleLinkCounters reads an exit's links from inbound statistics and an
+// entry's from outbound statistics, which the compiler switches on for an
+// entry only.
+func assembleLinkCounters(in, out []protocol.LinkKey, present map[protocol.LinkKey]bool, stats map[string]int64, epoch uint64) []agentcore.LinkCounters {
+	if len(in) == 0 && len(out) == 0 {
+		return nil
+	}
+	result := make([]agentcore.LinkCounters, 0, len(in)+len(out))
+	for _, side := range []struct {
+		keys []protocol.LinkKey
+		kind string
+	}{{in, "inbound"}, {out, "outbound"}} {
+		for _, key := range side.keys {
+			tag := agentcore.LinkTag(key)
+			result = append(result, agentcore.LinkCounters{
+				Key: key, Present: present[key],
+				UpBytes:      stats[side.kind+">>>"+tag+">>>traffic>>>uplink"],
+				DownBytes:    stats[side.kind+">>>"+tag+">>>traffic>>>downlink"],
+				CounterEpoch: epoch,
+			})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
 	return result
 }
 

@@ -176,9 +176,10 @@ func FreePort(t *testing.T) int {
 
 // Process is a child process whose output is kept for the failure message.
 type Process struct {
-	command *exec.Cmd
-	mu      sync.Mutex
-	output  bytes.Buffer
+	command  *exec.Cmd
+	mu       sync.Mutex
+	output   bytes.Buffer
+	stopOnce sync.Once
 }
 
 func (p *Process) Write(value []byte) (int, error) {
@@ -205,18 +206,25 @@ func Start(t *testing.T, binary string, arguments ...string) *Process {
 	if err := process.command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = process.command.Process.Signal(os.Interrupt)
+	t.Cleanup(func() { process.Stop(t) })
+	return process
+}
+
+// Stop ends the process and waits for it. It is safe to call more than once;
+// Start registers it as a cleanup.
+func (p *Process) Stop(t *testing.T) {
+	t.Helper()
+	p.stopOnce.Do(func() {
+		_ = p.command.Process.Signal(os.Interrupt)
 		done := make(chan struct{})
-		go func() { _ = process.command.Wait(); close(done) }()
+		go func() { _ = p.command.Wait(); close(done) }()
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			_ = process.command.Process.Kill()
+			_ = p.command.Process.Kill()
 			<-done
 		}
 	})
-	return process
 }
 
 // WriteFile writes content into a fresh temporary directory.

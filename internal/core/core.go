@@ -147,9 +147,18 @@ func (h ProcessHandle) Verifiable() bool { return h.PID > 0 && h.StartTicks > 0 
 type Counters struct {
 	Clients   []ClientCounters
 	Listeners []ListenerCounters
-	// Forwards is transit traffic. An engine that cannot attribute it leaves
-	// it empty; absence is "not measured", never zero.
+	// Forwards and Links are transit traffic. An engine that cannot
+	// attribute it leaves them empty; absence is "not measured", never zero.
 	Forwards []ForwardCounters
+	Links    []LinkCounters
+}
+
+type LinkCounters struct {
+	Key          protocol.LinkKey
+	Present      bool
+	UpBytes      int64
+	DownBytes    int64
+	CounterEpoch uint64
 }
 
 type ForwardCounters struct {

@@ -20,11 +20,12 @@ type Runtime interface {
 	RemoveClient(context.Context, protocol.ClientKey) error
 }
 
-// ForwardRuntime is implemented by a runtime that can relay transit forwards.
-// A runtime that does not implement it gets every forward rejected, so a
-// forward is never reported applied by something that opened no port.
-type ForwardRuntime interface {
-	UpsertForward(context.Context, protocol.Forward) error
+// TransitRuntime is implemented by a runtime that can relay transit: forwards
+// and links, each named by its config object key. A runtime that does not
+// implement it gets every transit object rejected, so nothing is reported
+// applied by something that opened no port.
+type TransitRuntime interface {
+	UpsertTransit(ctx context.Context, key string) error
 }
 
 // RoundScopedRuntime gives a full-config core adapter one scope per sync
