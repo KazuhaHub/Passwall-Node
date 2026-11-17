@@ -436,14 +436,16 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // They are declared together and statically, for both engines: the receiver
 // serves both paths, and the panel works out from the engine whether usage is
 // actually collected (only Xray has a webhook, so a sing-box node enforces but
-// records nothing).
+// records nothing). audit.hits.egress.v1 goes with them: the receiver reads a
+// hit's egress off the outbound tag, and which hits carry it is up to the
+// policy (audit_egress), which PSP sets only for an Xray entry with egress.
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
 	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}
 	if auditHits {
-		capabilities = append(capabilities, protocol.CapabilityAuditHits, protocol.CapabilityAuditUsage)
+		capabilities = append(capabilities, protocol.CapabilityAuditHits, protocol.CapabilityAuditHitsEgress, protocol.CapabilityAuditUsage)
 	}
 	return capabilities
 }

@@ -256,7 +256,8 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 		config.Inbounds = append(config.Inbounds, inbound)
 	}
-	applyEgress(&config, served, transit.Egress)
+	policy := snapshot.DestinationPolicy
+	applyEgress(&config, served, transit.Egress, policy != nil && policy.AuditEgress)
 	routeTransit(&config, transitInboundTags(transit))
 
 	encoded, err := json.MarshalIndent(config, "", "  ")

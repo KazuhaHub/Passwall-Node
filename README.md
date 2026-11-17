@@ -62,6 +62,18 @@ and port, with no source address. The receiver is a unix socket in the data
 directory; a node that cannot listen on one declares no capability and records
 nothing. The record is not durable: a restart loses what has not been sent.
 
+With the `audit.hits.egress.v1` capability (declared together with
+`audit.hits.v1`) a hit can also say which link the connection left through
+(`AuditHit.Egress`; empty means the server itself). The policy asks for it with
+`audit_egress`, which PSP sets only for an Xray entry that has egress bindings.
+The entry then splits its block rules per link, as it already does for allow and
+report-only rules, so a block's outbound tag (`psp-deny-<rule>~lnk_<id>`) names
+the link the connection would have left through; verdicts and rule order do not
+change. The receiver keeps the suffix only when it is one of the links of the
+running or the staged config (anything else is counted as unmatched), and rows are aggregated
+per egress. With the flag off, or without tunnels, the compiled config and the
+rows are exactly what they were. sing-box records no hits.
+
 A batch that has only counters (events dropped because a table was full, or
 that could not be attributed) and no rows is never sent on its own. The counters
 stay on the node and ride with the next batch that has rows.

@@ -5,9 +5,10 @@
 // WHAT IT KEEPS IS DELIBERATELY SMALL. Xray's event names the client's source
 // address; the receiver decodes only the fields it uses, so the address is never
 // held, and neither is anything else it was not asked for. Events are counted per
-// (hour, rule, action, subject, destination, port); a group on trial is folded
-// further, to (hour, rule, site), so that who went where never leaves this
-// package for those rows.
+// (hour, rule, action, subject, destination, port, egress); a group on trial is
+// folded further, to (hour, rule, site, egress), so that who went where never
+// leaves this package for those rows. The egress is empty unless the deployment
+// asks for it.
 //
 // Usage is counted per (hour, subject, site): the same registrable domain a trial
 // row is folded to, or "(ip)" where the destination was an address, so neither
@@ -101,6 +102,42 @@ type Stats struct {
 	Unauthorized uint64
 }
 
+// Egress is the part of a deployment the receiver needs to read the egress off
+// an outbound tag: whether the policy asks for it (audit_egress), and the links
+// this entry has, which are the only suffixes a split rule can honestly carry.
+// It is a snapshot taken with the roster, because the core that sends the event
+// is the one that deployment compiled.
+type Egress struct {
+	Enabled bool
+	Links   []protocol.LinkKey
+}
+
+// egressSet is Egress prepared for lookups. It is never mutated after it is
+// built, so a copy of the struct can be used outside the lock.
+type egressSet struct {
+	enabled bool
+	links   map[protocol.LinkKey]struct{}
+}
+
+// accepts reports whether a hit's link suffix belongs to this snapshot: always
+// when egress is not reported (the suffix is then only stripped), otherwise
+// only for one of its links.
+func (e egressSet) accepts(suffix string) bool {
+	if !e.enabled {
+		return true
+	}
+	_, ok := e.links[protocol.LinkKey(suffix)]
+	return ok
+}
+
+func newEgressSet(egress Egress) egressSet {
+	set := egressSet{enabled: egress.Enabled, links: make(map[protocol.LinkKey]struct{}, len(egress.Links))}
+	for _, link := range egress.Links {
+		set.links[link] = struct{}{}
+	}
+	return set
+}
+
 // Taken is what one Take removed from the aggregators.
 type Taken struct {
 	// Hits holds every aggregated row, trial rows included, oldest hour first.
@@ -121,12 +158,14 @@ type hitKey struct {
 	subject protocol.SubjectKey
 	dest    string
 	port    uint16
+	egress  protocol.LinkKey
 }
 
 type trialKey struct {
-	hour int64
-	rule string
-	dest string
+	hour   int64
+	rule   string
+	dest   string
+	egress protocol.LinkKey
 }
 
 type usageKey struct {
@@ -163,6 +202,8 @@ type Sink struct {
 	rules        map[string]struct{}
 	stagedUsers  map[string]protocol.SubjectKey
 	stagedRules  map[string]struct{}
+	egress       egressSet
+	stagedEgress egressSet
 	hits         map[hitKey]counted
 	trial        map[trialKey]counted
 	usage        map[usageKey]uint32
@@ -294,9 +335,9 @@ func (s *Sink) Close() error {
 
 // SetRoster replaces the snapshot events are attributed against: the email of
 // every client of the DEPLOYED roster, and the ID of every rule of the deployed
-// policy. It is a snapshot and not a delta, and the latest deployment replaces
-// the one before it.
-func (s *Sink) SetRoster(subjects map[string]protocol.SubjectKey, ruleIDs []string) {
+// policy, and the egress snapshot of that deployment. It is a snapshot and not a
+// delta, and the latest deployment replaces the one before it.
+func (s *Sink) SetRoster(subjects map[string]protocol.SubjectKey, ruleIDs []string, egress Egress) {
 	copied := make(map[string]protocol.SubjectKey, len(subjects))
 	for email, subject := range subjects {
 		copied[email] = subject
@@ -306,8 +347,8 @@ func (s *Sink) SetRoster(subjects map[string]protocol.SubjectKey, ruleIDs []stri
 		rules[id] = struct{}{}
 	}
 	s.mu.Lock()
-	s.subjects, s.rules = copied, rules
-	s.stagedUsers, s.stagedRules = nil, nil
+	s.subjects, s.rules, s.egress = copied, rules, newEgressSet(egress)
+	s.stagedUsers, s.stagedRules, s.stagedEgress = nil, nil, egressSet{}
 	s.mu.Unlock()
 }
 
@@ -317,7 +358,7 @@ func (s *Sink) SetRoster(subjects map[string]protocol.SubjectKey, ruleIDs []stri
 // deployed snapshot and this one together, the staged one first: a core sends
 // hits the moment it is up, and attributing them to the roster it replaced would
 // record them as unmatched.
-func (s *Sink) StageRoster(subjects map[string]protocol.SubjectKey, ruleIDs []string) {
+func (s *Sink) StageRoster(subjects map[string]protocol.SubjectKey, ruleIDs []string, egress Egress) {
 	copied := make(map[string]protocol.SubjectKey, len(subjects))
 	for email, subject := range subjects {
 		copied[email] = subject
@@ -327,7 +368,7 @@ func (s *Sink) StageRoster(subjects map[string]protocol.SubjectKey, ruleIDs []st
 		rules[id] = struct{}{}
 	}
 	s.mu.Lock()
-	s.stagedUsers, s.stagedRules = copied, rules
+	s.stagedUsers, s.stagedRules, s.stagedEgress = copied, rules, newEgressSet(egress)
 	s.mu.Unlock()
 }
 
@@ -335,7 +376,7 @@ func (s *Sink) StageRoster(subjects map[string]protocol.SubjectKey, ruleIDs []st
 // deployed one.
 func (s *Sink) DiscardStaged() {
 	s.mu.Lock()
-	s.stagedUsers, s.stagedRules = nil, nil
+	s.stagedUsers, s.stagedRules, s.stagedEgress = nil, nil, egressSet{}
 	s.mu.Unlock()
 }
 
@@ -434,20 +475,31 @@ func (s *Sink) countUnmatched() {
 }
 
 // lookup resolves a rule and an email against the deployed and staged
-// snapshots. Every locked section uses defer, so a panic recovered by the
-// handler wrapper can never leave the mutex held and hang Take.
-func (s *Sink) lookup(rule, email string) (subject protocol.SubjectKey, deployed, known bool) {
+// snapshots, and returns the egress snapshot of the one the rule is in: the
+// staged one first, because it is the core that was just started that sends the
+// event. While a deployment is being validated or rolled back the previous core
+// still runs, so a link suffix the staged snapshot does not know but the
+// deployed one does is read with the deployed snapshot rather than dropped.
+// Every locked section uses defer, so a panic recovered by the handler wrapper
+// can never leave the mutex held and hang Take.
+func (s *Sink) lookup(rule, email, suffix string, split bool) (subject protocol.SubjectKey, deployed, known bool, egress egressSet) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, deployed = s.rules[rule]
-	if !deployed {
-		_, deployed = s.stagedRules[rule]
+	_, inStaged := s.stagedRules[rule]
+	_, inCurrent := s.rules[rule]
+	switch {
+	case inStaged && inCurrent && split && !s.stagedEgress.accepts(suffix) && s.egress.accepts(suffix):
+		deployed, egress = true, s.egress
+	case inStaged:
+		deployed, egress = true, s.stagedEgress
+	case inCurrent:
+		deployed, egress = true, s.egress
 	}
 	subject, known = s.stagedUsers[email]
 	if !known {
 		subject, known = s.subjects[email]
 	}
-	return subject, deployed, known
+	return subject, deployed, known, egress
 }
 
 func (s *Sink) add(hit protocol.AuditHit) {
@@ -472,10 +524,12 @@ func (s *Sink) record(event webhookEvent) {
 		return
 	}
 	// A rule split for a link's listeners routes to "<outbound>~lnk_<id>": the
-	// rule is what precedes the suffix. (The suffix names the exit the
-	// traffic left through; reporting it is a separate capability.)
-	if before, _, found := strings.Cut(rule, "~"); found {
-		rule = before
+	// rule is what precedes the suffix, and the suffix names the link the
+	// connection left through (or, for a block, would have). It is reported
+	// only when the deployment asks for it.
+	suffix, split := "", false
+	if before, after, found := strings.Cut(rule, "~"); found {
+		rule, suffix, split = before, after, true
 	}
 	dest, port, ok := splitDestination(event.Destination)
 	if !ok {
@@ -498,12 +552,22 @@ func (s *Sink) record(event webhookEvent) {
 	// The lookups are the only thing done under the lock: validation is
 	// computed outside it, because Xray holds a goroutine per event until this
 	// returns and every event contends for the same mutex.
-	subject, deployed, known := s.lookup(rule, event.Email)
+	subject, deployed, known, egress := s.lookup(rule, event.Email, suffix, split)
 	if !deployed || !known {
 		// A trial row names no one, but an event from an account this node does
 		// not hold is not one of the group's either.
 		s.countUnmatched()
 		return
+	}
+	if egress.enabled && split {
+		// A suffix this entry has no link for is not one this deployment
+		// compiled: it is not trusted into a row.
+		link := protocol.LinkKey(suffix)
+		if _, ok := egress.links[link]; !ok {
+			s.countUnmatched()
+			return
+		}
+		hit.Egress = link
 	}
 	if !trial {
 		hit.Subject = subject
@@ -527,7 +591,7 @@ func (s *Sink) recordUsage(event usageEvent) {
 		return
 	}
 	row := protocol.AuditUsage{Hour: now.Truncate(time.Hour).UnixMilli(), Site: registrable(dest), Count: 1}
-	subject, _, known := s.lookup("", event.Email)
+	subject, _, known, _ := s.lookup("", event.Email, "", false)
 	if !known {
 		s.countUnmatched()
 		return
@@ -563,7 +627,7 @@ func (s *Sink) addUsageLocked(row protocol.AuditUsage) {
 // table is dropped and its events counted; an existing key always counts.
 func (s *Sink) addLocked(hit protocol.AuditHit) {
 	if isTrial(hit) {
-		key := trialKey{hit.Hour, hit.RuleID, hit.Dest}
+		key := trialKey{hit.Hour, hit.RuleID, hit.Dest, hit.Egress}
 		entry, exists := s.trial[key]
 		if !exists && len(s.trial) >= s.maxTrialKeys {
 			s.droppedTrial += uint64(hit.Count)
@@ -572,7 +636,7 @@ func (s *Sink) addLocked(hit protocol.AuditHit) {
 		s.trial[key] = merge(entry, hit)
 		return
 	}
-	key := hitKey{hit.Hour, hit.RuleID, hit.Action, hit.Subject, hit.Dest, hit.Port}
+	key := hitKey{hit.Hour, hit.RuleID, hit.Action, hit.Subject, hit.Dest, hit.Port, hit.Egress}
 	entry, exists := s.hits[key]
 	if !exists && len(s.hits) >= s.maxHitKeys {
 		s.droppedHits += uint64(hit.Count)
@@ -616,13 +680,13 @@ func (s *Sink) Take() Taken {
 	taken.Hits = make([]protocol.AuditHit, 0, len(hits)+len(trial))
 	for key, entry := range hits {
 		taken.Hits = append(taken.Hits, protocol.AuditHit{
-			Hour: key.hour, RuleID: key.rule, Action: key.action, Subject: key.subject, Dest: key.dest, Port: key.port,
+			Hour: key.hour, RuleID: key.rule, Action: key.action, Subject: key.subject, Dest: key.dest, Port: key.port, Egress: key.egress,
 			Count: entry.count, FirstMS: entry.firstMS, LastMS: entry.lastMS,
 		})
 	}
 	for key, entry := range trial {
 		taken.Hits = append(taken.Hits, protocol.AuditHit{
-			Hour: key.hour, RuleID: key.rule, Action: protocol.AuditActionObserve, Dest: key.dest,
+			Hour: key.hour, RuleID: key.rule, Action: protocol.AuditActionObserve, Dest: key.dest, Egress: key.egress,
 			Count: entry.count, FirstMS: entry.firstMS, LastMS: entry.lastMS,
 		})
 	}
@@ -666,8 +730,10 @@ func SortHits(hits []protocol.AuditHit) {
 			return a.Subject < b.Subject
 		case a.Dest != b.Dest:
 			return a.Dest < b.Dest
+		case a.Port != b.Port:
+			return a.Port < b.Port
 		}
-		return a.Port < b.Port
+		return a.Egress < b.Egress
 	})
 }
 

@@ -168,7 +168,8 @@ func linkPair(protocolName string, exitPort int, decoy string) (protocol.LinkIn,
 // client it checks that:
 //   - TCP and UDP reach the destination through the link;
 //   - the policy still blocks on the entry for a listener that leaves through
-//     a link (the rule split keeps the verdict);
+//     a link (the rule split keeps the verdict), with an Xray entry's blocks
+//     split per link as well (audit_egress);
 //   - with the exit stopped, the connection fails rather than leaving from
 //     the entry: there is no fallback to the entry's own address.
 func TestLinkMatrix(t *testing.T) {
@@ -209,9 +210,17 @@ func runPair(t *testing.T, entry, exit engine, linkProtocol, client string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entrySnapshot := policylive.Snapshot(&protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
+	// An Xray entry runs with audit_egress on, as PSP sets it for one with
+	// egress bindings: the block is then split per link, and must still block.
+	// sing-box records no hits, so it never gets the flag.
+	auditEgress := entry.name == "xray"
+	policy := &protocol.DestinationPolicy{Rules: []protocol.DestinationRule{
 		{ID: "p1", Action: protocol.RuleBlock, Ports: fmt.Sprint(blocked.Port)},
-	}}, spec)
+	}}
+	if auditEgress {
+		policy.Collect, policy.AuditEgress = protocol.CollectHits, true
+	}
+	entrySnapshot := policylive.Snapshot(policy, spec)
 	entrySnapshot.Transit = &protocol.Transit{
 		LinksOut: []protocol.LinkOut{out},
 		Egress:   []protocol.EgressBinding{{Listener: protocol.NewListenerKey(1), Link: out.Key}},

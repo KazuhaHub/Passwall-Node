@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent/auditsink"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/install"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
@@ -23,16 +24,18 @@ type rosterRecorder struct {
 	events         []string
 	deploysAtStage []int
 	staged         map[string]protocol.SubjectKey
+	stagedEgress   auditsink.Egress
+	egress         auditsink.Egress
 	supervisor     *supervisorStub
 	users          map[string]protocol.SubjectKey
 	rules          []string
 }
 
-func (r *rosterRecorder) StageRoster(users map[string]protocol.SubjectKey, _ []string) {
+func (r *rosterRecorder) StageRoster(users map[string]protocol.SubjectKey, _ []string, egress auditsink.Egress) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, "stage")
-	r.staged = users
+	r.staged, r.stagedEgress = users, egress
 	if r.supervisor != nil {
 		r.deploysAtStage = append(r.deploysAtStage, r.supervisor.deployCalls)
 	}
@@ -44,24 +47,28 @@ func (r *rosterRecorder) DiscardStaged() {
 	r.events = append(r.events, "discard")
 }
 
-func (r *rosterRecorder) SetRoster(users map[string]protocol.SubjectKey, ruleIDs []string) {
+func (r *rosterRecorder) SetRoster(users map[string]protocol.SubjectKey, ruleIDs []string, egress auditsink.Egress) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, "set")
 	r.calls++
-	r.users = users
+	r.users, r.egress = users, egress
 	r.rules = append([]string(nil), ruleIDs...)
 	sort.Strings(r.rules)
 }
 
 func auditFixture(t *testing.T, recorder *rosterRecorder) *policyFixture {
 	t.Helper()
-	store := openRuntimeStore(t)
-	policy := &protocol.DestinationPolicy{Collect: protocol.CollectHits, Rules: []protocol.DestinationRule{
+	return auditFixtureWith(t, recorder, protocol.ConfigBody{Policy: &protocol.DestinationPolicy{Collect: protocol.CollectHits, Rules: []protocol.DestinationRule{
 		{ID: "p1", Action: protocol.RuleBlock, Ports: "25"},
 		{ID: "p2", Action: protocol.RuleObserve, Ports: "26"},
-	}}
-	saveVersioned(t, store, protocol.StreamConfig, 1, protocol.ConfigBody{Policy: policy})
+	}}})
+}
+
+func auditFixtureWith(t *testing.T, recorder *rosterRecorder, body protocol.ConfigBody) *policyFixture {
+	t.Helper()
+	store := openRuntimeStore(t)
+	saveVersioned(t, store, protocol.StreamConfig, 1, body)
 	disabled := idleClient(2, time.Time{})
 	disabled.Enabled = false
 	saveVersioned(t, store, protocol.StreamRoster, 1, protocol.RosterBody{Clients: []protocol.Client{idleClient(1, time.Time{}), disabled}})
@@ -201,5 +208,46 @@ func TestTheCandidateRosterIsStagedBeforeTheDeploymentAndCommittedOrDiscardedAft
 	}
 	if got := fmt.Sprint(failing.events); got != "[stage discard]" || failing.calls != 0 {
 		t.Fatalf("events = %v, commits = %d: a failed deployment must discard what it staged", failing.events, failing.calls)
+	}
+}
+
+// The receiver reads a hit's egress off the outbound tag only when the deployed
+// policy asks for it, and only for the links the deployed config has: the
+// snapshot carries both, for the staged candidate and the confirmed deployment.
+func TestTheEgressSnapshotIsHandedToTheAuditReceiverWithTheRoster(t *testing.T) {
+	links := []protocol.LinkOut{{Key: protocol.NewLinkKey(7)}, {Key: protocol.NewLinkKey(3)}}
+	for name, test := range map[string]struct {
+		body protocol.ConfigBody
+		want auditsink.Egress
+	}{
+		"asked, with links": {
+			protocol.ConfigBody{
+				Policy:  &protocol.DestinationPolicy{Collect: protocol.CollectHits, AuditEgress: true, Rules: []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, Ports: "25"}}},
+				Transit: &protocol.Transit{LinksOut: links},
+			},
+			auditsink.Egress{Enabled: true, Links: []protocol.LinkKey{"lnk_7", "lnk_3"}},
+		},
+		"not asked, with links": {
+			protocol.ConfigBody{
+				Policy:  &protocol.DestinationPolicy{Collect: protocol.CollectHits, Rules: []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, Ports: "25"}}},
+				Transit: &protocol.Transit{LinksOut: links},
+			},
+			auditsink.Egress{Links: []protocol.LinkKey{"lnk_7", "lnk_3"}},
+		},
+		"asked, no transit": {
+			protocol.ConfigBody{Policy: &protocol.DestinationPolicy{Collect: protocol.CollectHits, AuditEgress: true, Rules: []protocol.DestinationRule{{ID: "p1", Action: protocol.RuleBlock, Ports: "25"}}}},
+			auditsink.Egress{Enabled: true},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := &rosterRecorder{}
+			fixture := auditFixtureWith(t, recorder, test.body)
+			if err := fixture.converge(t); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(recorder.stagedEgress, test.want) || !reflect.DeepEqual(recorder.egress, test.want) {
+				t.Fatalf("staged = %+v, deployed = %+v, want %+v", recorder.stagedEgress, recorder.egress, test.want)
+			}
+		})
 	}
 }

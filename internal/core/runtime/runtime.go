@@ -19,6 +19,7 @@ import (
 
 	"github.com/KazuhaHub/passwall-node/v4/corecatalog"
 	"github.com/KazuhaHub/passwall-node/v4/internal/agent"
+	"github.com/KazuhaHub/passwall-node/v4/internal/agent/auditsink"
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/install"
 	"github.com/KazuhaHub/passwall-node/v4/internal/core/process"
@@ -40,9 +41,9 @@ type AuditRoster interface {
 	// snapshot, so that hits from the new core are attributed from its first
 	// moment; DiscardStaged when that deployment failed; SetRoster once a
 	// deployment is confirmed.
-	StageRoster(users map[string]protocol.SubjectKey, ruleIDs []string)
+	StageRoster(users map[string]protocol.SubjectKey, ruleIDs []string, egress auditsink.Egress)
 	DiscardStaged()
-	SetRoster(users map[string]protocol.SubjectKey, ruleIDs []string)
+	SetRoster(users map[string]protocol.SubjectKey, ruleIDs []string, egress auditsink.Egress)
 }
 
 type CompilerFactory func(protocol.CoreSelection) (agentcore.Compiler, error)
@@ -179,8 +180,8 @@ func (r *Runtime) publishAudit(config *protocol.ConfigBody, roster *protocol.Ros
 	if r.audit == nil {
 		return
 	}
-	users, ruleIDs := auditSnapshot(config, roster)
-	r.audit.SetRoster(users, ruleIDs)
+	users, ruleIDs, egress := auditSnapshot(config, roster)
+	r.audit.SetRoster(users, ruleIDs, egress)
 }
 
 // stageAudit hands the receiver the snapshot of a deployment about to start.
@@ -188,11 +189,13 @@ func (r *Runtime) stageAudit(config *protocol.ConfigBody, roster *protocol.Roste
 	if r.audit == nil {
 		return
 	}
-	users, ruleIDs := auditSnapshot(config, roster)
-	r.audit.StageRoster(users, ruleIDs)
+	users, ruleIDs, egress := auditSnapshot(config, roster)
+	r.audit.StageRoster(users, ruleIDs, egress)
 }
 
-func auditSnapshot(config *protocol.ConfigBody, roster *protocol.RosterBody) (map[string]protocol.SubjectKey, []string) {
+// auditSnapshot also carries the egress the deployment compiles: whether hits
+// are to name it, and the links an outbound-tag suffix may name.
+func auditSnapshot(config *protocol.ConfigBody, roster *protocol.RosterBody) (map[string]protocol.SubjectKey, []string, auditsink.Egress) {
 	users := map[string]protocol.SubjectKey{}
 	if roster != nil {
 		for _, client := range roster.Clients {
@@ -205,7 +208,16 @@ func auditSnapshot(config *protocol.ConfigBody, roster *protocol.RosterBody) (ma
 			ruleIDs = append(ruleIDs, rule.ID)
 		}
 	}
-	return users, ruleIDs
+	var egress auditsink.Egress
+	if config != nil {
+		egress.Enabled = config.Policy != nil && config.Policy.AuditEgress
+		if config.Transit != nil {
+			for _, link := range config.Transit.LinksOut {
+				egress.Links = append(egress.Links, link.Key)
+			}
+		}
+	}
+	return users, ruleIDs, egress
 }
 
 func defaultCompilerFactory(selection protocol.CoreSelection) (agentcore.Compiler, error) {

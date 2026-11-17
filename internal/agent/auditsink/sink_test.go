@@ -54,7 +54,7 @@ func newTestSink(t *testing.T, mutate func(*Options)) *Sink {
 	}
 	sink.SetRoster(map[string]protocol.SubjectKey{
 		"u5@x": "usr_5", "u6@x": "usr_6",
-	}, []string{"p1", "p2", "s1", "g9"})
+	}, []string{"p1", "p2", "s1", "g9"}, Egress{})
 	return sink
 }
 
@@ -400,7 +400,7 @@ func TestEventsThatCannotBeAttributedAreUnmatched(t *testing.T) {
 
 func TestTheRosterSnapshotIsReplacedNotMerged(t *testing.T) {
 	sink := startTestSink(t, nil)
-	sink.SetRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p5"})
+	sink.SetRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p5"}, Egress{})
 	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1")) // old user, old rule
 	sink.hit(t, event("u9@x", "a.example:443", "psp-deny-p5"))
 	taken := sink.Take()
@@ -648,7 +648,7 @@ func TestAStagedRosterIsAcceptedBesideTheDeployedOneUntilCommittedOrDiscarded(t 
 		t.Fatalf("before staging: %+v", taken)
 	}
 
-	sink.StageRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p9"})
+	sink.StageRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p9"}, Egress{})
 	sink.hit(t, newUser)
 	sink.hit(t, oldUser) // the union: the deployed roster still counts
 	taken := sink.Take()
@@ -665,8 +665,8 @@ func TestAStagedRosterIsAcceptedBesideTheDeployedOneUntilCommittedOrDiscarded(t 
 	}
 
 	// A confirmed one replaces it, and the old one no longer counts.
-	sink.StageRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p9"})
-	sink.SetRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p9"})
+	sink.StageRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p9"}, Egress{})
+	sink.SetRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, []string{"p9"}, Egress{})
 	sink.hit(t, newUser)
 	sink.hit(t, oldUser)
 	if taken := sink.Take(); len(taken.Hits) != 1 || taken.Hits[0].RuleID != "p9" || taken.Unmatched != 1 {
@@ -703,5 +703,203 @@ func TestAHandlerPanicMakesServeReturnAnError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve kept running after a handler panic")
+	}
+}
+
+// egressSink is a running receiver whose deployed snapshot asks for egress and
+// has two links.
+func egressSink(t *testing.T) *Sink {
+	t.Helper()
+	sink := startTestSink(t, nil)
+	sink.SetRoster(map[string]protocol.SubjectKey{"u5@x": "usr_5", "u6@x": "usr_6"}, []string{"p1", "p2", "s1", "g9"},
+		Egress{Enabled: true, Links: []protocol.LinkKey{protocol.NewLinkKey(4), protocol.NewLinkKey(7)}})
+	return sink
+}
+
+// Without the policy's audit_egress the receiver behaves as it always did: the
+// suffix is stripped and nothing of it reaches a row, so a batch is
+// byte-identical to one from before the field existed.
+func TestWithoutAuditEgressTheSuffixIsStrippedAndNoRowCarriesIt(t *testing.T) {
+	sink := startTestSink(t, nil)
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_4"))
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1"))
+	sink.hit(t, event("u6@x", "w.example:443", "psp-watch-p2~lnk_9"))
+	sink.hit(t, event("u6@x", "x.shop.example.com:443", "psp-watch-g9~lnk_4"))
+	taken := sink.Take()
+	if taken.Unmatched != 0 || len(taken.Hits) != 3 {
+		t.Fatalf("taken = %+v", taken)
+	}
+	encoded, err := json.Marshal(taken.Hits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("egress")) || bytes.Contains(encoded, []byte("lnk_")) {
+		t.Fatalf("the batch carries an egress with the flag off: %s", encoded)
+	}
+	for _, hit := range taken.Hits {
+		if hit.RuleID == "p1" && hit.Count != 2 {
+			t.Fatalf("the split and unsplit block did not aggregate into one row: %+v", hit)
+		}
+	}
+}
+
+func TestWithAuditEgressRowsSplitByTheLinkForBlocksAndObservesAlike(t *testing.T) {
+	sink := egressSink(t)
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_4"))
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_4"))
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_7"))
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1"))
+	sink.hit(t, event("u6@x", "w.example:443", "psp-watch-p2~lnk_7"))
+	sink.hit(t, event("u6@x", "w.example:443", "psp-watch-p2"))
+	taken := sink.Take()
+	if taken.Unmatched != 0 {
+		t.Fatalf("unmatched = %d", taken.Unmatched)
+	}
+	type row struct {
+		rule, action string
+		egress       protocol.LinkKey
+	}
+	got := map[row]uint32{}
+	for _, hit := range taken.Hits {
+		got[row{hit.RuleID, hit.Action, hit.Egress}] += hit.Count
+	}
+	want := map[row]uint32{
+		{"p1", protocol.AuditActionBlock, "lnk_4"}:   2,
+		{"p1", protocol.AuditActionBlock, "lnk_7"}:   1,
+		{"p1", protocol.AuditActionBlock, ""}:        1,
+		{"p2", protocol.AuditActionObserve, "lnk_7"}: 1,
+		{"p2", protocol.AuditActionObserve, ""}:      1,
+	}
+	if len(taken.Hits) != len(want) || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("rows = %+v, want %v", taken.Hits, want)
+	}
+}
+
+func TestAnUnknownLinkSuffixIsUnmatchedWhenEgressIsOn(t *testing.T) {
+	sink := egressSink(t)
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_9"))
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~"))
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~garbage"))
+	sink.hit(t, event("u6@x", "w.example:443", "psp-watch-p2~lnk_9"))
+	taken := sink.Take()
+	if len(taken.Hits) != 0 || taken.Unmatched != 4 {
+		t.Fatalf("taken = %+v, want no rows and 4 unmatched", taken)
+	}
+}
+
+func TestTrialRowsAreKeyedByEgressToo(t *testing.T) {
+	sink := egressSink(t)
+	sink.hit(t, event("u5@x", "www.shop.example.com:443", "psp-watch-g9~lnk_4"))
+	sink.hit(t, event("u6@x", "cdn.shop.example.com:443", "psp-watch-g9~lnk_4"))
+	sink.hit(t, event("u6@x", "cdn.shop.example.com:443", "psp-watch-g9~lnk_7"))
+	sink.hit(t, event("u6@x", "cdn.shop.example.com:443", "psp-watch-g9"))
+	taken := sink.Take()
+	got := map[protocol.LinkKey]uint32{}
+	for _, hit := range taken.Hits {
+		if hit.Subject != "" || hit.Port != 0 || hit.Dest != "example.com" {
+			t.Fatalf("a trial row keeps per-person data: %+v", hit)
+		}
+		got[hit.Egress] += hit.Count
+	}
+	if len(taken.Hits) != 3 || got["lnk_4"] != 2 || got["lnk_7"] != 1 || got[""] != 1 {
+		t.Fatalf("trial rows = %+v", taken.Hits)
+	}
+}
+
+// The snapshot a rule is found in decides: a staged deployment that asks for
+// egress reads it off the new core's events, and a discarded one leaves the
+// deployed snapshot, whichever it was.
+func TestStagedAndDeployedSnapshotsEachCarryTheirOwnEgress(t *testing.T) {
+	sink := startTestSink(t, nil) // deployed: egress off
+	users := map[string]protocol.SubjectKey{"u5@x": "usr_5", "u9@x": "usr_9"}
+	sink.StageRoster(users, []string{"p9"}, Egress{Enabled: true, Links: []protocol.LinkKey{protocol.NewLinkKey(3)}})
+	sink.hit(t, event("u9@x", "a.example:443", "psp-deny-p9~lnk_3")) // staged rule: egress on
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_3")) // deployed rule: egress off
+	sink.hit(t, event("u9@x", "a.example:443", "psp-deny-p9~lnk_4")) // not a staged link
+	taken := sink.Take()
+	if taken.Unmatched != 1 || len(taken.Hits) != 2 {
+		t.Fatalf("staged: %+v", taken)
+	}
+	for _, hit := range taken.Hits {
+		if (hit.RuleID == "p9") != (hit.Egress == "lnk_3") {
+			t.Fatalf("hit = %+v", hit)
+		}
+	}
+
+	sink.DiscardStaged()
+	sink.hit(t, event("u9@x", "a.example:443", "psp-deny-p9~lnk_3"))
+	if taken := sink.Take(); len(taken.Hits) != 0 || taken.Unmatched != 1 {
+		t.Fatalf("after discard: %+v", taken)
+	}
+
+	// Deployed with egress on, then replaced by a deployment with it off.
+	sink.SetRoster(users, []string{"p1"}, Egress{Enabled: true, Links: []protocol.LinkKey{protocol.NewLinkKey(3)}})
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_3"))
+	sink.SetRoster(users, []string{"p1"}, Egress{})
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_3"))
+	taken = sink.Take()
+	if len(taken.Hits) != 2 {
+		t.Fatalf("replaced: %+v", taken)
+	}
+	for _, hit := range taken.Hits {
+		if hit.Egress == "" && hit.Count != 1 || hit.Egress != "" && hit.Egress != "lnk_3" {
+			t.Fatalf("replaced: %+v", taken.Hits)
+		}
+	}
+}
+
+// While a new deployment is validated or rolled back the previous core still
+// runs. A rule both rosters hold, reached through a link only the deployed one
+// has, keeps the deployed link instead of being dropped.
+func TestTheRunningCoresLinkIsKeptWhileANewDeploymentIsStaged(t *testing.T) {
+	sink := startTestSink(t, nil)
+	users := map[string]protocol.SubjectKey{"u5@x": "usr_5"}
+	sink.SetRoster(users, []string{"p1"}, Egress{Enabled: true, Links: []protocol.LinkKey{protocol.NewLinkKey(3)}})
+	sink.StageRoster(users, []string{"p1"}, Egress{Enabled: true, Links: []protocol.LinkKey{protocol.NewLinkKey(4)}})
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_3")) // previous core
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_4")) // new core
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_9")) // neither
+	taken := sink.Take()
+	if taken.Unmatched != 1 || len(taken.Hits) != 2 {
+		t.Fatalf("taken = %+v", taken)
+	}
+	links := map[protocol.LinkKey]bool{}
+	for _, hit := range taken.Hits {
+		links[hit.Egress] = true
+	}
+	if !links["lnk_3"] || !links["lnk_4"] {
+		t.Fatalf("hits = %+v", taken.Hits)
+	}
+}
+
+func TestEgressRowsSurviveAReturnAndMakeAReportThatValidates(t *testing.T) {
+	sink := egressSink(t)
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_4"))
+	sink.hit(t, event("u6@x", "x.shop.example.com:443", "psp-watch-g9~lnk_7"))
+	taken := sink.Take()
+	sink.Return(taken)
+	sink.hit(t, event("u5@x", "a.example:443", "psp-deny-p1~lnk_4"))
+	again := sink.Take()
+	if len(again.Hits) != 2 {
+		t.Fatalf("rows = %+v", again.Hits)
+	}
+	for _, hit := range again.Hits {
+		if hit.Egress == "" || (hit.RuleID == "p1" && hit.Count != 2) {
+			t.Fatalf("hit = %+v", hit)
+		}
+	}
+	report := protocol.NodeReport{
+		AgentID: "a1", AgentVersion: "test", Capabilities: []string{protocol.CapabilityAuditHits, protocol.CapabilityAuditHitsEgress},
+		Audit: &protocol.AuditObservation{BatchID: strings.Repeat("a", 32), Hits: again.Hits},
+		Have: map[string]protocol.StreamState{
+			protocol.StreamConfig: {}, protocol.StreamRoster: {}, protocol.StreamDirectives: {},
+		},
+	}
+	if err := protocol.ValidateNodeReport(report); err != nil {
+		t.Fatalf("report with the capability: %v", err)
+	}
+	report.Capabilities = []string{protocol.CapabilityAuditHits}
+	if err := protocol.ValidateNodeReport(report); err == nil {
+		t.Fatal("a report with egress and without the capability must not validate")
 	}
 }

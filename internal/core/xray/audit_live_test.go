@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/v4/internal/agent/auditsink"
+	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/testutil/policylive"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
@@ -50,7 +52,7 @@ func startLiveAuditServer(t *testing.T, binary, version string, policy *protocol
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink.SetRoster(map[string]protocol.SubjectKey{policylive.Username: policylive.Subject}, ruleIDs(policy))
+	sink.SetRoster(map[string]protocol.SubjectKey{policylive.Username: policylive.Subject}, ruleIDs(policy), auditsink.Egress{})
 	if err := sink.Listen(); err != nil {
 		t.Fatal(err)
 	}
@@ -442,6 +444,160 @@ func TestRealXrayCountsBulkConnectionsWithNothingUnmatched(t *testing.T) {
 			}
 			if counted != uint32(total) || len(totals) != 1 || totals[string(policylive.Subject)+" bulk.example"] != uint32(total) {
 				t.Fatalf("counted %d in %v, want %d for bulk.example", counted, totals, total)
+			}
+		})
+	}
+}
+
+// tapAudit puts a listener on the socket path Xray is configured with and
+// forwards every request to the receiver's own socket, logging the first body
+// it sees. The receiver decodes only the fields it uses, so this is the one way
+// to learn what Xray really posts (an inbound tag among it, say).
+func tapAudit(t *testing.T, tapPath, sinkPath string) {
+	t.Helper()
+	listener, err := net.Listen("unix", tapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sinkPath)
+		},
+	}}
+	var logged sync.Once
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		logged.Do(func() { t.Logf("raw webhook payload (first event, %s): %s", r.URL.Path, body) })
+		forward, err := http.NewRequest(r.Method, "http://audit"+r.URL.Path, strings.NewReader(string(body)))
+		if err != nil {
+			http.Error(w, "bad", http.StatusBadGateway)
+			return
+		}
+		forward.Header = r.Header.Clone()
+		response, err := upstream.Do(forward)
+		if err != nil {
+			http.Error(w, "bad", http.StatusBadGateway)
+			return
+		}
+		response.Body.Close()
+		w.WriteHeader(response.StatusCode)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+}
+
+// An entry with a link to a real exit, one listener bound to it and one not,
+// under a block rule and a report-only rule that apply to both: with
+// audit_egress on, a real Xray's hits through the bound listener carry the link
+// and the other's carry none. This is what the receiver reads off the outbound
+// tag of the split rule, end to end on every catalog version.
+func TestRealXrayHitsCarryTheEgressOfTheListenerThatMadeThem(t *testing.T) {
+	for _, server := range liveAuditVersions(t) {
+		t.Run(server.name, func(t *testing.T) {
+			client, ok := os.LookupEnv("PSP_TEST_XRAY_CLIENT_BIN")
+			if !ok {
+				t.Skip("set PSP_TEST_XRAY_CLIENT_BIN to an Xray binary to use as the client")
+			}
+			directory, err := os.MkdirTemp("", "ae")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(directory) })
+			sinkPath := filepath.Join(directory, "runtime", "audit.sock")
+			tapPath := filepath.Join(directory, "tap.sock")
+			link := protocol.NewLinkKey(7)
+			sink, err := auditsink.New(auditsink.Options{Path: sinkPath, Token: auditLiveToken})
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := &protocol.DestinationPolicy{Collect: protocol.CollectHits, AuditEgress: true, Rules: []protocol.DestinationRule{
+				{ID: "p1", Action: protocol.RuleBlock, Domains: []string{"full:blocked.example"}},
+				{ID: "p2", Action: protocol.RuleObserve, Domains: []string{"full:watch.example"}},
+			}}
+			sink.SetRoster(map[string]protocol.SubjectKey{policylive.Username: policylive.Subject}, ruleIDs(policy),
+				auditsink.Egress{Enabled: true, Links: []protocol.LinkKey{link}})
+			if err := sink.Listen(); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { _ = sink.Serve(ctx); close(done) }()
+			t.Cleanup(func() { cancel(); <-done })
+			tapAudit(t, tapPath, sinkPath)
+
+			hosts := []string{"watch.example", "blocked.example"}
+			// The exit: a link-in on loopback that routes straight out.
+			exitPort := policylive.FreePort(t)
+			exitArtifact, err := (Compiler{CoreVersion: server.version, APIListen: fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t))}).Compile(
+				context.Background(), agentcore.Snapshot{Now: time.Now(), Transit: &protocol.Transit{LinksIn: []protocol.LinkIn{{
+					Key: link, Listen: "127.0.0.1", Port: exitPort, Protocol: protocol.LinkProtocolSS2022,
+					SS: &protocol.LinkSS{Method: "2022-blake3-aes-128-gcm", Password: testSSKey},
+				}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exit := policylive.Start(t, server.binary, "run", "-config", policylive.WriteFile(t, "exit.json", allowLoopback(t, exitArtifact.Config, hosts...)))
+			policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", exitPort), exit)
+
+			// The entry: lst_1 leaves through the link, lst_2 from the server itself.
+			boundPort, localPort := policylive.FreePort(t), policylive.FreePort(t)
+			listener := func(port int) []byte {
+				spec, err := json.Marshal(listenerSpec{
+					Enabled: true, Listen: "127.0.0.1", Port: port, Protocol: "shadowsocks",
+					Settings: fmt.Sprintf(`{"method":"2022-blake3-aes-128-gcm","password":%q,"network":"tcp,udp"}`, policylive.ServerKey),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return spec
+			}
+			snapshot := policylive.Snapshot(policy, listener(boundPort))
+			snapshot.Listeners = append(snapshot.Listeners, protocol.Listener{Key: protocol.NewListenerKey(2), Config: listener(localPort)})
+			snapshot.Clients[0].Listeners = []protocol.ListenerKey{protocol.NewListenerKey(1), protocol.NewListenerKey(2)}
+			snapshot.Transit = &protocol.Transit{
+				LinksOut: []protocol.LinkOut{{Key: link, Address: "127.0.0.1", Port: exitPort, Protocol: protocol.LinkProtocolSS2022,
+					SS: &protocol.LinkSS{Method: "2022-blake3-aes-128-gcm", Password: testSSKey}}},
+				Egress: []protocol.EgressBinding{{Listener: protocol.NewListenerKey(1), Link: link}},
+			}
+			artifact, err := (Compiler{
+				CoreVersion: server.version, APIListen: fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t)),
+				AuditSocket: tapPath, AuditToken: auditLiveToken,
+			}).Compile(context.Background(), snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := policylive.Start(t, server.binary, "run", "-config", policylive.WriteFile(t, "entry.json", allowLoopback(t, artifact.Config, hosts...)))
+			policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", boundPort), entry)
+			policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", localPort), entry)
+			sinkPort := policylive.NewSink(t)
+
+			for _, port := range []int{boundPort, localPort} {
+				socks := policylive.StartSOCKSClient(t, client, port)
+				for _, host := range []string{"blocked.example", "watch.example"} {
+					_ = policylive.SOCKSSend(t, socks, host, sinkPort, httpRequest(host))
+				}
+			}
+			rows := (&liveAuditServer{sink: sink}).collect(4)
+			time.Sleep(500 * time.Millisecond)
+			rows = append(rows, sink.Take().Hits...)
+
+			type row struct {
+				rule   string
+				egress protocol.LinkKey
+			}
+			got := map[row]uint32{}
+			for _, hit := range rows {
+				if err := protocol.ValidateAuditHit(hit); err != nil {
+					t.Fatalf("row %+v does not validate: %v", hit, err)
+				}
+				got[row{hit.RuleID, hit.Egress}] += hit.Count
+			}
+			want := map[row]uint32{{"p1", link}: 1, {"p2", link}: 1, {"p1", ""}: 1, {"p2", ""}: 1}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("rows = %+v, want %v\nentry:\n%s", rows, want, entry.Output())
+			}
+			if lost := sink.Take(); lost.Unmatched != 0 || sink.Stats().Unauthorized != 0 {
+				t.Errorf("Unmatched = %d, unauthorized = %d, want 0", lost.Unmatched, sink.Stats().Unauthorized)
 			}
 		})
 	}

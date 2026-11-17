@@ -96,19 +96,27 @@ func compileLinkOut(link protocol.LinkOut) map[string]any {
 // so it meets exactly one copy, at the position the original rule held:
 // evaluation order and verdicts are unchanged.
 //
-// Blocking rules need no split: a block is a block wherever the listener
-// leaves from. Rules on transit inbounds are not the policy's and are left as
-// they are.
+// Blocking rules need no split for the verdict: a block is a block wherever
+// the listener leaves from. They are split only when splitBlocks is set, which
+// is when the audit receiver is to report the egress of a block as well: the
+// local group keeps the rule, each link group gets a copy that routes to its
+// own blackhole "psp-deny-<rule>~lnk_<id>", so the hit's outbound tag names the
+// link the connection would have left through. The copies sit exactly where the
+// original did and between them cover the same listeners, so the verdict and
+// its order are unchanged; with the flag off (or no egress) the output is the
+// one it always was. Rules on transit inbounds are not the policy's and are
+// left as they are.
 //
 // A report-only copy routes to "psp-watch-<rule>~lnk_<id>", a freedom outbound
 // whose dialer is the link, so the audit receiver still reads the rule from the
 // outbound tag and the connection still leaves through the link. Copies take
 // the rule tag with the same suffix, because Xray refuses a repeated rule tag.
+// A rule split into a domain half and an address half shares one such outbound.
 //
 // After the policy each link group ends with a catch-all to its link: a
 // connection no rule matched leaves the way its listener leaves, as an
 // unmatched local connection leaves through direct.
-func applyEgress(config *xrayConfig, served []protocol.ListenerKey, egress map[protocol.ListenerKey]protocol.LinkKey) {
+func applyEgress(config *xrayConfig, served []protocol.ListenerKey, egress map[protocol.ListenerKey]protocol.LinkKey, splitBlocks bool) {
 	if len(egress) == 0 {
 		return
 	}
@@ -129,7 +137,7 @@ func applyEgress(config *xrayConfig, served []protocol.ListenerKey, egress map[p
 	for _, link := range groups.Order {
 		linkTags[link] = tagsOf(groups.Links[link])
 	}
-	watchOutbounds := map[string]bool{}
+	splitOutbounds := map[string]bool{}
 
 	var rules []map[string]any
 	if config.Routing != nil {
@@ -144,7 +152,8 @@ func applyEgress(config *xrayConfig, served []protocol.ListenerKey, egress map[p
 			continue
 		}
 		watch := strings.HasPrefix(target, "psp-watch-")
-		if target != "direct" && !watch {
+		deny := splitBlocks && strings.HasPrefix(target, "psp-deny-")
+		if target != "direct" && !watch && !deny {
 			out = append(out, rule)
 			continue
 		}
@@ -167,14 +176,18 @@ func applyEgress(config *xrayConfig, served []protocol.ListenerKey, egress map[p
 			if tag, ok := rule["ruleTag"].(string); ok {
 				copy["ruleTag"] = tag + suffix
 			}
-			if watch {
+			if watch || deny {
 				name := target + suffix
-				if !watchOutbounds[name] {
-					watchOutbounds[name] = true
-					config.Outbounds = append(config.Outbounds, map[string]any{
-						"tag": name, "protocol": "freedom", "settings": map[string]any{},
-						"streamSettings": map[string]any{"sockopt": map[string]any{"dialerProxy": agentcore.LinkTag(link)}},
-					})
+				if !splitOutbounds[name] {
+					splitOutbounds[name] = true
+					if deny {
+						config.Outbounds = append(config.Outbounds, map[string]any{"tag": name, "protocol": "blackhole", "settings": map[string]any{}})
+					} else {
+						config.Outbounds = append(config.Outbounds, map[string]any{
+							"tag": name, "protocol": "freedom", "settings": map[string]any{},
+							"streamSettings": map[string]any{"sockopt": map[string]any{"dialerProxy": agentcore.LinkTag(link)}},
+						})
+					}
 				}
 				copy["outboundTag"] = name
 			} else {
