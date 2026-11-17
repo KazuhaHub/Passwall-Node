@@ -3,10 +3,12 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
@@ -43,6 +45,10 @@ type Processor struct {
 	now                 func() time.Time
 	taskWake            func()
 	taskClock           state.TaskStartClock
+	// rejectionSig identifies the set of objects the deployment left out as of
+	// the last reconciliation; a change asks rejected objects again next round.
+	rejectionSig   string
+	reevaluateNext bool
 }
 
 func NewProcessor(options ProcessorOptions) (*Processor, error) {
@@ -164,6 +170,14 @@ func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse)
 		}
 	}
 
+	// A rejection is of CONTENT, but what rejects it can be elsewhere: a front
+	// refused for a bind another listener held, a client refused as a duplicate of
+	// one that has since been removed, the same content under another engine.
+	// Rejected objects are therefore asked about again whenever the config or the
+	// roster changed, not only when their own stream's version moves.
+	reevaluate := received.ConfigChanged || received.RosterChanged || p.reevaluateNext
+	p.reevaluateNext = false
+
 	runtime := p.runtime
 	var round RuntimeRound
 	if scoped, ok := p.runtime.(RoundScopedRuntime); ok {
@@ -175,17 +189,25 @@ func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse)
 	}
 
 	if received.Config != nil && !configVersion.Zero() {
-		if err := p.upsertListeners(ctx, runtime, oldConfig, received.Config, configVersion, nowMS); err != nil {
+		if err := p.upsertListeners(ctx, runtime, oldConfig, received.Config, configVersion, reevaluate, nowMS); err != nil {
 			return result, err
 		}
-		if err := p.upsertTransit(ctx, runtime, oldConfig, received.Config, configVersion, nowMS); err != nil {
+		if err := p.upsertTransit(ctx, runtime, oldConfig, received.Config, configVersion, reevaluate, nowMS); err != nil {
 			return result, err
+		}
+		// The round's one deployment is done by now (or is done here): what it
+		// left out is known before the clients' states are worked out, so a client
+		// of a listener it dropped is blocked in this round, not the next.
+		if round != nil && round.Finalize(ctx) == nil {
+			if err := p.reconcileRejections(ctx, nowMS, received.Config, received.Roster, &result); err != nil {
+				return result, err
+			}
 		}
 	}
 
 	if received.Roster != nil && !rosterVersion.Zero() {
 		if err := p.applyRoster(ctx, runtime, oldRoster, received.Roster, rosterVersion, received.Config,
-			configVersion, received.ConfigChanged, nowMS, &result); err != nil {
+			configVersion, received.ConfigChanged, reevaluate, nowMS, &result); err != nil {
 			return result, err
 		}
 	}
@@ -206,6 +228,8 @@ func (p *Processor) Process(ctx context.Context, response protocol.SyncResponse)
 			}, &result); err != nil {
 				return result, err
 			}
+		} else if err := p.reconcileRejections(ctx, nowMS, received.Config, received.Roster, &result); err != nil {
+			return result, err
 		}
 	}
 
@@ -244,6 +268,7 @@ func (p *Processor) upsertListeners(
 	runtime Runtime,
 	oldBody, body *protocol.ConfigBody,
 	version protocol.Version,
+	reevaluate bool,
 	nowMS int64,
 ) error {
 	old := listenerMap(oldBody)
@@ -261,10 +286,10 @@ func (p *Processor) upsertListeners(
 		}
 		if previous, exists := old[listener.Key]; exists && bytes.Equal(previous.Config, listener.Config) && current.State == protocol.ObjectApplied {
 			status, err = conformance.AdvanceObject(status, conformance.Transition{Event: conformance.EventApplied})
-		} else if current.State == protocol.ObjectRejected && current.SinceVersion == version {
+		} else if current.State == protocol.ObjectRejected && current.SinceVersion == version && !reevaluate {
 			status = current
 		} else {
-			status, err = applyRuntimeResult(status, runtime.UpsertListener(ctx, listener), nowMS)
+			status, err = applyRuntimeResult(reopen(status), runtime.UpsertListener(ctx, listener), nowMS)
 		}
 		if err != nil {
 			return fmt.Errorf("converge listener %s: %w", listener.Key, err)
@@ -277,7 +302,7 @@ func (p *Processor) upsertListeners(
 }
 
 // upsertTransit gives every transit object (forward, incoming link, outgoing
-// link) the same four-state convergence as a listener, from the same round.
+// link, SNI front) the same four-state convergence as a listener, from the same round.
 // They come after listeners so a bind conflict is attributed to the transit
 // object, never to the listener it collides with. An object whose content is
 // unchanged and applied is not converged again.
@@ -286,6 +311,7 @@ func (p *Processor) upsertTransit(
 	runtime Runtime,
 	oldBody, body *protocol.ConfigBody,
 	version protocol.Version,
+	reevaluate bool,
 	nowMS int64,
 ) error {
 	desired := transitObjects(body)
@@ -309,10 +335,10 @@ func (p *Processor) upsertTransit(
 			status, err = applyRuntimeResult(status, &RejectedError{Code: "transit_unsupported", Err: errors.New("this runtime cannot relay transit")}, nowMS)
 		case existed && bytes.Equal(previous, desired[key]) && current.State == protocol.ObjectApplied:
 			status, err = conformance.AdvanceObject(status, conformance.Transition{Event: conformance.EventApplied})
-		case current.State == protocol.ObjectRejected && current.SinceVersion == version:
+		case current.State == protocol.ObjectRejected && current.SinceVersion == version && !reevaluate:
 			status = current
 		default:
-			status, err = applyRuntimeResult(status, relay.UpsertTransit(ctx, key), nowMS)
+			status, err = applyRuntimeResult(reopen(status), relay.UpsertTransit(ctx, key), nowMS)
 		}
 		if err != nil {
 			return fmt.Errorf("converge transit %s: %w", key, err)
@@ -341,6 +367,9 @@ func transitObjects(body *protocol.ConfigBody) map[string][]byte {
 	}
 	for _, link := range body.Transit.LinksIn {
 		add(string(link.Key), link)
+	}
+	for _, front := range body.Transit.Fronts {
+		add(string(front.Key), front)
 	}
 	for _, link := range body.Transit.LinksOut {
 		add(string(link.Key), struct {
@@ -379,6 +408,7 @@ func (p *Processor) applyRoster(
 	config *protocol.ConfigBody,
 	configVersion protocol.Version,
 	configChanged bool,
+	reevaluate bool,
 	nowMS int64,
 	result *ProcessResult,
 ) error {
@@ -413,12 +443,13 @@ func (p *Processor) applyRoster(
 		if err != nil {
 			return err
 		}
-		if status.State == protocol.ObjectRejected && status.SinceVersion == version {
+		if status.State == protocol.ObjectRejected && status.SinceVersion == version && !reevaluate {
 			if err := p.store.SaveObject(ctx, status, nowMS); err != nil {
 				return err
 			}
 			continue
 		}
+		status = reopen(status)
 
 		filtered := client
 		filtered.Listeners = make([]protocol.ListenerKey, 0, len(client.Listeners))
@@ -714,6 +745,121 @@ func acceptObject(current protocol.ObjectStatus, stream, key string, version pro
 	return conformance.AdvanceObject(current, conformance.Transition{
 		Event: conformance.EventAccepted, Version: version, AtMS: nowMS,
 	})
+}
+
+// reopen puts a rejected object back to pending, for asking the runtime about
+// it again. The state machine will not turn rejected content into applied
+// content without a newer version; here the content is the same and what
+// rejected it has changed, so the question is asked afresh. Any other state is
+// returned as it is.
+func reopen(status protocol.ObjectStatus) protocol.ObjectStatus {
+	if status.State == protocol.ObjectRejected {
+		status.State = protocol.ObjectPending
+		status.IssueCode = ""
+	}
+	return status
+}
+
+// deploymentRejection is the code a deployment's rejections carry; an object
+// rejected with it and no longer named by the deployment is stale.
+const deploymentRejection = "core_config_rejected"
+
+// reconcileRejections makes the state of every object agree with what the
+// deployment the core now runs left out (RejectionSource), both ways.
+//
+// An object that did not change was not asked about, and would otherwise stay
+// applied though the deployment dropped it (a front over an applied listener
+// that was rejected, an unchanged listener under an engine that cannot carry it,
+// a client that lost a duplicate credential to a newcomer that sorts before it):
+// it is set rejected, and the reason is recorded as an issue, because an object
+// status has only a code.
+//
+// And an object that is rejected with the deployment's code but is no longer in
+// its set was refused by something that has since changed without the config or
+// the roster doing so (the winner of a duplicate credential expired, or its
+// quota gate closed): it goes back to pending, and the next round asks about it.
+func (p *Processor) reconcileRejections(ctx context.Context, nowMS int64, config *protocol.ConfigBody, roster *protocol.RosterBody, result *ProcessResult) error {
+	source, ok := p.runtime.(RejectionSource)
+	if !ok {
+		return nil
+	}
+	rejections := source.Rejections()
+	named := make(map[string]bool, len(rejections))
+	var signature []string
+	for _, rejection := range rejections {
+		named[rejection.Stream+"/"+rejection.Key] = true
+		signature = append(signature, rejection.Stream+"/"+rejection.Key+"/"+rejection.Code)
+		detail := rejection.Code
+		if rejection.Err != nil {
+			detail = rejection.Err.Error()
+		}
+		sum := sha256.Sum256([]byte(detail))
+		if err := p.recordIssue(ctx, LocalIssue{
+			Kind: LocalIssueObjectLeftOut, Stream: rejection.Stream, Key: rejection.Key,
+			DedupeKey: fmt.Sprintf("%s:%s:%s:%x", LocalIssueObjectLeftOut, rejection.Stream, rejection.Key, sum[:8]),
+			Detail:    detail,
+		}, result); err != nil {
+			return err
+		}
+		current, err := optionalObject(ctx, p.store, rejection.Stream, rejection.Key)
+		if err != nil {
+			return err
+		}
+		if current.State == "" || (current.State == protocol.ObjectRejected && current.IssueCode == rejection.Code) {
+			continue
+		}
+		current = reopen(current)
+		if current.State == protocol.ObjectBlocked {
+			current.State, current.BlockedOn = protocol.ObjectPending, ""
+		}
+		status, err := conformance.AdvanceObject(current, conformance.Transition{
+			Event: conformance.EventRejected, AtMS: nowMS, IssueCode: rejection.Code,
+		})
+		if err != nil {
+			return fmt.Errorf("reconcile rejected %s %s: %w", rejection.Stream, rejection.Key, err)
+		}
+		if err := p.store.SaveObject(ctx, status, nowMS); err != nil {
+			return err
+		}
+	}
+	// The other direction.
+	desired := map[string]bool{}
+	if config != nil {
+		for _, listener := range config.Listeners {
+			desired[protocol.StreamConfig+"/"+string(listener.Key)] = true
+		}
+		for key := range transitObjects(config) {
+			desired[protocol.StreamConfig+"/"+key] = true
+		}
+	}
+	if roster != nil {
+		for _, client := range roster.Clients {
+			desired[protocol.StreamRoster+"/"+string(client.Key)] = true
+		}
+	}
+	objects, err := p.store.Objects(ctx)
+	if err != nil {
+		return fmt.Errorf("list objects to reconcile rejections: %w", err)
+	}
+	for _, status := range objects {
+		identity := status.Stream + "/" + status.Key
+		if status.State != protocol.ObjectRejected || status.IssueCode != deploymentRejection || named[identity] || !desired[identity] {
+			continue
+		}
+		if err := p.store.SaveObject(ctx, reopen(status), nowMS); err != nil {
+			return err
+		}
+		result.ReportImmediately = true
+	}
+	sort.Strings(signature)
+	joined := strings.Join(signature, "\n")
+	if joined != p.rejectionSig {
+		// What the deployment leaves out changed: whatever it rejected before may
+		// now be accepted, whatever it accepted may not be.
+		p.reevaluateNext = p.rejectionSig != "" || joined != ""
+		p.rejectionSig = joined
+	}
+	return nil
 }
 
 func applyRuntimeResult(status protocol.ObjectStatus, runtimeErr error, nowMS int64) (protocol.ObjectStatus, error) {

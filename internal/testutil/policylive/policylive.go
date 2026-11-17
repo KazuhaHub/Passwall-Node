@@ -172,7 +172,8 @@ func (s *sink) await(prefix []byte, window time.Duration) bool {
 // executable's name hashes to (one test binary per package, so packages that
 // run side by side get different blocks unless the hash collides; nine is few,
 // so a collision is possible and the port is still checked free at the moment
-// it is handed out). A port is checked free on TCP and on UDP, is never handed
+// it is handed out, and reserved with a flock shared by every test binary on
+// the machine, so two of them never hand out one port). A port is checked free on TCP and on UDP, is never handed
 // out twice by one process, and the allocator never wraps: a process that
 // uses its block up fails loudly.
 const (
@@ -215,6 +216,9 @@ func FreePort(t *testing.T) int {
 			continue
 		}
 		_ = udp.Close()
+		if !reserve(port) {
+			continue
+		}
 		return port
 	}
 	t.Fatalf("this process used up its %d test ports (block %d)", portBlockSize, portBlock())

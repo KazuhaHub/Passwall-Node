@@ -284,6 +284,67 @@ rejects its listener (a `config` object error); nothing falls back to `local`.
 - **Sniffing.** Xray's sniffing check is made on the whole policy, so it may ask
   for sniffing on a listener whose rules all sit in segments it never reaches.
 
+### SNI fronts (`transit.sni.v1`, Xray only)
+
+An agent declares `transit.sni.v1` **while the engine its desired config selects is
+Xray** (it is asked for on every report, so a switch to sing-box withdraws it on
+the next one; before the first convergence it is not declared) and compiles
+`Transit.Fronts` on **Xray**: one TCP port, normally 443, is shared by several
+TLS or REALITY uses, and each raw connection is routed on the SNI of its
+ClientHello without decrypting anything. A listener keeps its public port in its
+own config (subscriptions still say 443); the agent binds it to
+`127.0.0.1:<loopback_port>` and the front hands it the connection with PROXY
+protocol v2, so the listener still sees the client's own address (online IPs and
+source-CIDR rules are right). A forward behind a front is relayed byte for byte
+and keeps its counters (they are read off the relay's outbound); an incoming
+link behind a front is moved to a loopback port the agent picks from the probe
+range; everything the routes do not name, an absent SNI included, goes to the
+default, and a default that is `external` is dialed at its own address, never at
+the name the client sent. A front's connections are never a user's and are not
+judged by the destination policy; the user connection a fronted listener
+receives is.
+
+- **Fail closed.** A fronted listener must be enabled, TCP, TLS or REALITY, have
+  the front's port as its own, and not accept PROXY protocol itself
+  (`sockopt.acceptProxyProtocol`, or the same in `rawSettings`/`tcpSettings`): the
+  front prefixes its own header and the listener would expect two. Its loopback
+  port must not collide with any other bind (the core's API and the probe range
+  included; a fronted link's port is picked after every other bind is claimed). An
+  `external` default must not be one of this host's own interface addresses on the
+  front's port when the front listens on every address or on that one (the
+  connection would come straight back; IPv4-mapped spellings are normalised).
+  A public address the host only owns through NAT is on no interface and is not
+  seen here: the panel, which knows the address the server is observed at, must
+  check it. A front that fails any of these, on Xray as on sing-box, is left out
+  with everything it fronts and reported rejected as config objects; the other
+  fronts and the rest of the configuration compile and are deployed.
+- **sing-box.** It cannot front. Each front and everything it fronts (its
+  listeners, forwards and links) is left out of the compile and reported rejected
+  as a config object (`SNI fronts require Xray`); **the rest of the configuration
+  compiles and is deployed**, and no fronted listener is bound on its public port
+  by itself. The panel should still send `Fronts` only to a node that declared
+  `transit.sni.v1`.
+- **Clients.** A client must not split its ClientHello across several TLS
+  records: the front reads the SNI from the first one, and a hello in two records
+  does not reach its route. (A hello split across TCP segments is fine.)
+- **Plain HTTP.** A probe that sends nothing TLS-shaped (plain HTTP, a port scan)
+  is handed to the default only when the sniff gives up, about one second later.
+- **Probe.** `ProbeMethodTLS` on a forward behind a front sends a ClientHello
+  with the route's first server name to the front and passes if a ServerHello
+  comes back through the relay.
+- **Duplicate credentials.** Two enabled clients of one listener with the same
+  credential are one user to the core, so the **later** one (clients are in key
+  order) is left off that listener and reported rejected as a per-client roster
+  error naming the earlier one; the first is served and **the rest of the
+  configuration compiles and is deployed**. The comparison is the engine's: on
+  Xray a VLESS UUID is compared with bytes 6 and 7 masked (Xray keys its users that
+  way); on sing-box VLESS, and for VMess on both, the whole UUID; Trojan and
+  Shadowsocks compare the password. The same credential on different listeners is
+  fine, and an empty credential is reported as missing ("UUID is required"), not as
+  a duplicate. (No compiler here supports Hysteria 2.)
+
+Without `Fronts` the compiled configuration is byte-identical to before.
+
 ### Compressed sync (`sync.gzip.v1`)
 
 The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with

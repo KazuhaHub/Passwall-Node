@@ -52,6 +52,16 @@ func startWho(t *testing.T, ip string, ports []int) {
 					host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 					local, _, _ := net.SplitHostPort(conn.LocalAddr().String())
 					_, _ = io.WriteString(conn, host+"|"+local)
+					// Say we are done writing, then read what the client sent before
+					// closing. Closing a socket with unread data resets the
+					// connection, and the reset can destroy the answer on its way
+					// back: whether the request had arrived by then depended on
+					// timing, so under load an attempt now and then read nothing.
+					if tcp, ok := conn.(*net.TCPConn); ok {
+						_ = tcp.CloseWrite()
+					}
+					_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+					_, _ = io.Copy(io.Discard, conn)
 				}()
 			}
 		}()

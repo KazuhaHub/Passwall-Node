@@ -5,6 +5,8 @@ package routebudget
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
@@ -61,7 +63,7 @@ func (s shape) snapshot() agentcore.Snapshot {
 		snapshot.Clients = append(snapshot.Clients, protocol.Client{
 			Key: protocol.NewClientKey(int64(i)), Subject: protocol.NewSubjectKey(5), Enabled: true,
 			Listeners:   []protocol.ListenerKey{protocol.NewListenerKey(1)},
-			Credentials: protocol.Credential{Username: fmt.Sprintf("u%06d@x", i), Password: "EBESExQVFhcYGRobHB0eHw=="},
+			Credentials: protocol.Credential{Username: fmt.Sprintf("u%06d@x", i), Password: userKey(i)},
 		})
 	}
 	return snapshot
@@ -312,4 +314,12 @@ func ipRanges(count int, format string, salt int) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// userKey is a 2022 user key of its own for each user: two rows with one
+// credential on a listener are refused as the one user they would be.
+func userKey(i int) string {
+	raw := make([]byte, 16)
+	binary.BigEndian.PutUint64(raw[8:], uint64(i))
+	return base64.StdEncoding.EncodeToString(raw)
 }

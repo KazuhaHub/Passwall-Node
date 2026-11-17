@@ -39,12 +39,12 @@
           {
             "email": "u5-k2@x",
             "level": 0,
-            "password": "EBESExQVFhcYGRobHB0eHw=="
+            "password": "AAAAAAAAAAAAAAAAAAAAAg=="
           },
           {
             "email": "u6@x",
             "level": 0,
-            "password": "EBESExQVFhcYGRobHB0eHw=="
+            "password": "AAAAAAAAAAAAAAAAAAAAAw=="
           }
         ],
         "method": "2022-blake3-aes-128-gcm",
@@ -76,7 +76,7 @@
           {
             "email": "u6@x",
             "level": 0,
-            "password": "EBESExQVFhcYGRobHB0eHw=="
+            "password": "AAAAAAAAAAAAAAAAAAAAAw=="
           }
         ],
         "method": "2022-blake3-aes-128-gcm",

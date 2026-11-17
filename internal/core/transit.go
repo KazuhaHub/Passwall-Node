@@ -3,7 +3,6 @@ package core
 import (
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"net"
 	"net/url"
 	"sort"
@@ -34,6 +33,18 @@ type TransitPlan struct {
 	// its e2e probe as probe_unavailable; the configuration is never rejected
 	// for it.
 	ProbeUnavailable []protocol.LinkKey
+	// Fronts are the SNI fronts (transit.sni.v1) in key order. Everything below
+	// is empty without them, and then the plan is what it was.
+	Fronts []protocol.Front
+	// ListenerLoopback is the port each fronted listener is bound to on
+	// FrontLoopbackHost instead of its public bind.
+	ListenerLoopback map[protocol.ListenerKey]int
+	// LinkLoopback is the same for an incoming link a front routes to; the agent
+	// picks it, from the probe range.
+	LinkLoopback map[protocol.LinkKey]int
+	// FrontedForwards are the forwards a front routes to. They are not in
+	// Forwards: the front owns their socket.
+	FrontedForwards map[protocol.ForwardKey]protocol.Forward
 }
 
 // ProbeInbound is one link's probe inbound: a loopback listener whose every
@@ -95,7 +106,7 @@ func ProbeEndpoint(linkURL string) (string, int, error) {
 
 // Empty reports whether there is nothing to relay.
 func (p TransitPlan) Empty() bool {
-	return len(p.Forwards) == 0 && len(p.LinksIn) == 0 && len(p.LinksOut) == 0 && len(p.Egress) == 0
+	return len(p.Forwards) == 0 && len(p.LinksIn) == 0 && len(p.LinksOut) == 0 && len(p.Egress) == 0 && len(p.Fronts) == 0
 }
 
 // PlanTransit validates the snapshot's transit and returns it in key order.
@@ -121,8 +132,26 @@ func (p TransitPlan) Empty() bool {
 // them, and a transit object colliding with one is not this function's to
 // reject.
 func PlanTransit(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string, reserved ...string) (TransitPlan, error) {
+	return planTransit(transit, binds, served, wildcard, nil, reserved)
+}
+
+// PlanTransitFronted is PlanTransit for an engine that compiles SNI fronts
+// (transit.sni.v1). binds must not hold the public bind of a fronted listener
+// (see FrontedListenerKeys): the front holds that port, and the listener is
+// bound to its loopback port instead. A front whose listeners cannot sit behind
+// it, or whose binds collide, rejects itself and everything it fronts.
+func PlanTransitFronted(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string, support FrontSupport, reserved ...string) (TransitPlan, error) {
+	return planTransit(transit, binds, served, wildcard, &support, reserved)
+}
+
+func planTransit(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string, support *FrontSupport, reserved []string) (TransitPlan, error) {
 	if transit == nil {
 		return TransitPlan{}, nil
+	}
+	if support == nil {
+		if err := RejectFronts(transit); err != nil {
+			return TransitPlan{}, err
+		}
 	}
 	for _, forward := range transit.Forwards {
 		if err := protocol.ValidateForward(forward); err != nil {
@@ -213,14 +242,48 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 	sort.Slice(plan.Forwards, func(i, j int) bool { return plan.Forwards[i].Key < plan.Forwards[j].Key })
 	sort.Slice(plan.LinksIn, func(i, j int) bool { return plan.LinksIn[i].Key < plan.LinksIn[j].Key })
 	sort.Slice(plan.LinksOut, func(i, j int) bool { return plan.LinksOut[i].Key < plan.LinksOut[j].Key })
+	var frontedForward map[protocol.ForwardKey]protocol.FrontKey
+	var frontedLink map[protocol.LinkKey]protocol.FrontKey
+	var reservedPorts map[int]bool
+	fronted := support != nil && len(transit.Fronts) > 0
+	if fronted {
+		var err error
+		if reservedPorts, err = planFrontBinds(&plan, transit, *support, claim, reserved); err != nil {
+			return TransitPlan{}, err
+		}
+		frontedForward, frontedLink = frontedTargets(plan.Fronts)
+		// A fronted forward has no socket of its own: the front owns it.
+		kept := plan.Forwards[:0:0]
+		for _, forward := range plan.Forwards {
+			if _, isFronted := frontedForward[forward.Key]; isFronted {
+				if plan.FrontedForwards == nil {
+					plan.FrontedForwards = map[protocol.ForwardKey]protocol.Forward{}
+				}
+				plan.FrontedForwards[forward.Key] = forward
+				continue
+			}
+			kept = append(kept, forward)
+		}
+		plan.Forwards = kept
+	}
 	for _, forward := range plan.Forwards {
 		if err := claim(string(forward.Key), forward.Listen, forward.Port); err != nil {
 			return TransitPlan{}, ForwardError(forward.Key, err)
 		}
 	}
 	for _, link := range plan.LinksIn {
+		if _, isFronted := frontedLink[link.Key]; isFronted {
+			continue
+		}
 		if err := claim(string(link.Key), link.Listen, link.Port); err != nil {
 			return TransitPlan{}, LinkError(link.Key, err)
+		}
+	}
+	// Only now, with every socket of the transit claimed, can a fronted link be
+	// given a loopback port that nothing else holds.
+	if fronted {
+		if err := planFrontLinks(&plan, claim, reservedPorts); err != nil {
+			return TransitPlan{}, err
 		}
 	}
 	if probe := transit.Probe; probe != nil && probe.LinkURL != "" && len(plan.LinksOut) > 0 {
@@ -242,20 +305,13 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 			// so a link normally keeps its port. When two keys start on the
 			// same port the one earlier in key order takes it, so a port can
 			// still move when another link is added or removed.
-			span := ProbePortLast - ProbePortFirst + 1
-			hash := fnv.New32a()
-			_, _ = hash.Write([]byte(link.Key))
-			start := int(hash.Sum32() % uint32(span))
-			allocated := false
-			for offset := 0; offset < span; offset++ {
-				candidate := ProbePortFirst + (start+offset)%span
+			_, allocated := allocateLoopback(string(link.Key), func(candidate int) bool {
 				if err := claim("probe "+string(link.Key), ProbeListen, candidate); err != nil {
-					continue
+					return false
 				}
 				plan.Probes = append(plan.Probes, ProbeInbound{Link: link.Key, Port: candidate, Host: host, TargetPort: port})
-				allocated = true
-				break
-			}
+				return true
+			})
 			if !allocated {
 				plan.ProbeUnavailable = append(plan.ProbeUnavailable, link.Key)
 			}

@@ -333,7 +333,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	hostTelemetry = hostReporter != nil
 	capabilities := staticCapabilities(hostTelemetry, audit != nil)
 	synchronizer := agent.Synchronizer{
-		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters, prober.Results),
+		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters, prober.Results, coreRuntime.Engine),
 		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
@@ -407,7 +407,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 // updater never advertised remote upgrade until it was restarted. It is a
 // function of its own so the tests build their reports through exactly this
 // wiring rather than a copy of it.
-func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, transit *agent.ForwardCounterCache, probes func() []protocol.ProbeResult) agent.ReportBuilder {
+func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, transit *agent.ForwardCounterCache, probes func() []protocol.ProbeResult, engine func() string) agent.ReportBuilder {
 	var forwardCounters func() []protocol.ForwardCounters
 	var linkCounters func() []protocol.LinkCounters
 	if transit != nil {
@@ -416,8 +416,24 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 	return agent.ReportBuilder{
 		AgentID: agentID, AgentVersion: buildversion.String(),
 		Store: store, CoreStatus: status, Now: now,
-		Capabilities: static, CapabilitySource: worker.Capabilities,
+		Capabilities: static, CapabilitySource: engineCapabilities(worker.Capabilities, engine),
 		PolicyStatus: policyStatus, ForwardCounters: forwardCounters, LinkCounters: linkCounters, Probes: probes,
+	}
+}
+
+// engineCapabilities adds to every report the capabilities that only some
+// engines have. transit.sni.v1 is declared while the selected engine is Xray:
+// the panel must send Transit.Fronts only to a node that declared it, and a
+// node that switched to sing-box (which cannot front) must stop declaring it,
+// which the next report reflects because this is asked for every report.
+// Before the first convergence the engine is unknown and nothing is declared.
+func engineCapabilities(base func() []string, engine func() string) func() []string {
+	return func() []string {
+		capabilities := base()
+		if engine != nil && engine() == "xray" {
+			capabilities = append(capabilities, protocol.CapabilityTransitSNI)
+		}
+		return capabilities
 	}
 }
 
@@ -445,6 +461,10 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // transit.route.v1 is always among them: both compilers build the per-exit
 // segments of a routed listener (and honour DestinationRule.Exits), so a node
 // that declares transit.link.v1 can take routes on either engine.
+// transit.sni.v1 is NOT among them: only Xray compiles fronts, and the protocol
+// says an engine that cannot front must not declare it. It is declared per
+// report, from the engine the desired config selects (see
+// engineCapabilities), so a switch to sing-box withdraws it on the next report.
 // sync.gzip.v1 is always among them: the HTTP syncer implements the whole
 // negotiation (its first report is plain; it compresses only after the panel
 // advertises Accept-Encoding: gzip).

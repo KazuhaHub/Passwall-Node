@@ -181,6 +181,46 @@ func TestProcessorConvergesLinksAndReconvergesOnANewBinding(t *testing.T) {
 	}
 }
 
+// A front is a config object of its own: it converges like a forward, under its
+// FrontKey, and re-converges when its routes change.
+func TestProcessorConvergesAFrontAsAConfigObject(t *testing.T) {
+	ctx := context.Background()
+	store := openAgentTestStore(t)
+	runtime := &forwardRuntime{}
+	processor := newTestProcessor(t, store, runtime, &recordingIssueSink{}, 3)
+	front := protocol.Front{
+		Key: protocol.NewFrontKey(1), Port: 443,
+		Routes:  []protocol.FrontRoute{{ServerNames: []string{"a.example.com"}, Target: protocol.FrontTarget{Forward: protocol.NewForwardKey(2)}}},
+		Default: protocol.FrontTarget{External: &protocol.FrontExternal{Host: "www.example.org", Port: 443}},
+	}
+	forward := protocol.Forward{Key: protocol.NewForwardKey(2), Port: 443, Target: "landing.example.com", TargetPort: 443, Network: protocol.ForwardNetworkTCP}
+	respond := func(version protocol.Version, front protocol.Front) protocol.SyncResponse {
+		response := forwardResponse(version)
+		config := *response.Config.Body
+		config.Transit = &protocol.Transit{Forwards: []protocol.Forward{forward}, Fronts: []protocol.Front{front}}
+		response.Config = changedSegment(version, config)
+		return response
+	}
+	if _, err := processor.Process(ctx, respond(protocol.Version{Epoch: 1, Version: 1}, front)); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.Object(ctx, protocol.StreamConfig, "fnt_1")
+	if err != nil || status.State != protocol.ObjectApplied {
+		t.Fatalf("fnt_1 = %+v, %v", status, err)
+	}
+	if !containsCall(runtime.calls, "upsert_forward:fnt_1") {
+		t.Fatalf("calls = %v", runtime.calls)
+	}
+	runtime.calls = nil
+	front.Routes[0].ServerNames = []string{"b.example.com"}
+	if _, err := processor.Process(ctx, respond(protocol.Version{Epoch: 1, Version: 2}, front)); err != nil {
+		t.Fatal(err)
+	}
+	if !containsCall(runtime.calls, "upsert_forward:fnt_1") || containsCall(runtime.calls, "upsert_forward:fwd_2") {
+		t.Fatalf("calls = %v", runtime.calls)
+	}
+}
+
 func TestReportCarriesLinkCountersWithTheLinkCapability(t *testing.T) {
 	ctx := context.Background()
 	cache := &ForwardCounterCache{}

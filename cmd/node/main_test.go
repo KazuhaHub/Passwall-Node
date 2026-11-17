@@ -177,7 +177,7 @@ func TestNodeReportBuilderAttachesThePolicyStatusItIsGiven(t *testing.T) {
 	}
 	status := protocol.PolicyStatus{State: protocol.PolicyStateApplied}
 	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker,
-		func() protocol.PolicyStatus { return status }, nil, nil)
+		func() protocol.PolicyStatus { return status }, nil, nil, nil)
 	for _, partial := range []bool{false, true} {
 		built, err := builder.Build(t.Context(), agent.BuildOptions{Partial: partial})
 		if err != nil {
@@ -199,6 +199,30 @@ func TestStaticCapabilitiesAlwaysDeclareTheTransitProbe(t *testing.T) {
 				t.Fatalf("host telemetry %v, audit %v: %s is not declared", hostTelemetry, listening, protocol.CapabilityTransitProbe)
 			}
 		}
+	}
+}
+
+// transit.sni.v1 follows the selected engine: declared for Xray, which compiles
+// fronts, withdrawn for an engine that cannot, and not declared before the
+// engine is known. It is asked for on every report, so a switch shows up on the
+// next one.
+func TestSNICapabilityFollowsTheSelectedEngine(t *testing.T) {
+	engine := ""
+	source := engineCapabilities(func() []string { return []string{"x"} }, func() string { return engine })
+	for _, test := range []struct {
+		engine string
+		want   bool
+	}{{"", false}, {"xray", true}, {"sing-box", false}, {"xray", true}} {
+		engine = test.engine
+		if got := slices.Contains(source(), protocol.CapabilityTransitSNI); got != test.want {
+			t.Fatalf("engine %q: declared = %v, want %v", test.engine, got, test.want)
+		}
+	}
+	if slices.Contains(staticCapabilities(true, true), protocol.CapabilityTransitSNI) {
+		t.Fatal("transit.sni.v1 is declared statically")
+	}
+	if got := engineCapabilities(func() []string { return nil }, nil)(); len(got) != 0 {
+		t.Fatalf("no engine source declared %v", got)
 	}
 }
 
@@ -241,7 +265,7 @@ func TestNodeReportBuilderAttachesProbesToFullReportsOnly(t *testing.T) {
 	}
 	probes := []protocol.ProbeResult{{Key: "lnk_1", Kind: protocol.ProbeKindTransport, Attempts: 1, RTTMinMS: 2, RTTMedianMS: 2, RTTMaxMS: 2}}
 	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker, nil, nil,
-		func() []protocol.ProbeResult { return probes })
+		func() []protocol.ProbeResult { return probes }, nil)
 	full, err := builder.Build(t.Context(), agent.BuildOptions{})
 	if err != nil {
 		t.Fatal(err)

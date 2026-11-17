@@ -82,7 +82,32 @@ type xrayConfig struct {
 	Routing map[string]any `json:"routing,omitempty"`
 }
 
+// Compile compiles the snapshot. A front this engine finds it cannot carry (a
+// listener that cannot sit behind it, a bind that collides) is left out with
+// everything it fronts and reported rejected, and the compile goes ahead with
+// the rest; every other error is the whole compile's.
 func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (agentcore.Artifact, error) {
+	var rejected []*agentcore.ObjectError
+	for {
+		artifact, err := c.compile(ctx, snapshot)
+		if err == nil {
+			artifact.Rejected = agentcore.DedupeRejected(append(rejected, artifact.Rejected...))
+			return artifact, nil
+		}
+		var objectErr *agentcore.ObjectError
+		if !errors.As(err, &objectErr) || objectErr.Stream != protocol.StreamConfig || snapshot.Transit == nil {
+			return agentcore.Artifact{}, err
+		}
+		next, rejection := agentcore.WithoutFront(snapshot, protocol.FrontKey(objectErr.Key), objectErr.Err)
+		if rejection == nil {
+			return agentcore.Artifact{}, err
+		}
+		rejected = append(rejected, rejection)
+		snapshot = next
+	}
+}
+
+func (c Compiler) compile(ctx context.Context, snapshot agentcore.Snapshot) (agentcore.Artifact, error) {
 	if err := ctx.Err(); err != nil {
 		return agentcore.Artifact{}, err
 	}
@@ -177,6 +202,11 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	seenListeners := make(map[protocol.ListenerKey]struct{}, len(listeners))
 	binds := make(map[string]protocol.ListenerKey, len(listeners))
 	served := make([]protocol.ListenerKey, 0, len(listeners))
+	// A fronted listener holds no public bind: the front owns that port and the
+	// listener is moved to a loopback port once the transit is planned.
+	var rejected []*agentcore.ObjectError
+	fronted := agentcore.FrontedListenerKeys(snapshot.Transit)
+	support := agentcore.FrontSupport{Listeners: map[protocol.ListenerKey]agentcore.FrontListener{}}
 	for _, listener := range listeners {
 		if err := ctx.Err(); err != nil {
 			return agentcore.Artifact{}, err
@@ -188,7 +218,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			return agentcore.Artifact{}, compileListenerError(listener.Key, errors.New("duplicate listener key"))
 		}
 		seenListeners[listener.Key] = struct{}{}
-		inbound, enabled, bind, err := c.compileInbound(release, listener, clientByListener[listener.Key])
+		inbound, enabled, bind, err := c.compileInbound(release, listener, clientByListener[listener.Key], &rejected)
 		if err != nil {
 			var clientErr *CompileError
 			if errors.As(err, &clientErr) {
@@ -205,10 +235,15 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		if !enabled {
 			continue
 		}
-		if other, exists := binds[bind]; exists {
-			return agentcore.Artifact{}, compileListenerError(listener.Key, fmt.Errorf("bind %s conflicts with listener %s", bind, other))
+		if fronted[listener.Key] {
+			port, _ := inbound["port"].(int)
+			support.Listeners[listener.Key] = agentcore.FrontListener{Port: port, Unfit: frontUnfit(inbound)}
+		} else {
+			if other, exists := binds[bind]; exists {
+				return agentcore.Artifact{}, compileListenerError(listener.Key, fmt.Errorf("bind %s conflicts with listener %s", bind, other))
+			}
+			binds[bind] = listener.Key
 		}
-		binds[bind] = listener.Key
 		config.Inbounds = append(config.Inbounds, inbound)
 		served = append(served, listener.Key)
 	}
@@ -225,13 +260,15 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for bind, key := range binds {
 		occupied[bind] = string(key)
 	}
-	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "0.0.0.0", apiListen)
+	transit, err := agentcore.PlanTransitFronted(snapshot.Transit, occupied, served, "0.0.0.0", support, apiListen)
 	if err != nil {
 		return agentcore.Artifact{}, err
 	}
-	// Outbound statistics are switched on only on an entry: the system policy
-	// is part of the artifact, and every other node must keep the digest it had.
-	if len(transit.LinksOut) > 0 {
+	moveFrontedListeners(config.Inbounds, transit)
+	// Outbound statistics are switched on only on an entry, or where a front
+	// relays a forward (its counters are the outbound's): the system policy is
+	// part of the artifact, and every other node must keep the digest it had.
+	if len(transit.LinksOut) > 0 || len(transit.FrontedForwards) > 0 {
 		system := config.Policy["system"].(map[string]any)
 		system["statsOutboundUplink"], system["statsOutboundDownlink"] = true, true
 	}
@@ -259,7 +296,13 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		if err != nil {
 			return agentcore.Artifact{}, err
 		}
+		if port, behindFront := transit.LinkLoopback[link.Key]; behindFront {
+			moveToLoopback(inbound, port)
+		}
 		config.Inbounds = append(config.Inbounds, inbound)
+	}
+	for _, front := range transit.Fronts {
+		config.Inbounds = append(config.Inbounds, compileFront(front, transit))
 	}
 	for _, probe := range transit.Probes {
 		config.Inbounds = append(config.Inbounds, compileProbeInbound(probe))
@@ -274,6 +317,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 	}
 	routeTransit(&config, transitInboundTags(transit))
+	routeFronts(&config, transit)
 	routeProbes(&config, transit.Probes)
 
 	encoded, err := json.MarshalIndent(config, "", "  ")
@@ -290,10 +334,10 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 	}
 	digest := sha256.Sum256(encoded)
-	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:]), Issues: issues}, nil
+	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:]), Issues: issues, Rejected: agentcore.DedupeRejected(rejected)}, nil
 }
 
-func (c Compiler) compileInbound(release corecatalog.Release, listener protocol.Listener, clients []protocol.Client) (map[string]any, bool, string, error) {
+func (c Compiler) compileInbound(release corecatalog.Release, listener protocol.Listener, clients []protocol.Client, rejected *[]*agentcore.ObjectError) (map[string]any, bool, string, error) {
 	var spec listenerSpec
 	if err := strictJSON(listener.Config, &spec); err != nil {
 		return nil, false, "", fmt.Errorf("decode listener config: %w", err)
@@ -315,10 +359,18 @@ func (c Compiler) compileInbound(release corecatalog.Release, listener protocol.
 		return nil, false, "", fmt.Errorf("settings: %w", err)
 	}
 	users := make([]any, 0, len(clients))
+	// Clients are in key order. A credential is validated first (an empty one is
+	// "required"), then compared with the earlier clients': the later duplicate
+	// is left off this listener and reported rejected; the rest compile.
+	credentials := agentcore.NewCredentialSet(protocolName, true)
 	for _, client := range clients {
 		user, err := compileUser(protocolName, client)
 		if err != nil {
 			return nil, false, "", compileClientError(client.Key, err)
+		}
+		if original, duplicate := credentials.Add(client); duplicate {
+			*rejected = append(*rejected, agentcore.DuplicateCredentialRejection(client.Key, original, listener.Key))
+			continue
 		}
 		users = append(users, user)
 	}

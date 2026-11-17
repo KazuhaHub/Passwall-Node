@@ -121,13 +121,18 @@ func validateObject(status protocol.ObjectStatus, updatedAtMS int64) error {
 	}
 	switch status.Stream {
 	case protocol.StreamConfig:
-		// A config object is a listener or a transit object (forward or link).
+		// A config object is a listener or a transit object (forward, link or
+		// SNI front).
 		if strings.HasPrefix(status.Key, "fwd_") {
 			if _, err := protocol.ForwardKey(status.Key).RowID(); err != nil {
 				return err
 			}
 		} else if strings.HasPrefix(status.Key, "lnk_") {
 			if _, err := protocol.LinkKey(status.Key).RowID(); err != nil {
+				return err
+			}
+		} else if strings.HasPrefix(status.Key, "fnt_") {
+			if _, err := protocol.FrontKey(status.Key).RowID(); err != nil {
 				return err
 			}
 		} else if _, err := protocol.ListenerKey(status.Key).RowID(); err != nil {

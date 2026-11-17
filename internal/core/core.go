@@ -36,6 +36,10 @@ type Artifact struct {
 	// but that the operator must be told about. They are not part of Config or
 	// Digest.
 	Issues []ArtifactIssue
+	// Rejected are objects the compile left OUT and the deployment goes ahead
+	// without: each is reported to the panel as rejected, and nothing else is
+	// affected. An error from Compile, by contrast, deploys nothing.
+	Rejected []*ObjectError
 }
 
 // IssueRoutePolicyApproximate is reported when a policy rule could not be
@@ -101,6 +105,27 @@ type ObjectError struct {
 	Key    string
 	Code   string
 	Err    error
+	// Related names further objects of the same stream that the same cause
+	// rejects (an SNI front and everything it fronts). Key stays the one the
+	// message is about.
+	Related []string
+}
+
+// Names reports whether the error is attributed to the object: as Key, or as
+// one of Related.
+func (e *ObjectError) Names(stream, key string) bool {
+	if e == nil || e.Stream != stream {
+		return false
+	}
+	if e.Key == key {
+		return true
+	}
+	for _, related := range e.Related {
+		if related == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *ObjectError) Error() string {

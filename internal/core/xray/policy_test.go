@@ -3,6 +3,8 @@ package xray
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,17 @@ func policyListener(t *testing.T, number int64, port int, sniffing string, enabl
 	return protocol.Listener{Key: protocol.NewListenerKey(number), Config: raw}
 }
 
+// policyUserKeyFor is a 2022 user key of its own for each client: two rows
+// with one credential on a listener are refused as the one user they would be.
+func policyUserKeyFor(client int64) string {
+	if client == 1 {
+		return policyUserKey // the compiled-configuration goldens carry it
+	}
+	raw := make([]byte, 16)
+	binary.BigEndian.PutUint64(raw[8:], uint64(client))
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 func policyClient(client, subject int64, username string, listeners ...int64) protocol.Client {
 	keys := make([]protocol.ListenerKey, 0, len(listeners))
 	for _, number := range listeners {
@@ -48,7 +61,7 @@ func policyClient(client, subject int64, username string, listeners ...int64) pr
 	return protocol.Client{
 		Key: protocol.NewClientKey(client), Subject: protocol.NewSubjectKey(subject), Enabled: true,
 		Listeners:   keys,
-		Credentials: protocol.Credential{Username: username, Password: policyUserKey},
+		Credentials: protocol.Credential{Username: username, Password: policyUserKeyFor(client)},
 	}
 }
 

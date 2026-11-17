@@ -246,6 +246,95 @@ route 的出口链路不在本次编译里 → 拒绝**该 listener**（config �
   目标服务回报来源地址，exit 以 127.0.0.2/3/4 区分；含 X 同时命中 r1/r2 的消费顺序、
   `Exits` 只管对应出口、停掉出口 C 后不泄漏到本地）。跑法：设 `PSP_TEST_XRAY_26627_BIN`（或 `PSP_TEST_XRAY_BIN`）和 `PSP_TEST_SING_BOX_BIN`，`go test ./internal/core/linkmatrix -run TestRouteMatrix`。
 
+### SNI 前置（`transit.sni.v1`，protocol v0.9.0，只有 Xray）
+
+`Transit.Fronts` 让几个 TLS / REALITY 用途共用一个 TCP 端口（通常 443）：agent 自己占着端口，按
+ClientHello 的 SNI 把原始连接分给目标，**不解密**。能力 `transit.sni.v1` 在 `staticCapabilities`
+里**不声明**（协议规定不能前置的引擎不得声明）：`engineCapabilities` 每份报告都问一次
+`Runtime.Engine()`（期望配置选的引擎，最近一次收敛时记录），是 xray 才带上，所以切到 sing-box 后
+下一份报告就撤回；第一次收敛之前引擎未知，也不声明。面板必须只向声明了的节点发 Fronts；万一
+发到 sing-box，**sing-box 编译器只拒绝 front 和它前置的一切**（listener、forward、link、
+client 的挂接都从编译里去掉，`core.WithoutFronts`），这些对象各是一个 config 对象错误
+（`SNI fronts require Xray`，`Artifact.Rejected`，`ObjectError.Related`），**其余配置照常编译
+部署**；绝不会出现「被前置的 listener 自己绑在公网端口上」。`Artifact.Rejected` 是新的窄通道：编译
+不失败，但列出的对象在 `round.objectResult` 里被判 rejected，其它对象不受影响。
+
+**规划在 `core.PlanTransitFronted`**（Xray 用；`PlanTransit` 不带支持，遇到 Fronts 就拒绝）：
+
+- front 占 `Listen:Port`；每个 `FrontedListener` 的 inbound 改绑 `127.0.0.1:LoopbackPort`，
+  listener 自己的配置里仍是公网端口（订阅仍写 443）。编译器在 listener 循环里就把被前置的
+  listener **排除出公网 bind**（它们本来就共用同一个端口），规划后再 `moveFrontedListeners`。
+- 被前置的 listener 必须：已启用、TCP（`raw`/`tcp`）、TLS 或 REALITY、公网端口 = `Front.Port`；
+  否则**只拒绝这个 front 及其前置的所有对象**（一个 `ObjectError`，`Key`=front，`Related`=其余）：`xray.Compiler.Compile` 捕获
+  这种 front 错误，用 `core.WithoutFront` 把该 front 从快照里去掉再编译一次，拒绝记进 `Artifact.Rejected`，其它 front 和
+  其余配置照常部署（别的错误仍然整体失败）。
+- loopback 端口与其它所有 bind 比（含通配、含 core 自己的 API 地址），冲突同样拒绝 front。
+  探测端口段 31000–31999 也算：先占 front 的 loopback，探测再分配，所以探测会绕开它们。
+- External 默认若是本机某个网卡地址、端口等于 front 端口、且 front 监听全部地址（或正是该地址），拒绝
+  front（会回环；IPv4-mapped 先规整）。`FrontSupport.Local` 可注入地址列表（测试用）。NAT 后的公网 IP
+  不在网卡上，这里看不到，必须由面板（知道服务器被观察到的地址）检查。
+- 被前置的 listener 自己开了 `sockopt.acceptProxyProtocol`（或 raw/tcpSettings 里的）→ 拒绝 front：front 会自己
+  加一层 PROXY 头，listener 会期待两层。
+- 被前置的 forward 没有自己的 socket（`TransitPlan.FrontedForwards`，不在 `Forwards` 里）；
+  被前置的 link 仍是 inbound，但改绑 loopback。**协议没有给 link 的 loopback 端口**，所以由 agent 从
+  探测段按 link key 哈希起点分配（`TransitPlan.LinkLoopback`，同一个 key 通常拿同一个端口）。
+  **分配发生在所有其它 bind（未被前置的 forward/link）都占好之后**（`planFrontLinks`），否则会撞上它们。
+
+**Xray 输出**（`xray/front.go`）：
+
+- front = `dokodemo-door`，tag `transit-fnt_N`，`settings.address/port` = Default 的目的地，
+  `sniffing {enabled, destOverride:["tls"], routeOnly:true}`。
+- 路由规则放在**所有规则最前面**（探针规则之后、`transit-forwards` 之前）：每条 route 一条
+  `inboundTag=front + domain:full:<名>` → 该目标的 freedom；末尾一条 catch-all → Default。
+  front 的连接不受目的地策略评判（评判的是它变成的那条用户连接，进到 loopback 的 listener 之后）。
+- 各目标的 freedom 都用 `redirect` **显式写目的地**，嗅探到的名字永远不是拨号对象：
+  - listener / link：`redirect=127.0.0.1:<loopback>`，`proxyProtocol: 2`，`finalRules` 只允许
+    127.0.0.1（Xray 默认拒绝代理流量去 loopback）；对方 inbound 带 `sockopt.acceptProxyProtocol:true`，
+    所以 listener 看到的是**客户端自己的地址**（在线 IP、源 CIDR 规则都对）。
+  - forward：`redirect=<forward 的 target:port>`，**tag 就是 `transit-fwd_N`**，原样中继，不带 PROXY 头。
+  - External（只能是 Default）：`redirect=host:port`，没有 `finalRules`——它是别处的站点，解析到
+    loopback 会被 Xray 拒绝，这是想要的。
+- 出站统计只在「有被前置的 forward」或「有 LinksOut」时打开（系统策略是 artifact 的一部分，其它节点
+  digest 不变）。
+
+**遥测**：front 不是用户，也不是 forward。`decodeXrayPresence` 跳过 `transit-fnt_*`；被前置的 forward 没有
+inbound，在场判断看 `transit-fwd_N` **outbound**，计数读 `outbound>>>transit-fwd_N`（和 inbound 计数
+相加，因为只会有一个存在）。用户只在 listener 的 inbound 上记一次。front 作为 config 对象走四态收敛
+（`transitObjects`、`sqlite.validateObject` 都认 `fnt_`）。
+
+**探测**：`ProbeMethodTLS` 对被前置的 forward，prober 拨 forward 的 bind（= front 的）并发 route 的
+第一个 server name；`frontmatrix` 里用真 front 验证过，landing 停掉后探测失败。
+
+**限制（写进 README）**：只有 Xray；客户端不能把 ClientHello 拆进几条 TLS record（front 只读第一条）；
+纯 HTTP 探测要等嗅探放弃，约 1 秒才交给 Default。
+
+**测试**：`internal/core/frontmatrix`（真 Xray，各版本；PoC `frontpoc` 已删）覆盖：两个 listener 共用一个端口、
+raw 中继逐字节一致（两侧各一个 tee）、未知/无 SNI 到外部站（SNI 是解析不了的名字）、PROXY 源地址
+（在线 IP + 源 CIDR 封锁）、计数（用户只记一次、front 不是用户、forward 计数 = 中继字节）、link、
+策略不评判 front、TLS 探测、sing-box 拒绝。无 front 时逐字节相同由 golden（`golden-fronts-off.json`，
+由 front 之前的版本生成）加一次跨 768 个配置、三种编译器的差分保证。
+
+**不要**：把 front 的规则放到策略规则之后；给外部默认加 `finalRules`；让被前置的 listener 重新出现在公网 bind；
+让 sing-box 编译器「忽略」Fronts。
+
+**被丢弃对象的状态对账**（`Processor.reconcileRejections`）：一个没变、已 applied 的对象不会被问到 runtime，
+但新的部署可能把它丢了（front 被拒时它前置的 listener、切到 sing-box、重复凭据）。所以每轮 `Finalize` 成功后，
+对 `RejectionSource.Rejections()`（当前**已确认**部署的 `Artifact.Rejected`，和 idle 记录一起设置，部署失败不改）里的每个
+已知对象，把状态改成 rejected。反过来，rejected 对象在 config 或 roster **任何**一个变了的时候都重新问一次
+（`reopen`：状态机不允许同版本 rejected→applied，所以先放回 pending）：拒绝它的原因可能在别处。重启后
+`RestoreStatus` 从已确认的部署恢复所选引擎，第一份报告就能带上 `transit.sni.v1`。
+
+### 同一 listener 上的重复凭据
+
+同一 listener 上两个启用的 roster 行凭据相同，core 只当成一个用户，流量和限额会记到先到的那行。编译器
+（Xray 和 sing-box，`core.CredentialSet`）在 listener 的用户循环里：**先**校验凭据（空 UUID 报
+"UUID is required"，不算重复），再与前面的比；**后一行**（按 client key 排序）被从该 listener 去掉，作为
+**该 client 的** roster 对象错误（`Artifact.Rejected`，`DuplicateCredentialRejection`，写明重复了谁）上报，
+前一行照常服务，**其余配置照常编译部署**（只有重复的 email 仍是整体失败）。比较规则就是引擎自己的：
+Xray 的 VLESS UUID 第 6、7 字节置零再比（Xray 就是这样给用户建索引的）；sing-box 的 VLESS 和两边的 VMess 比
+完整 UUID；Trojan / Shadowsocks 比密码。不同 listener 上的相同凭据是不同用户。目前没有编译器支持
+Hysteria 2，所以不写它。
+
 ### 压缩 sync（`sync.gzip.v1`，protocol v0.9.0）
 
 Agent 总是声明 `sync.gzip.v1`（`staticCapabilities`），`HTTPSyncer`（`internal/agent/transport.go`）

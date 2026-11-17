@@ -1,0 +1,119 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "services": [
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 10086,
+      "secret": "0123456789abcdef0123456789abcdef",
+      "tag": "psp-api",
+      "type": "api"
+    }
+  ],
+  "inbounds": [
+    {
+      "listen": "::",
+      "listen_port": 443,
+      "tag": "psp-lst_1",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "example.com",
+            "server_port": 443
+          },
+          "private_key": "kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo"
+        },
+        "server_name": "a.example.com"
+      },
+      "type": "vless",
+      "users": [
+        {
+          "flow": "xtls-rprx-vision",
+          "name": "u1@x",
+          "uuid": "0f62f495-b5ca-4509-b6cd-54a040deafd5"
+        }
+      ]
+    },
+    {
+      "listen": "::",
+      "listen_port": 444,
+      "tag": "psp-lst_2",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "example.com",
+            "server_port": 443
+          },
+          "private_key": "kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo"
+        },
+        "server_name": "b.example.com"
+      },
+      "type": "vless",
+      "users": []
+    },
+    {
+      "listen": "::",
+      "listen_port": 21001,
+      "network": "tcp",
+      "override_address": "203.0.113.9",
+      "override_port": 8443,
+      "tag": "transit-fwd_3",
+      "type": "direct"
+    },
+    {
+      "listen": "::",
+      "listen_port": 21002,
+      "tag": "transit-lnk_4",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "www.example.com",
+            "server_port": 443
+          },
+          "private_key": "sCg4m4EzwI-ABTXkpBUlq7bXjvoGzOubGY3J8dhTL2o",
+          "short_id": [
+            "a1b2"
+          ]
+        },
+        "server_name": "link.example.com"
+      },
+      "type": "vless",
+      "users": [
+        {
+          "flow": "xtls-rprx-vision",
+          "uuid": "a3b5c7d9-1111-4222-8333-444455556666"
+        }
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "tag": "blocked",
+      "type": "block"
+    }
+  ],
+  "route": {
+    "final": "direct",
+    "rules": [
+      {
+        "action": "route",
+        "inbound": [
+          "transit-fwd_3",
+          "transit-lnk_4"
+        ],
+        "outbound": "direct"
+      }
+    ]
+  }
+}

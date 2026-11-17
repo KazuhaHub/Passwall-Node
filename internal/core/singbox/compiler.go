@@ -74,6 +74,15 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		return agentcore.Artifact{}, fmt.Errorf("sing-box log level %q is invalid", logLevel)
 	}
 
+	// An engine that cannot front leaves every front, and what it fronts, out
+	// of the compile and reports them rejected: a fronted listener must never
+	// be bound on its public port by itself, and the rest of the configuration
+	// still applies.
+	var rejected []*agentcore.ObjectError
+	snapshot, frontRejection := agentcore.WithoutFronts(snapshot)
+	if frontRejection != nil {
+		rejected = append(rejected, frontRejection)
+	}
 	listeners := append([]protocol.Listener(nil), snapshot.Listeners...)
 	clients := append([]protocol.Client(nil), snapshot.Clients...)
 	sort.Slice(listeners, func(i, j int) bool { return listeners[i].Key < listeners[j].Key })
@@ -137,7 +146,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			return agentcore.Artifact{}, compileListenerError(listener.Key, errors.New("duplicate listener key"))
 		}
 		seenListeners[listener.Key] = struct{}{}
-		inbound, enabled, bind, err := c.compileInbound(listener, clientByListener[listener.Key])
+		inbound, enabled, bind, err := c.compileInbound(listener, clientByListener[listener.Key], &rejected)
 		if err != nil {
 			var objectErr *agentcore.ObjectError
 			if errors.As(err, &objectErr) {
@@ -210,7 +219,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 	}
 	digest := sha256.Sum256(encoded)
-	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:])}, nil
+	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:]), Rejected: agentcore.DedupeRejected(rejected)}, nil
 }
 
 // compileForward relays the port to the target unchanged: a direct inbound
@@ -271,7 +280,7 @@ func routeProbes(result *config, probes []agentcore.ProbeInbound) {
 	result.Route["rules"] = append(front, rules...)
 }
 
-func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.Client) (map[string]any, bool, string, error) {
+func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.Client, rejected *[]*agentcore.ObjectError) (map[string]any, bool, string, error) {
 	var spec listenerSpec
 	if err := strictJSON(listener.Config, &spec); err != nil {
 		return nil, false, "", fmt.Errorf("decode listener config: %w", err)
@@ -307,10 +316,16 @@ func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.
 	}
 	inbound["listen"] = listen
 	users := make([]any, 0, len(clients))
+	// sing-box keys VLESS users by the whole UUID, so nothing is masked.
+	credentials := agentcore.NewCredentialSet(protocolName, false)
 	for _, client := range clients {
 		user, userErr := compileUser(protocolName, client)
 		if userErr != nil {
 			return nil, false, "", compileClientError(client.Key, userErr)
+		}
+		if original, duplicate := credentials.Add(client); duplicate {
+			*rejected = append(*rejected, agentcore.DuplicateCredentialRejection(client.Key, original, listener.Key))
+			continue
 		}
 		users = append(users, user)
 	}
