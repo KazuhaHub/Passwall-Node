@@ -42,10 +42,9 @@ func newDiagnosticsHandler(
 			// command from disagreeing about the same machine, and taking the
 			// host observation from the same pass keeps collector.host and the
 			// host section describing one instant.
-			report := manage.RunDoctor(ctx, manage.DoctorOptions{
-				DataDir: parsed.DataDir, CredentialFile: parsed.CredentialFile,
-				Collector: collector(), Core: supervisor.ProcessHandle, Now: now,
-			})
+			doctorOptions := localDoctorOptions(parsed.DataDir, parsed.CredentialFile)
+			doctorOptions.Collector, doctorOptions.Core, doctorOptions.Now = collector(), supervisor.ProcessHandle, now
+			report := manage.RunDoctor(ctx, doctorOptions)
 			checks := make([]protocol.DiagnosticsCheck, 0, len(report.Checks))
 			quickCheck := ""
 			for _, check := range report.Checks {
