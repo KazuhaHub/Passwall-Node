@@ -47,6 +47,7 @@ var xrayPins = []xrayPin{
 	{Version: xrayVersion, Env: "PSP_TEST_XRAY_26627_BIN"},
 	{Version: "26.7.28", Env: "PSP_TEST_XRAY_26728_BIN"},
 	{Version: "26.9.9", Env: "PSP_TEST_XRAY_2699_BIN", AcceptRestricted: true},
+	{Version: "26.11.9", Env: "PSP_TEST_XRAY_26119_BIN", AcceptRestricted: true},
 }
 
 // verifyXrayPins fails closed when the selectable catalog and the pins differ

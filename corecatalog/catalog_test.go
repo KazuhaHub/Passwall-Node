@@ -11,8 +11,8 @@ func TestEmbeddedCatalogIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog.Releases) != 4 {
-		t.Fatalf("release count = %d, want 4", len(catalog.Releases))
+	if len(catalog.Releases) != 6 {
+		t.Fatalf("release count = %d, want 6", len(catalog.Releases))
 	}
 }
 

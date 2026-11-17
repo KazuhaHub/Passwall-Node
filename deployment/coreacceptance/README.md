@@ -1,8 +1,9 @@
 # Executable core acceptance
 
 `core-acceptance.yml` runs on native Linux amd64 and arm64 GitHub-hosted runners.
-It downloads every selectable catalog Xray (**26.6.27**, **26.7.28** and the
-restricted **26.9.9**) and sing-box **1.14.0** through the production core
+It downloads every selectable catalog Xray (**26.6.27**, **26.7.28**, and the
+restricted **26.9.9** and **26.11.9**), plus the recommended sing-box **1.14.0**,
+through the production core
 installer, including catalog archive SHA256 checks and exact executable version
 verification. The test-only Mihomo **1.19.30** client is pinned to an official
 release asset SHA256; amd64 uses its v1 CPU-baseline asset. No moving release,
@@ -12,7 +13,7 @@ The fixture enables the existing gated tests and runs them with `-count=1`:
 
 - Official Xray and sing-box installer integrations, including downloaded
   archive verification and real executable configuration checks.
-- Xray 26.6.27, 26.7.28 and 26.9.9 compiler and destination-policy artifacts
+- Xray 26.6.27, 26.7.28, 26.9.9 and 26.11.9 compiler and destination-policy artifacts
   accepted by the real binaries, and destination policy enforced end to end by
   each of them. The 26.6.27 binary is also the client of those harnesses.
 - sing-box 1.14.0 compiler artifacts accepted by the real binary.
@@ -50,6 +51,13 @@ variable, the required subtests in `check.go`, and the version tables in
 `internal/core/xray/compiler_test.go` and `policy_test.go` are updated together
 (a version left in those tables without a binary skips, and `check` fails on any
 skip). Pulling a release urgently therefore means one change across all of them.
+
+sing-box releases other than the recommended one are not pinned here: the
+fixture exports one sing-box binary, the recommended one. A verified sing-box
+release (such as **1.14.4**) is reviewed by running this suite locally with
+`PSP_TEST_SING_BOX_BIN` pointing at that release, on glibc and inside the
+Alpine image for its musl build; its catalog evidence names the platform it
+ran on.
 
 For a local run, disable any parent workspace so the module's pinned toolchain
 and dependencies are used, then prepare a private absolute directory and

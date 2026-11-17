@@ -235,6 +235,7 @@ func TestAcceptanceEnvironmentExportsEveryXrayVersion(t *testing.T) {
 		"PSP_TEST_XRAY_26627_BIN":    "/bin/xray-26.6.27",
 		"PSP_TEST_XRAY_26728_BIN":    "/bin/xray-26.7.28",
 		"PSP_TEST_XRAY_2699_BIN":     "/bin/xray-26.9.9",
+		"PSP_TEST_XRAY_26119_BIN":    "/bin/xray-26.11.9",
 		"PSP_TEST_XRAY_CLIENT_BIN":   "/bin/xray-26.6.27",
 		"PSP_TEST_SING_BOX_BIN":      "/bin/sing-box",
 		"PSP_TEST_MIHOMO_CLIENT_BIN": "/bin/mihomo",
