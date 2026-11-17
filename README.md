@@ -196,6 +196,94 @@ response body is never downloaded: the probe stops at the headers.
 Probe traffic is metered as the link's own and never as a user's. Without
 `Transit.Probe` the compiled configuration is byte-identical to before.
 
+### Routing by destination (`transit.route.v1`)
+
+An agent that declares `transit.route.v1` (both engines do) compiles
+`Transit.Routes`: one listener leaves through different exits depending on where
+the connection is going (streaming through one link, mail from the node itself,
+the rest through the listener's egress binding), and a policy rule may be scoped
+to those exits (`DestinationRule.Exits`). The exit is the first route rule that
+matches, else the listener's default (its egress link, else `local`). A listener
+without routes compiles exactly as before; the golden artifacts are unchanged.
+
+For each routed listener, after the transit rules and in this order, both
+engines emit (the protocol's compile contract):
+
+1. for each route rule k, in order: **segment k**, every policy rule whose `exits`
+   is empty or names exit k, in policy order and with its own action, ANDed with
+   route k; then a **catch-all** on route k to exit k;
+2. the **default segment**: the rules whose `exits` allow the default exit, as the
+   egress split gives them, ending with the link catch-all.
+
+An earlier segment's catch-all consumes the traffic of its route rule, which is
+what makes "first match wins" hold for a connection that also matches a later
+rule. Permit rules (allow, the exempt step, the usage catch-all) go to the
+segment's exit; a report-only rule goes to a report-only outbound whose dialer is
+the exit's link (the plain one for `local`); a block keeps its blackhole, split
+per link under `audit_egress`. A route whose exit link is not in the compile
+rejects its listener (a `config` object error); nothing falls back to `local`.
+
+- **sing-box** ANDs exactly with `logical`/`and` rules, so nothing is approximated.
+  A route rule's destination is written once, as an inline rule set
+  (`route.rule_set`, tag `psp-route-<group>-<id>`), and the segments refer to it,
+  so the size grows with routes plus rules, not their product. Under `on_demand`
+  the routed listeners get a `resolve` action of their own, scoped to their
+  inbounds, ahead of their first address rule; the unrouted listeners keep exactly
+  the resolve they had.
+- **Sniffing on sing-box.** sing-box dials the destination the client asked for
+  and cannot dial a sniffed name (Xray can), so with a policy that needs the sniff
+  the route, the policy and the dial must not be allowed to read different names.
+  A routed listener is therefore split by what the client asked for. A connection
+  that asked for a **domain** is decided entirely before the sniff, on that name
+  (segments, then a catch-all gated on `domain_regex "."`), and never reaches the
+  sniff, so a Host or SNI it writes changes neither its exit nor which exit-scoped
+  rule applies. Rules that name a protocol still apply to it: when the policy has
+  one, a BitTorrent-only `sniff` (`"sniffer":["bittorrent"]`, which sets the
+  protocol and not the domain) runs for requested domains on the routed inbounds
+  ahead of the segments (tested live over TCP; UDP/uTP is not exercised). A
+  connection that asked for an **address** goes through the sniff as on any
+  listener (the policy reads the name it claims, the limit the policy already has),
+  but a route rule never takes it by that claim: after the sniff the routes are
+  their addresses, ports and network only, and a route with no addresses is left
+  out. On Xray the claimed name is the one dialed, so it is the one in force.
+- **Xray** ANDs with `protocol.IntersectDestinations`, one (policy rule, route
+  rule) pair at a time. When the result is not exact it is a superset: a **block**
+  keeps it (it can only over-block); an **allow** or **report-only** copy is left
+  out of that segment (fail closed, so the traffic falls to later rules) and the
+  agent reports the issue `route_policy_approximate`, keyed by the listener, with
+  the rule and route ids. A route's own `ports` and `network` always intersect
+  exactly. Under `on_demand`, a rule that names hostnames only against a route
+  that names addresses is exact after all: "the hostname AND it resolves into the
+  route's CIDRs" is one Xray rule with a `domain` and an `ip` field, which Xray
+  ANDs, so it is kept whatever its action. The trailing-dot guard is intersected by hand (it is a block on every
+  dotted hostname; `IntersectDestinations` would turn it into a block of the
+  whole route).
+- **Tags.** Segment rule tags carry `~<exit>~r<k>` (`~lnk_8~r1`, `~local~r2`; the
+  default segment is `~<exit>~r0`), after the rule id and the `a`/`b` half, since
+  Xray refuses a repeated rule tag. Listeners that route identically share one
+  group's rules; a further group adds `~g<n>`. Outbound tags keep what the audit
+  receiver reads: `psp-deny-<id>~lnk_<n>` for a link's segment under
+  `audit_egress`, the plain name for `local` (no egress).
+- **Budget.** A routed compile may generate at most 20,000 core rules per
+  listener group, 32 MiB of configuration and about 1,000,000 destination
+  entries (domains and CIDRs, summed over groups). The cap is enforced as the
+  entries are appended (a budget the builders count into), so memory is bounded
+  whatever the shape; a cheap estimate before building only refuses the obvious.
+  Past any the routed listener (the first of the offending group) is
+  rejected as itself (config object error). On sing-box a policy rule's matcher of
+  16 or more entries is written once, as an inline rule set, and the segments
+  refer to it, so a 50,000-domain block list against 64 routes is 2.7 MB and
+  about 12 MiB of heap; Xray has no shared matcher, so the same compile is
+  refused up front (about 3.25 million entries).
+- **Scoping.** With routed listeners every other rule names its inbounds, so no
+  rule of the unrouted list can judge a routed listener ahead of its segments.
+  A rule with `exits` also scopes an unrouted listener, by its default exit.
+- **Resolve.** A route's CIDRs meet a hostname only under `on_demand` (Xray
+  `IPOnDemand`, sing-box `resolve`), as a policy rule's do; under as-is a name
+  never matches them.
+- **Sniffing.** Xray's sniffing check is made on the whole policy, so it may ask
+  for sniffing on a listener whose rules all sit in segments it never reaches.
+
 ### Compressed sync (`sync.gzip.v1`)
 
 The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with

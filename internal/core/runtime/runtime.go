@@ -59,6 +59,9 @@ type Options struct {
 	// Audit, when set, is given the deployed roster and rule IDs. Nil means this
 	// node records no hits.
 	Audit AuditRoster
+	// Issues, when set, receives the conditions a compile found that do not stop
+	// the deployment (agentcore.Artifact.Issues). Nil discards them.
+	Issues agent.IssueSink
 }
 
 type Runtime struct {
@@ -69,6 +72,7 @@ type Runtime struct {
 	now             func() time.Time
 	warnf           func(format string, args ...any)
 	audit           AuditRoster
+	issues          agent.IssueSink
 	convergeMu      sync.Mutex
 	scheduleWake    chan struct{}
 	// idle describes the last successful convergence. converge reads and writes
@@ -103,7 +107,7 @@ func New(options Options) (*Runtime, error) {
 	}
 	return &Runtime{
 		store: options.Store, installer: options.Installer, supervisor: options.Supervisor,
-		compilerFactory: options.CompilerFactory, now: options.Now, warnf: options.Warnf, audit: options.Audit, scheduleWake: make(chan struct{}, 1),
+		compilerFactory: options.CompilerFactory, now: options.Now, warnf: options.Warnf, audit: options.Audit, issues: options.Issues, scheduleWake: make(chan struct{}, 1),
 		policyStatus: protocol.PolicyStatus{State: protocol.PolicyStateApplied},
 	}, nil
 }
@@ -525,6 +529,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 	if err := validateArtifact(artifact); err != nil {
 		return fmt.Errorf("compiler returned invalid artifact: %w", err)
 	}
+	r.recordArtifactIssues(ctx, artifact)
 	// Read again: a core that died while the policy was compiling is not
 	// running what it was running when this round began.
 	status = r.supervisor.Status()
@@ -731,3 +736,25 @@ var (
 	_ agent.RoundScopedRuntime = (*Runtime)(nil)
 	_ agent.RuntimeRound       = (*round)(nil)
 )
+
+// recordArtifactIssues reports what the compile found and did not refuse. An
+// issue that cannot be stored is warned about and never fails the deployment:
+// it describes a rule the compile left out, not a reason to leave the node
+// unconfigured.
+func (r *Runtime) recordArtifactIssues(ctx context.Context, artifact agentcore.Artifact) {
+	for _, issue := range artifact.Issues {
+		if r.issues == nil {
+			if r.warnf != nil {
+				r.warnf("%s: %s: %s", issue.Code, issue.Key, issue.Detail)
+			}
+			continue
+		}
+		_, err := r.issues.Record(ctx, agent.LocalIssue{
+			Kind: agent.LocalIssueKind(issue.Code), Stream: protocol.StreamConfig, Key: issue.Key,
+			DedupeKey: fmt.Sprintf("%s:%s:%s", issue.Code, issue.Key, artifact.Digest), Detail: issue.Detail,
+		})
+		if err != nil && r.warnf != nil {
+			r.warnf("record %s for %s: %v", issue.Code, issue.Key, err)
+		}
+	}
+}

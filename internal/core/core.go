@@ -32,6 +32,24 @@ type Snapshot struct {
 type Artifact struct {
 	Config []byte
 	Digest string
+	// Issues are conditions the compile found that do not stop the deployment
+	// but that the operator must be told about. They are not part of Config or
+	// Digest.
+	Issues []ArtifactIssue
+}
+
+// IssueRoutePolicyApproximate is reported when a policy rule could not be
+// intersected exactly with a route rule on Xray: an allow or report-only copy
+// would match more than it should, so it was left out of that route's segment
+// (fail closed); a block copy is kept as the superset it is.
+const IssueRoutePolicyApproximate = "route_policy_approximate"
+
+// ArtifactIssue is one such condition. Key names the object it is about (a
+// listener), Detail names the rule and route ids.
+type ArtifactIssue struct {
+	Code   string
+	Key    string
+	Detail string
 }
 
 // Compiler is pure apart from context cancellation. Implementations translate

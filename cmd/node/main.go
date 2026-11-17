@@ -197,9 +197,13 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	// Listening comes before everything that reads its result: the compiler is
 	// given the socket only if this worked, and the capability is declared only
 	// if it did.
+	now := time.Now
+	issues := agent.OutboxIssueSink{
+		Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() },
+	}
 	audit := startAuditReceiver(parsed.DataDir, logger.Warnf)
 	runtimeOptions := coreruntime.Options{
-		Store: store, Installer: installer, Supervisor: supervisor, Warnf: logger.Warnf,
+		Store: store, Installer: installer, Supervisor: supervisor, Warnf: logger.Warnf, Issues: issues,
 		CompilerFactory: compilerFactory(parsed, singBoxAPISecret, audit),
 	}
 	if audit != nil {
@@ -227,10 +231,6 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Adapters: map[string]agentcore.Telemetry{
 			"xray": xrayTelemetry, "sing-box": singBoxTelemetry,
 		},
-	}
-	now := time.Now
-	issues := agent.OutboxIssueSink{
-		Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() },
 	}
 	// These are explicit operational guard margins, not execution TTLs or a
 	// measured hardware/SLA guarantee. Individual kinds still need execution,
@@ -442,6 +442,9 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // transit.probe.v1 is always among them: the self-test goes through whichever
 // core runs, the end-to-end probe by a loopback inbound both compilers emit,
 // and a node with no Transit.Probe simply reports no probes.
+// transit.route.v1 is always among them: both compilers build the per-exit
+// segments of a routed listener (and honour DestinationRule.Exits), so a node
+// that declares transit.link.v1 can take routes on either engine.
 // sync.gzip.v1 is always among them: the HTTP syncer implements the whole
 // negotiation (its first report is plain; it compresses only after the panel
 // advertises Accept-Encoding: gzip).
@@ -456,7 +459,7 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // hit's egress off the outbound tag, and which hits carry it is up to the
 // policy (audit_egress), which PSP sets only for an Xray entry with egress.
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
-	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink, protocol.CapabilityTransitProbe, protocol.CapabilitySyncGzip}
+	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink, protocol.CapabilityTransitProbe, protocol.CapabilityTransitRoute, protocol.CapabilitySyncGzip}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}

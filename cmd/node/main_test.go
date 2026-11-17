@@ -202,6 +202,18 @@ func TestStaticCapabilitiesAlwaysDeclareTheTransitProbe(t *testing.T) {
 	}
 }
 
+// transit.route.v1 is static too: both compilers build the segments, and
+// declaring it is what lets the panel send Routes and Exits at all.
+func TestStaticCapabilitiesAlwaysDeclareTheTransitRoute(t *testing.T) {
+	for _, hostTelemetry := range []bool{false, true} {
+		for _, listening := range []bool{false, true} {
+			if !slices.Contains(staticCapabilities(hostTelemetry, listening), protocol.CapabilityTransitRoute) {
+				t.Fatalf("host telemetry %v, audit %v: %s is not declared", hostTelemetry, listening, protocol.CapabilityTransitRoute)
+			}
+		}
+	}
+}
+
 func TestStaticCapabilitiesDeclareSyncGzip(t *testing.T) {
 	for _, hostTelemetry := range []bool{false, true} {
 		for _, audit := range []bool{false, true} {

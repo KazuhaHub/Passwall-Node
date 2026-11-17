@@ -61,21 +61,45 @@ import (
 //
 // sing-box needs no sniffing check of its own: it takes no per-inbound
 // sniffing, so there is nothing an operator's inbound setting could withhold.
-func (c Compiler) applyPolicy(result *config, snapshot agentcore.Snapshot, served []protocol.ListenerKey) error {
+//
+// With routed listeners (transit.route.v1) the rules built here are those of the
+// listeners WITHOUT routes, each naming its inbounds explicitly, and the routed
+// listeners' segments are built by applyRoutes and spliced in by finishRoutes
+// once the egress split has run on the rest. A rule scoped to exits
+// (DestinationRule.Exits) applies here only to the listeners whose default exit
+// is one of them. A nil policy is allowed when there are routes.
+func (c Compiler) applyPolicy(result *config, snapshot agentcore.Snapshot, served []protocol.ListenerKey, transit agentcore.TransitPlan) error {
 	plan, err := agentcore.PlanPolicy(snapshot.DestinationPolicy, snapshot.Clients, served, singboxUsername)
 	if err != nil {
 		return err
 	}
+	routed := len(transit.Routes) > 0
+	unrouted := transit.Unrouted(served)
+	base := plan.ForBase(unrouted, transit.DefaultExit, routed)
+	var scope []string
+	if routed {
+		scope = make([]string, 0, len(unrouted))
+		for _, key := range unrouted {
+			scope = append(scope, "psp-"+string(key))
+		}
+	}
 	rules := []map[string]any{}
 	// Only domain and protocol rules need the sniff. The resolved-address need
 	// is Xray's alone (routeOnly), and sing-box takes no per-inbound sniffing.
-	if plan.SniffNeed()&(protocol.SniffForDomains|protocol.SniffForProtocols) != 0 {
-		rules = append(rules, c.sequence(result, plan, true)...)
+	sniff := plan.SniffNeed()&(protocol.SniffForDomains|protocol.SniffForProtocols) != 0
+	if sniff {
+		rules = append(rules, c.sequence(result, base, true, nil, scope, routed)...)
 		rules = append(rules, map[string]any{"action": "sniff"})
 	}
-	rules = append(rules, c.sequence(result, plan, false)...)
+	rules = append(rules, c.sequence(result, base, false, nil, scope, routed)...)
 	if plan.Resolve == protocol.ResolveOnDemand {
 		rules = insertResolve(rules)
+	}
+	if routed {
+		var err error
+		if result.routed, err = c.applyRoutes(result, plan, transit.RouteGroups(served), sniff); err != nil {
+			return err
+		}
 	}
 	result.Route["rules"] = rules
 	return nil
@@ -130,8 +154,30 @@ func hasIPCondition(rule map[string]any) bool {
 
 // sequence emits the plan's rules in evaluation order: exempt, then the
 // trailing-dot guard, at the exempt position. beforeSniff selects pass A.
-func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSniff bool) []map[string]any {
+//
+// seg, when set, makes it one segment of a routed group (see applyRoutes): every
+// rule is then confined to the group, to the route rule's destination, and
+// takes the segment's exit. scope and restrict confine the node-internal rules
+// to the unrouted listeners when there are routed ones.
+func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSniff bool, seg *segment, scope []string, restrict bool) []map[string]any {
+	if restrict && seg == nil && len(scope) == 0 {
+		return nil
+	}
 	var rules []map[string]any
+	// finish places a rule of the list: in a segment it is confined, otherwise
+	// the node-internal ones (builtin) are confined to scope when restricted.
+	finish := func(rule map[string]any, builtin bool) {
+		switch {
+		case seg != nil:
+			rule = seg.apply(rule, builtin)
+			if !seg.routed.add(rule) {
+				return
+			}
+		case restrict && builtin:
+			rule["inbound"] = scope
+		}
+		rules = append(rules, rule)
+	}
 	// blockOmitted: pass A has left out a protocol block. From there on an allow
 	// may not end the evaluation in pass A, so it is collected in leftOut and
 	// excluded from the blocks that follow it. The exempt step needs no such
@@ -159,13 +205,16 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 	}
 	exempt := func() {
 		if len(plan.ExemptUsers) > 0 {
-			rules = append(rules, map[string]any{"auth_user": plan.ExemptUsers, "action": "route", "outbound": "direct"})
+			finish(map[string]any{"auth_user": plan.ExemptUsers, "action": "route", "outbound": "direct"}, true)
 		}
 		if plan.TrailingDotGuard() {
-			rules = append(rules, map[string]any{"domain_regex": []string{`\.$`}, "action": "reject"})
+			finish(map[string]any{"domain_regex": []string{`\.$`}, "action": "reject"}, true)
 		}
 	}
 	for index, planned := range plan.Rules {
+		if seg != nil && seg.routed.failure != nil {
+			break
+		}
 		rule := planned.Rule
 		if index == plan.ExemptAt {
 			exempt()
@@ -203,19 +252,31 @@ func (c Compiler) sequence(result *config, plan agentcore.PolicyPlan, beforeSnif
 			}
 		case protocol.RuleObserve:
 			tag := "psp-watch-" + rule.ID
-			if !beforeSniff {
+			if !beforeSniff && !hasOutbound(result, tag) {
 				result.Outbounds = append(result.Outbounds, map[string]any{"type": "direct", "tag": tag})
 			}
 			out["action"], out["outbound"] = "route", tag
 		default:
 			out["action"], out["outbound"] = "route", "direct"
 		}
-		rules = append(rules, out)
+		if seg != nil {
+			out = seg.shared(out, rule.ID)
+		}
+		finish(out, false)
 	}
 	if plan.ExemptAt == len(plan.Rules) {
 		exempt()
 	}
 	return rules
+}
+
+func hasOutbound(result *config, tag string) bool {
+	for _, outbound := range result.Outbounds {
+		if outbound["tag"] == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // policyRule maps the match fields of one rule. sing-box ORs the destination

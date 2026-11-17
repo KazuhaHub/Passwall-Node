@@ -40,18 +40,36 @@ func injectedSniffing() (map[string]any, error) {
 // of them, and sniffing is only needed on the inbounds a rule applies to.
 //
 // served holds the listener key of each entry of config.Inbounds, in order.
-func (c Compiler) applyPolicy(config *xrayConfig, snapshot agentcore.Snapshot, served []protocol.ListenerKey) error {
+//
+// With routed listeners (transit.route.v1) the rules built here are those of
+// the listeners WITHOUT routes only, each naming its inbounds explicitly: a
+// routed listener's whole list, segments and default included, is built by
+// applyRoutes, and nothing here may judge its traffic first. A rule scoped to
+// exits (DestinationRule.Exits) applies here only to the listeners whose
+// default exit is one of them. The plan returned is the full one, for
+// applyRoutes. A nil policy is allowed when there are routes.
+func (c Compiler) applyPolicy(config *xrayConfig, snapshot agentcore.Snapshot, served []protocol.ListenerKey, transit agentcore.TransitPlan) (agentcore.PolicyPlan, error) {
 	plan, err := agentcore.PlanPolicy(snapshot.DestinationPolicy, snapshot.Clients, served, xrayUsername)
 	if err != nil {
-		return err
+		return plan, err
 	}
 	if err := ensureSniffing(config.Inbounds, served, plan); err != nil {
-		return err
+		return plan, err
 	}
-	rules, outbounds := policyRouting(plan, c.auditWebhook(snapshot.DestinationPolicy), c.usageWebhook(snapshot.DestinationPolicy))
+	routed := len(transit.Routes) > 0
+	unrouted := transit.Unrouted(served)
+	base := plan.ForBase(unrouted, transit.DefaultExit, routed)
+	var scope []string
+	if routed {
+		scope = make([]string, 0, len(unrouted))
+		for _, key := range unrouted {
+			scope = append(scope, "psp-"+string(key))
+		}
+	}
+	rules, outbounds := policyRoutingScoped(base, c.auditWebhook(snapshot.DestinationPolicy), c.usageWebhook(snapshot.DestinationPolicy), scope, routed)
 	config.Outbounds = append(config.Outbounds, outbounds...)
 	config.Routing = map[string]any{"domainStrategy": domainStrategy(plan.Resolve), "rules": rules}
-	return nil
+	return plan, nil
 }
 
 // domainStrategy is routing.domainStrategy, which is one value for the whole
@@ -183,8 +201,26 @@ func ensureSniffing(inbounds []map[string]any, served []protocol.ListenerKey, pl
 // first outbound, which is direct, and the rule names no address, so it never
 // makes IPOnDemand resolve a name.
 func policyRouting(plan agentcore.PolicyPlan, webhook, usage func() map[string]any) ([]map[string]any, []map[string]any) {
+	return policyRoutingScoped(plan, webhook, usage, nil, false)
+}
+
+// policyRoutingScoped is policyRouting for a compile with routed listeners
+// (restrict): the node-internal rules (exempt, trailing-dot guard, usage
+// catch-all), which name no inbound of their own, are confined to scope, the
+// unrouted listeners, and nothing is emitted when there are none. Without
+// restrict the output is exactly policyRouting's.
+func policyRoutingScoped(plan agentcore.PolicyPlan, webhook, usage func() map[string]any, scope []string, restrict bool) ([]map[string]any, []map[string]any) {
 	rules := []map[string]any{}
+	if restrict && len(scope) == 0 {
+		return rules, nil
+	}
 	var outbounds []map[string]any
+	confine := func(rule map[string]any) map[string]any {
+		if restrict {
+			rule["inboundTag"] = scope
+		}
+		return rule
+	}
 	// The exempt step, then the trailing-dot guard: an exempt subject is not
 	// subject to it, and it must precede every block.
 	exempt := func() {
@@ -195,12 +231,12 @@ func policyRouting(plan agentcore.PolicyPlan, webhook, usage func() map[string]a
 			if usage != nil {
 				rule["webhook"] = usage()
 			}
-			rules = append(rules, rule)
+			rules = append(rules, confine(rule))
 		}
 		if plan.TrailingDotGuard() {
-			rules = append(rules, map[string]any{
+			rules = append(rules, confine(map[string]any{
 				"type": "field", "ruleTag": "psp-trailing-dot", "domain": []string{`regexp:\.$`}, "outboundTag": "blocked",
-			})
+			}))
 		}
 	}
 	for index, planned := range plan.Rules {
@@ -273,9 +309,9 @@ func policyRouting(plan agentcore.PolicyPlan, webhook, usage func() map[string]a
 		exempt()
 	}
 	if usage != nil {
-		rules = append(rules, map[string]any{
+		rules = append(rules, confine(map[string]any{
 			"type": "field", "ruleTag": "psp-usage", "network": "tcp,udp", "outboundTag": "direct", "webhook": usage(),
-		})
+		}))
 	}
 	return rules, outbounds
 }

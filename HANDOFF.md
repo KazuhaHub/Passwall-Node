@@ -164,6 +164,88 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 
 ## 3. 下一步做什么
 
+### 按目的地分流（`transit.route.v1`，protocol v0.9.0）
+
+Agent 总是声明 `transit.route.v1`（`staticCapabilities`，两个引擎都编译）。`Transit.Routes`
+让一个 listener 按目的地走不同出口；`DestinationRule.Exits` 把策略规则限定在某些出口上。
+出口 = 第一条命中的 route rule，否则 listener 的默认出口（egress 链路，否则 `local`）。
+**没有 routes 的 listener 逐字节与以前相同**（golden 不变）。
+
+每个有 routes 的 listener，在 transit 规则之后，按协议的编译契约依次输出：
+
+1. 对每条 route rule k（按顺序）：**段 k** = 所有 `exits` 为空或含出口 k 的策略规则，保持策略
+   顺序和各自动作，与 route k 取交集；然后是 route k 的 **catch-all** → 出口 k；
+2. **默认段**：`exits` 允许默认出口的规则，即今天的 egress 拆分输出，末尾是链路 catch-all。
+
+靠前的段的 catch-all 吃掉本 route 的流量，"先匹配先赢"才成立，**不要把顺序改了**。允许类
+（allow、exempt、usage catch-all）走本段出口；observe 走 dialerProxy=该链路的 freedom
+（`local` 用原来的）；block 保留黑洞，开了 `audit_egress` 时按链路拆（`psp-deny-<id>~lnk_N`）。
+route 的出口链路不在本次编译里 → 拒绝**该 listener**（config 对象错误，`PlanTransit` 里统一做，
+两个引擎共用），绝不退回 `local`。
+
+实现位置：`core/transit.go`（`TransitPlan.Routes/RouteGroups/Unrouted/DefaultExit`、
+`SegmentSuffix`、`ListenerError`）、`core/policy.go`（`PolicyPlan.ForBase/ForSegment`、`ExitsAllow`）、
+`xray/route.go`、`singbox/route.go`。
+
+- **sing-box**：用 `logical`/`and` 精确表达交集，没有近似。route 的目的地只写一次，是 inline
+  `rule_set`（`route.rule_set`，tag `psp-route-<组>-<id>`），各段引用它，体积随 route 数加规则数
+  线性增长，不是乘积。`on_demand` 下 routed listener 有自己的、只作用于其 inbound 的 `resolve`，放在
+  它们第一条读地址的规则之前；unrouted listener 的 resolve 与没有 routes 时完全一样
+  （`finishRoutes`）。routed 的规则先放在 `config.routed`，等对 unrouted listener 做完
+  `applyEgress` 之后再拼回去。
+- **sing-box 的 sniff（重要）**：sing-box 拨号用客户端请求的目的地，不能拨嗅探到的名字（Xray 可以），
+  所以需要 sniff 的策略下，route / 策略 / 拨号三者不能读不同的名字，否则客户端写个 Host 就能选出口、
+  绕过按出口限定的 block。routed listener 按"客户端请求的是什么"分开：**请求域名**的连接在 sniff
+  **之前**用请求的名字完整决定（各段 + 以 `domain_regex "."` 限定的 catch-all），到不了 sniff，Host/SNI
+  改变不了出口也改变不了哪条按出口限定的规则生效；策略里有 protocol 规则时，在各段之前对 routed inbound 上
+  请求域名的连接先做一次只嗅 BitTorrent 的 `sniff`（`"sniffer":["bittorrent"]`，只设 protocol 不设域名），
+  所以 protocol 规则仍然生效（TCP 实测；UDP/uTP 未测，harness 的 SOCKS 客户端只有 TCP）；
+  **请求地址**的连接照常过 sniff（策略读它声称的名字，策略本来就有的限制），但 route 绝不按声称的名字
+  选它：sniff 之后的 route 只剩地址/端口/网络部分（`…-ip` rule_set），没有地址的 route 直接略去。
+  Xray 拨的是嗅探到的名字，所以声称的名字就是生效的名字。实测见 `linkmatrix/route_test.go`
+  `checkSniffed`（两个引擎各自的预期不同但都自洽）。
+- **Xray**：用 `protocol.IntersectDestinations` 逐对求交。`exact=false` 时结果是超集：block 照用
+  （只会多拦）；allow/observe 副本**丢弃**（fail closed，流量落到后面的规则），并通过
+  `Artifact.Issues` 报 `route_policy_approximate`（`runtime.recordArtifactIssues` →
+  `agent.IssueSink`，key=listener，detail=`<规则> on <route>`；按 artifact digest 去重）。
+  route 自己的 ports/network 求交总是精确的。`on_demand` 下只写域名的规则对写了地址的 route 其实是
+  精确的：一条同时带 `domain` 与 `ip` 的 Xray 规则（两者 AND）就是"域名命中且解析进 route 的 CIDR"
+  （`hostnameThroughAddresses`），不再丢弃、不报 issue。**trailing-dot 守卫手工求交**
+  （`dotGuard`）：直接用 `IntersectDestinations` 会得到"整条 route 都拦"；带点主机名永远
+  不匹配 `domain:`/`full:`，只会命中包含的 `keyword:`，`on_demand` 下再加"域名正则 AND ip"
+  的单条 Xray 规则（Xray 同条规则的 domain 与 ip 是 AND）。
+- **tag**：段副本的规则 tag 后缀 `~<出口>~r<k>`（`~lnk_8~r1`、`~local~r2`，默认段 `~<出口>~r0`），
+  在规则 id 与 `a`/`b` 半之后；Xray 不允许重复 ruleTag。路由完全相同的 listener 合成一组共用
+  规则，第二组起加 `~g<n>`。`~r` 只出现在 ruleTag 上；outbound 名保持审计接收端读的形式
+  （`audit_egress` 下链路段 `psp-deny-<id>~lnk_N`，`local` 用原名 = 没有 egress），接收端不解析 `~r`。
+  `linkmatrix` 里的真核审计测试覆盖 compiler→core→接收端：X P2 → (p1, lnk_8)、Y P3 → (p2, "")。
+- **预算**：一个 routed 编译每组最多 20,000 条核心规则、配置最多 32 MiB、目的地条目（域名+CIDR，跨组
+  累加）约 1,000,000（`core.MaxRoutedRules`、`MaxRoutedConfigBytes`、`MaxRoutedEntries`）。**权威的是增量守卫
+  `core.RouteBudget`**：两个引擎在生成 route/段规则时每追加一条规则就计数（规则里**每个列表的每个元素**：
+  `core.CountEntries` 通用遍历，不按字段名，所以以后加字段也不会漏；含 source 网段、用户、exempt 用户、
+  inbound tag、嵌套规则；另加规则数），
+  一旦超限立刻中止构建，拒绝该组第一个 listener（config 对象错误，消息带组号和已达条目数）；做会一次性分配
+  大块的步骤（Xray 的求交）之前先 `Check`。`EstimateRoutedEntries` 只是构建前的快速路径，**可能低估**
+  （看不到 exempt/usage/trailing-dot、route matcher 的副本、hostname-through-address 规则），不可作为依据。
+  回归测试：`internal/core/routebudget`（各种会爆的形状，断言峰值堆 < 256 MiB、拒绝为 config 对象错误）。
+  sing-box 上策略规则的 matcher（域名/CIDR/source 网段；`auth_user` 规则集不支持，留在规则上并计数）达 16 条以上就写成一个 inline rule_set 全局只写一次（`psp-rule-<id>`），
+  各段引用；Xray 没有共享 matcher，按每段副本×route 条目的上界估算并提前拒绝。实测（一条 50,000 域名
+  的 block × 64 条纯端口 route）：sing-box 1 组 2.65 MB / 峰值堆 12 MiB / 0.16 s，3 组 2.86 MB / 14 MiB /
+  0.44 s；Xray 估算约 325 万条，直接拒绝（10 ms）。
+- **测试 harness**：`policylive.FreePort` 改为进程内分配器：端口取自 21000–29999（20000–20999 留给开发机上反代的服务；都在内核临时端口范围之下），
+  分成 9 个 1000 的块，每个测试二进制按可执行文件名哈希取一块；发放前 TCP 与 UDP 都确认空闲，同一进程
+  不重复发放、不回绕，用完即 `t.Fatal`。没有做"core 报 address already in use 就重试
+  Start"（端口写进了配置里，重试要重新编译）。
+- **作用域**：有 routed listener 时，其余规则都显式列出 inbound（unrouted 的），不会在 routed
+  listener 的段之前误判它的流量；带 `exits` 的规则对 unrouted listener 也按其默认出口生效。
+- **已知限制**：Xray 的 sniffing 检查按整份策略做，可能要求一个其规则全在够不着的段里的
+  listener 开 sniffing（偏严，不放过）；域名 route 在 Xray 靠 sniffing/请求域名匹配。
+- **测试**：`xray/route_test.go`、`singbox/route_test.go`（顺序、Exits、local、近似丢弃+issue、
+  缺链路、tag 唯一、分组、on_demand）；`core/transit_route_test.go`；`auditsink` 的 `~r` 后缀；
+  真核矩阵 `linkmatrix/route_test.go`（`TestRouteMatrix`，entry/exit 引擎两两组合：
+  目标服务回报来源地址，exit 以 127.0.0.2/3/4 区分；含 X 同时命中 r1/r2 的消费顺序、
+  `Exits` 只管对应出口、停掉出口 C 后不泄漏到本地）。跑法：设 `PSP_TEST_XRAY_26627_BIN`（或 `PSP_TEST_XRAY_BIN`）和 `PSP_TEST_SING_BOX_BIN`，`go test ./internal/core/linkmatrix -run TestRouteMatrix`。
+
 ### 压缩 sync（`sync.gzip.v1`，protocol v0.9.0）
 
 Agent 总是声明 `sync.gzip.v1`（`staticCapabilities`），`HTTPSyncer`（`internal/agent/transport.go`）

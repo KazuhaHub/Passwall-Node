@@ -527,6 +527,11 @@ func (s *Sink) record(event webhookEvent) {
 	// rule is what precedes the suffix, and the suffix names the link the
 	// connection left through (or, for a block, would have). It is reported
 	// only when the deployment asks for it.
+	//
+	// A copy made for a segment of a routed listener (transit.route.v1) names its
+	// outbound the same way: "~lnk_<id>" for a link's segment, and the plain
+	// outbound for "local", which therefore reports no egress. The route rule
+	// is in the rule tag only, which this receiver never reads.
 	suffix, split := "", false
 	if before, after, found := strings.Cut(rule, "~"); found {
 		rule, suffix, split = before, after, true

@@ -239,8 +239,13 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		config.Outbounds = append(config.Outbounds, compileLinkOut(link))
 	}
 
-	if snapshot.DestinationPolicy != nil {
-		if err := c.applyPolicy(&config, snapshot, served); err != nil {
+	// A routed listener's rules are built by applyRoutes; the policy covers the
+	// rest (see applyPolicy). Without routes this is exactly what it was.
+	groups := transit.RouteGroups(served)
+	var policyPlan agentcore.PolicyPlan
+	if snapshot.DestinationPolicy != nil || len(groups) > 0 {
+		var err error
+		if policyPlan, err = c.applyPolicy(&config, snapshot, served, transit); err != nil {
 			return agentcore.Artifact{}, err
 		}
 	}
@@ -260,7 +265,14 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		config.Inbounds = append(config.Inbounds, compileProbeInbound(probe))
 	}
 	policy := snapshot.DestinationPolicy
-	applyEgress(&config, served, transit.Egress, policy != nil && policy.AuditEgress)
+	applyEgress(&config, transit.Unrouted(served), transit.Egress, policy != nil && policy.AuditEgress)
+	var issues []agentcore.ArtifactIssue
+	if len(groups) > 0 {
+		var err error
+		if issues, err = c.applyRoutes(&config, snapshot, policyPlan, transit, groups); err != nil {
+			return agentcore.Artifact{}, err
+		}
+	}
 	routeTransit(&config, transitInboundTags(transit))
 	routeProbes(&config, transit.Probes)
 
@@ -269,8 +281,16 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		return agentcore.Artifact{}, fmt.Errorf("encode xray config: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	if len(encoded) > agentcore.MaxRoutedConfigBytes && len(transit.Routes) > 0 {
+		for _, key := range served {
+			if _, routed := transit.Routes[key]; routed {
+				return agentcore.Artifact{}, agentcore.ListenerError(key,
+					fmt.Errorf("the compiled configuration is %d bytes, more than the %d a routed compile may take", len(encoded), agentcore.MaxRoutedConfigBytes))
+			}
+		}
+	}
 	digest := sha256.Sum256(encoded)
-	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:])}, nil
+	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:]), Issues: issues}, nil
 }
 
 func (c Compiler) compileInbound(release corecatalog.Release, listener protocol.Listener, clients []protocol.Client) (map[string]any, bool, string, error) {

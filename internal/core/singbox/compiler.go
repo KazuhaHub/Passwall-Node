@@ -48,6 +48,9 @@ type config struct {
 	Inbounds  []map[string]any `json:"inbounds"`
 	Outbounds []map[string]any `json:"outbounds"`
 	Route     map[string]any   `json:"route"`
+	// routed holds the rules of the routed listeners until the egress split has
+	// run on the rest (see applyRoutes); it is never encoded.
+	routed *routedRules
 }
 
 func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (agentcore.Artifact, error) {
@@ -171,8 +174,10 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for _, link := range transit.LinksOut {
 		result.Outbounds = append(result.Outbounds, compileLinkOut(link))
 	}
-	if snapshot.DestinationPolicy != nil {
-		if err := c.applyPolicy(&result, snapshot, served); err != nil {
+	// A routed listener's rules are built by applyRoutes; the policy covers the
+	// rest (see applyPolicy). Without routes this is exactly what it was.
+	if snapshot.DestinationPolicy != nil || len(transit.Routes) > 0 {
+		if err := c.applyPolicy(&result, snapshot, served, transit); err != nil {
 			return agentcore.Artifact{}, err
 		}
 	}
@@ -187,7 +192,8 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for _, probe := range transit.Probes {
 		result.Inbounds = append(result.Inbounds, compileProbeInbound(probe))
 	}
-	applyEgress(&result, served, transit.Egress)
+	applyEgress(&result, transit.Unrouted(served), transit.Egress)
+	finishRoutes(&result)
 	routeTransit(&result, transitInboundTags(transit))
 	routeProbes(&result, transit.Probes)
 	encoded, err := json.MarshalIndent(result, "", "  ")
@@ -195,6 +201,14 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		return agentcore.Artifact{}, fmt.Errorf("encode sing-box config: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	if len(encoded) > agentcore.MaxRoutedConfigBytes && len(transit.Routes) > 0 {
+		for _, key := range served {
+			if _, routed := transit.Routes[key]; routed {
+				return agentcore.Artifact{}, agentcore.ListenerError(key,
+					fmt.Errorf("the compiled configuration is %d bytes, more than the %d a routed compile may take", len(encoded), agentcore.MaxRoutedConfigBytes))
+			}
+		}
+	}
 	digest := sha256.Sum256(encoded)
 	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:])}, nil
 }

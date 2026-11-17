@@ -333,3 +333,42 @@ func testArtifact(config string) agentcore.Artifact {
 }
 
 var _ Installer = (*installerStub)(nil)
+
+// What a compile found and did not refuse is reported through the issue sink,
+// once per artifact and listener, and a sink that fails never fails the round.
+func TestRoundReportsTheIssuesOfTheCompile(t *testing.T) {
+	store := openRuntimeStore(t)
+	listener := protocol.Listener{Key: protocol.NewListenerKey(1), Config: protocol.RawConfig(`{"protocol":"vless"}`)}
+	saveRuntimeBody(t, store, protocol.StreamConfig, protocol.ConfigBody{
+		Core: protocol.CoreSelection{Engine: "xray", Version: "26.7.28"}, Listeners: []protocol.Listener{listener},
+	})
+	artifact := testArtifact(`{"inbounds":[]}`)
+	artifact.Issues = []agentcore.ArtifactIssue{{Code: agentcore.IssueRoutePolicyApproximate, Key: "lst_1", Detail: "p1 on r1"}}
+	var recorded []agent.LocalIssue
+	compiler := &compilerStub{artifact: artifact}
+	installer := &installerStub{result: install.Installation{Engine: "xray", Version: "26.7.28", BinaryPath: "/cores/xray/26.7.28/xray"}}
+	runtime, err := New(Options{
+		Store: store, Installer: installer, Supervisor: &supervisorStub{},
+		CompilerFactory: func(protocol.CoreSelection) (agentcore.Compiler, error) { return compiler, nil },
+		Now:             func() time.Time { return time.Unix(1_700_000_000, 0) },
+		Issues: agent.IssueSinkFunc(func(_ context.Context, issue agent.LocalIssue) (bool, error) {
+			recorded = append(recorded, issue)
+			return true, errors.New("outbox unavailable")
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := runtime.NewRound()
+	if err := round.UpsertListener(t.Context(), listener); err != nil {
+		t.Fatal(err)
+	}
+	if err := round.Finalize(t.Context()); err != nil {
+		t.Fatalf("an issue sink that fails failed the round: %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].Kind != "route_policy_approximate" || recorded[0].Key != "lst_1" ||
+		recorded[0].Stream != protocol.StreamConfig || recorded[0].Detail != "p1 on r1" ||
+		recorded[0].DedupeKey != "route_policy_approximate:lst_1:"+artifact.Digest {
+		t.Fatalf("recorded = %+v", recorded)
+	}
+}

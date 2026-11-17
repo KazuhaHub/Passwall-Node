@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -20,6 +21,10 @@ type TransitPlan struct {
 	LinksIn  []protocol.LinkIn
 	LinksOut []protocol.LinkOut
 	Egress   map[protocol.ListenerKey]protocol.LinkKey
+	// Routes are the route rules of each served listener that has any, in rule
+	// order (transit.route.v1). A listener absent from it has no routes and
+	// leaves through its default exit only.
+	Routes map[protocol.ListenerKey][]protocol.RouteRule
 	// Probes are the loopback inbounds that carry the end-to-end link probe,
 	// one per outgoing link, in link key order. Empty unless Transit.Probe has a
 	// link URL.
@@ -134,6 +139,37 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 			return TransitPlan{}, LinkError(link.Key, err)
 		}
 	}
+	// A route that leaves through a link this agent does not have rejects ITS
+	// LISTENER, before the transit as a whole is validated: the panel sees which
+	// listener is broken, and the connection can never fall back to leaving
+	// locally for lack of the exit it names.
+	if len(transit.Routes) > 0 {
+		isServed := make(map[protocol.ListenerKey]bool, len(served))
+		for _, key := range served {
+			isServed[key] = true
+		}
+		haveLink := make(map[protocol.LinkKey]bool, len(transit.LinksOut))
+		for _, link := range transit.LinksOut {
+			haveLink[link.Key] = true
+		}
+		for _, routes := range transit.Routes {
+			if !isServed[routes.Listener] {
+				continue
+			}
+			for _, rule := range routes.Rules {
+				if rule.Exit != protocol.LocalExit && !haveLink[rule.Exit] {
+					return TransitPlan{}, ListenerError(routes.Listener,
+						fmt.Errorf("route %s leaves through %s, which is not one of this node's outgoing links", rule.ID, rule.Exit))
+				}
+			}
+			for _, binding := range transit.Egress {
+				if binding.Listener == routes.Listener && !haveLink[binding.Link] {
+					return TransitPlan{}, ListenerError(routes.Listener,
+						fmt.Errorf("default exit %s is not one of this node's outgoing links", binding.Link))
+				}
+			}
+		}
+	}
 	if err := protocol.ValidateTransit(transit); err != nil {
 		return TransitPlan{}, fmt.Errorf("transit: %w", err)
 	}
@@ -238,6 +274,15 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 		}
 		plan.Egress[binding.Listener] = binding.Link
 	}
+	for _, routes := range transit.Routes {
+		if !isServed[routes.Listener] {
+			continue
+		}
+		if plan.Routes == nil {
+			plan.Routes = make(map[protocol.ListenerKey][]protocol.RouteRule)
+		}
+		plan.Routes[routes.Listener] = append([]protocol.RouteRule(nil), routes.Rules...)
+	}
 	return plan, nil
 }
 
@@ -254,6 +299,11 @@ func ForwardError(key protocol.ForwardKey, err error) error {
 
 // LinkError attributes a compile failure to one link.
 func LinkError(key protocol.LinkKey, err error) error {
+	return &ObjectError{Stream: protocol.StreamConfig, Key: string(key), Code: "core_config_rejected", Err: err}
+}
+
+// ListenerError attributes a compile failure to one listener.
+func ListenerError(key protocol.ListenerKey, err error) error {
 	return &ObjectError{Stream: protocol.StreamConfig, Key: string(key), Code: "core_config_rejected", Err: err}
 }
 
@@ -299,4 +349,91 @@ func StripEgressSuffix(name string) string {
 		return before
 	}
 	return name
+}
+
+// DefaultExit is where a served listener leaves when no route rule matches: its
+// egress link, else protocol.LocalExit.
+func (p TransitPlan) DefaultExit(listener protocol.ListenerKey) protocol.LinkKey {
+	if link, bound := p.Egress[listener]; bound {
+		return link
+	}
+	return protocol.LocalExit
+}
+
+// RouteGroup is a set of routed listeners that route identically: the same
+// rules and the same default exit. A compiler emits each segment once per group
+// with the group's inbounds, instead of once per listener.
+type RouteGroup struct {
+	Listeners []protocol.ListenerKey
+	Default   protocol.LinkKey
+	Rules     []protocol.RouteRule
+}
+
+// RouteGroups groups the routed listeners among served, in the order the first
+// listener of each group appears in served.
+func (p TransitPlan) RouteGroups(served []protocol.ListenerKey) []RouteGroup {
+	var groups []RouteGroup
+	index := map[string]int{}
+	for _, key := range served {
+		rules, routed := p.Routes[key]
+		if !routed {
+			continue
+		}
+		exit := p.DefaultExit(key)
+		encoded, _ := json.Marshal(struct {
+			Default protocol.LinkKey
+			Rules   []protocol.RouteRule
+		}{exit, rules})
+		at, seen := index[string(encoded)]
+		if !seen {
+			at = len(groups)
+			index[string(encoded)] = at
+			groups = append(groups, RouteGroup{Default: exit, Rules: rules})
+		}
+		groups[at].Listeners = append(groups[at].Listeners, key)
+	}
+	return groups
+}
+
+// Unrouted are the served listeners without route rules, in order.
+func (p TransitPlan) Unrouted(served []protocol.ListenerKey) []protocol.ListenerKey {
+	var out []protocol.ListenerKey
+	for _, key := range served {
+		if _, routed := p.Routes[key]; !routed {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// The budget of a compile with routed listeners. A route rule is copied into
+// every segment of its group (once per policy rule that applies there), so the
+// output is roughly routes x policy rules; both cores load the whole file into
+// memory and test rules in order for every connection. 20,000 generated rules
+// is two orders above what a real list needs (64 routes x 64 policy rules is
+// 4,096), and 32 MiB keeps the encoded config well under what a core parses
+// quickly and what the agent stores per deployment. A listener over either is
+// rejected as itself.
+const (
+	MaxRoutedRules       = 20000
+	MaxRoutedConfigBytes = 32 << 20
+)
+
+// SegmentSuffix is what a rule, outbound or catch-all copied for one segment of
+// a routed group carries after its own name: "~<exit>~r<k>" for the segment of
+// route rule r<k> (exit is "local" or the link key), "~<exit>~r0" for the
+// default segment, which is no route rule's. r0 is not a valid route id, so it
+// names no rule. A group after the first adds "~g<n>": Xray refuses a repeated
+// rule tag, and two groups emit the same segment with different matchers.
+// The suffix is on rule tags; outbounds keep the "~lnk_<id>" the audit receiver
+// reads, and the plain name for local.
+func SegmentSuffix(exit protocol.LinkKey, ruleID string, group int) string {
+	if ruleID == "" {
+		ruleID = "r0"
+	}
+	suffix := "~" + string(exit) + "~" + ruleID
+	if group > 0 {
+		suffix += "~g" + strconv.Itoa(group+1)
+	}
+	return suffix
 }
