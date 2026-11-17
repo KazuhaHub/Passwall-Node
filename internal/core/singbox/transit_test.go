@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/state"
+	statesqlite "github.com/KazuhaHub/passwall-node/v4/internal/state/sqlite"
 	"github.com/KazuhaHub/passwall-node/v4/internal/testutil/policylive"
 	"github.com/KazuhaHub/passwall-node/v4/internal/testutil/transitlive"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
@@ -92,32 +95,133 @@ func TestCompilerRejectsAForwardOnAListenerPort(t *testing.T) {
 	}
 }
 
-// A relayed connection has no user. It must neither break the event stream
-// nor enter the ledger, including its later events that carry no metadata.
-func TestTranslateConnectionEventsSkipsForwards(t *testing.T) {
-	mapping := telemetryMapping{listenerByTag: map[string]protocol.ListenerKey{}, clientByName: map[string]protocol.ClientKey{}}
+// A relayed connection has no user. Its events, including the later ones that
+// carry no metadata, are ledger events keyed by the transit object alone.
+func TestTranslateConnectionEventsMetersForwards(t *testing.T) {
+	mapping := telemetryMapping{
+		listenerByTag: map[string]protocol.ListenerKey{}, clientByName: map[string]protocol.ClientKey{},
+		transitByInbound: map[string]string{"transit-fwd_1": "fwd_1"},
+	}
 	message := &connectionEvents{Reset_: true, Events: []*connectionEvent{{
 		Type: connectionEventNew, ID: "f1",
-		Connection: &connection{ID: "f1", Inbound: "transit-fwd_1", Source: "198.51.100.7:4000", UplinkTotal: 3},
+		Connection: &connection{ID: "f1", Inbound: "transit-fwd_1", Source: "198.51.100.7:4000", UplinkTotal: 3, DownlinkTotal: 4},
 	}}}
 	events, connections, err := translateConnectionEvents(message, mapping, nil)
-	if err != nil || len(events) != 0 || !connections["f1"].transit {
-		t.Fatalf("events=%v connections=%v err=%v", events, connections, err)
+	want := []state.CoreTrafficEvent{{ConnectionID: "f1", Transit: "fwd_1", Absolute: true, UpBytes: 3, DownBytes: 4}}
+	if err != nil || !reflect.DeepEqual(events, want) || connections["f1"].transit != "fwd_1" {
+		t.Fatalf("events=%+v connections=%v err=%v", events, connections, err)
 	}
 	events, connections, err = translateConnectionEvents(&connectionEvents{Events: []*connectionEvent{
-		{Type: connectionEventUpdate, ID: "f1", UplinkDelta: 5},
-		{Type: connectionEventClosed, ID: "f1", ClosedAt: 9, Connection: &connection{ID: "f1", Inbound: "transit-fwd_1", Source: "198.51.100.7:4000", ClosedAt: 9}},
+		{Type: connectionEventUpdate, ID: "f1", UplinkDelta: 5, DownlinkDelta: 6},
+		{Type: connectionEventClosed, ID: "f1", ClosedAt: 9, Connection: &connection{ID: "f1", Inbound: "transit-fwd_1", Source: "198.51.100.7:4000", ClosedAt: 9, UplinkTotal: 8, DownlinkTotal: 10}},
 	}}, mapping, connections)
-	if err != nil || len(events) != 0 || len(connections) != 0 {
-		t.Fatalf("events=%v connections=%v err=%v", events, connections, err)
+	want = []state.CoreTrafficEvent{
+		{ConnectionID: "f1", Transit: "fwd_1", UpBytes: 5, DownBytes: 6},
+		{ConnectionID: "f1", Transit: "fwd_1", Absolute: true, UpBytes: 8, DownBytes: 10, Closed: true, ClosedAtMS: 9},
 	}
-	deployment := state.CoreDeployment{
-		ConfigBody: []byte(`{"listeners":[],"transit":{"forwards":[{"key":"fwd_1"}]}}`),
-		RosterBody: []byte(`{"clients":[]}`),
-		Artifact:   []byte(`{"inbounds":[{"tag":"transit-fwd_1"}]}`),
+	if err != nil || !reflect.DeepEqual(events, want) || len(connections) != 0 {
+		t.Fatalf("events=%+v connections=%v err=%v", events, connections, err)
 	}
-	if _, err := decodeTelemetryMapping(deployment); err != nil {
-		t.Fatalf("a forward inbound broke the telemetry mapping: %v", err)
+}
+
+func transitDeployment(t *testing.T, config protocol.ConfigBody, artifact string) state.CoreDeployment {
+	t.Helper()
+	configBody, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state.CoreDeployment{ConfigBody: configBody, RosterBody: []byte(`{"clients":[]}`), Artifact: []byte(artifact)}
+}
+
+func TestTranslateConnectionEventsMetersLinksByInboundAndOutbound(t *testing.T) {
+	deployment := transitDeployment(t, protocol.ConfigBody{
+		Listeners: []protocol.Listener{{Key: protocol.NewListenerKey(1)}},
+		Transit: &protocol.Transit{
+			LinksIn:  []protocol.LinkIn{{Key: protocol.NewLinkKey(1)}},
+			LinksOut: []protocol.LinkOut{{Key: protocol.NewLinkKey(2)}},
+		},
+	}, `{"inbounds":[{"tag":"transit-lnk_1"}],"outbounds":[{"tag":"transit-lnk_2"}]}`)
+	mapping, err := decodeTelemetryMapping(deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapping.linkByOutbound["transit-lnk_2"] != "lnk_2" || mapping.transitByInbound["transit-lnk_1"] != "lnk_1" {
+		t.Fatalf("mapping = %+v", mapping)
+	}
+	mapping.listenerByTag = map[string]protocol.ListenerKey{"psp-lst_1": protocol.NewListenerKey(1)}
+	mapping.clientByName = map[string]protocol.ClientKey{"user": protocol.NewClientKey(3)}
+	events, _, err := translateConnectionEvents(&connectionEvents{Reset_: true, Events: []*connectionEvent{
+		{Type: connectionEventNew, ID: "in", Connection: &connection{Inbound: "transit-lnk_1", Outbound: "direct", UplinkTotal: 1}},
+		{Type: connectionEventNew, ID: "out", Connection: &connection{
+			Inbound: "psp-lst_1", Outbound: "transit-lnk_2", User: "user", Source: "192.0.2.5:1", UplinkTotal: 2,
+		}},
+		{Type: connectionEventNew, ID: "local", Connection: &connection{
+			Inbound: "psp-lst_1", Outbound: "direct", User: "user", Source: "192.0.2.5:2", UplinkTotal: 3,
+		}},
+	}}, mapping, nil)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	if events[0].Transit != "lnk_1" || events[0].EgressLink != "" || events[0].ClientKey != "" {
+		t.Fatalf("link-in event = %+v", events[0])
+	}
+	if events[1].Transit != "" || events[1].EgressLink != "lnk_2" || events[1].ClientKey != protocol.NewClientKey(3) {
+		t.Fatalf("link-out event = %+v", events[1])
+	}
+	if events[2].EgressLink != "" {
+		t.Fatalf("a local connection got a link: %+v", events[2])
+	}
+}
+
+func TestTranslateConnectionEventsRejectsUnknownTransitTag(t *testing.T) {
+	mapping := telemetryMapping{transitByInbound: map[string]string{"transit-fwd_1": "fwd_1"}}
+	_, _, err := translateConnectionEvents(&connectionEvents{Reset_: true, Events: []*connectionEvent{{
+		Type: connectionEventNew, ID: "x", Connection: &connection{Inbound: "transit-fwd_9"},
+	}}}, mapping, nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown transit inbound") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDecodeTelemetryMappingTransitPresence(t *testing.T) {
+	config := protocol.ConfigBody{Transit: &protocol.Transit{
+		Forwards: []protocol.Forward{{Key: protocol.NewForwardKey(2)}, {Key: protocol.NewForwardKey(1)}},
+		LinksIn:  []protocol.LinkIn{{Key: protocol.NewLinkKey(3)}},
+		LinksOut: []protocol.LinkOut{{Key: protocol.NewLinkKey(1)}},
+	}}
+	// fwd_2 and the outbound of lnk_1 are in the configuration but not running.
+	mapping, err := decodeTelemetryMapping(transitDeployment(t, config, `{"inbounds":[{"tag":"transit-fwd_1"},{"tag":"transit-lnk_3"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counters := assembleSingBoxCounters(state.CoreDeployment{}, mapping, state.CoreTrafficSnapshot{
+		Forwards: map[protocol.ForwardKey]state.CoreTrafficValue{"fwd_1": {UpBytes: 1, DownBytes: 2}},
+		Links:    map[protocol.LinkKey]state.CoreTrafficValue{"lnk_3": {UpBytes: 3, DownBytes: 4}},
+	}, 7)
+	wantForwards := []agentcore.ForwardCounters{
+		{Key: "fwd_1", Present: true, UpBytes: 1, DownBytes: 2, CounterEpoch: 7},
+		{Key: "fwd_2", CounterEpoch: 7},
+	}
+	wantLinks := []agentcore.LinkCounters{
+		{Key: "lnk_1", CounterEpoch: 7},
+		{Key: "lnk_3", Present: true, UpBytes: 3, DownBytes: 4, CounterEpoch: 7},
+	}
+	if !reflect.DeepEqual(counters.Forwards, wantForwards) || !reflect.DeepEqual(counters.Links, wantLinks) {
+		t.Fatalf("counters = %+v", counters)
+	}
+	if _, err := decodeTelemetryMapping(transitDeployment(t, config, `{"inbounds":[{"tag":"transit-fwd_9"}]}`)); err == nil {
+		t.Fatal("an artifact inbound outside the applied config was accepted")
+	}
+}
+
+func TestAssembleCountersWithoutTransitHasNoTransitFields(t *testing.T) {
+	mapping, err := decodeTelemetryMapping(transitDeployment(t, protocol.ConfigBody{Transit: &protocol.Transit{}}, `{"inbounds":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := assembleSingBoxCounters(state.CoreDeployment{}, mapping, state.CoreTrafficSnapshot{}, 1)
+	if got.Forwards != nil || got.Links != nil {
+		t.Fatalf("counters = %+v", got)
 	}
 }
 
@@ -199,14 +303,92 @@ func TestForwardRelaysThroughRealSingBox(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a relayed connection broke telemetry: %v", err)
 		}
-		if len(events) != 0 {
-			t.Fatalf("relayed traffic entered the ledger: %+v", events)
-		}
-		for _, event := range batch.Events {
-			if event.Connection != nil && strings.HasPrefix(event.Connection.Inbound, agentcore.TransitTagPrefix) {
+		for _, event := range events {
+			if event.Transit == "fwd_1" && event.Absolute && event.UpBytes > 0 {
 				sawForward = true
 			}
 		}
 		batch = nil
+	}
+}
+
+// startMeter runs the production telemetry against the real sing-box that
+// serves artifact, journalling into a scratch state store, and returns what a
+// report would carry now.
+func startMeter(t *testing.T, snapshot agentcore.Snapshot, artifact agentcore.Artifact, apiListen string) func() (agentcore.Counters, error) {
+	t.Helper()
+	store, err := statesqlite.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	configBody, _ := json.Marshal(protocol.ConfigBody{Listeners: snapshot.Listeners, Transit: snapshot.Transit})
+	rosterBody, _ := json.Marshal(protocol.RosterBody{Clients: snapshot.Clients})
+	if err := store.SaveCoreDeployment(t.Context(), state.CoreDeployment{
+		Engine: "sing-box", Version: "1.14.0", ConfigDigest: artifact.Digest, Artifact: artifact.Config,
+		ConfigBody: configBody, RosterBody: rosterBody, AppliedAtMS: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status := agentcore.Status{
+		State: agentcore.ProcessRunning, Engine: "sing-box", Version: "1.14.0", BinaryPath: "/sing-box",
+		ConfigDigest: artifact.Digest, LastChangedAt: time.Unix(2, 0),
+	}
+	telemetry, err := NewTelemetry(TelemetryOptions{
+		Store: store, Status: func() agentcore.Status { return status },
+		APIListen: apiListen, APISecret: testAPISecret,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = telemetry.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return func() (agentcore.Counters, error) { return telemetry.Collect(ctx) }
+}
+
+// TestForwardCountersThroughRealSingBox sends payloads through two forwards
+// and wants the production telemetry to report them: present, at least the
+// payload in each direction, nothing on the forward that was not used.
+func TestForwardCountersThroughRealSingBox(t *testing.T) {
+	binary, ok := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
+	if !ok {
+		t.Skip("set PSP_TEST_SING_BOX_BIN to the audited sing-box 1.14.0 binary")
+	}
+	echo := transitlive.StartEcho(t)
+	used, idle := policylive.FreePort(t), policylive.FreePort(t)
+	forward := func(id int64, port int) protocol.Forward {
+		return protocol.Forward{Key: protocol.NewForwardKey(id), Listen: "127.0.0.1", Port: port,
+			Target: "127.0.0.1", TargetPort: echo.Port, Network: protocol.ForwardNetworkTCP}
+	}
+	snapshot := transitlive.Snapshot(t, policylive.FreePort(t), forward(1, used), forward(2, idle))
+	apiListen := fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t))
+	artifact, err := (Compiler{APIListen: apiListen, APISecret: testAPISecret}).Compile(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := policylive.Start(t, binary, "run", "-c", policylive.WriteFile(t, "server.json", artifact.Config))
+	policylive.WaitListening(t, fmt.Sprintf("127.0.0.1:%d", used), process)
+	collect := startMeter(t, snapshot, artifact, apiListen)
+	transitlive.ExpectTCP(t, used, process)
+	payload := int64(len("transit tcp payload"))
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		counters, err := collect()
+		if err == nil && len(counters.Forwards) == 2 {
+			first, second := counters.Forwards[0], counters.Forwards[1]
+			if first.Key != "fwd_1" || second.Key != "fwd_2" || !first.Present || !second.Present ||
+				second.UpBytes != 0 || second.DownBytes != 0 {
+				t.Fatalf("forwards = %+v", counters.Forwards)
+			}
+			if first.UpBytes >= payload && first.DownBytes >= payload {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("forward counters never reached the payload: %+v (%v)\n%s", counters.Forwards, err, process.Output())
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

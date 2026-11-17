@@ -424,10 +424,11 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // not be left out of the release.
 //
 // transit.forward.v1 and transit.link.v1 are always among them: both engines
-// relay forwards and run links. Only Xray measures them (sing-box's only
-// traffic source is keyed by user), so a sing-box node relays and reports
-// convergence but sends no transit counters, which the panel reads as "not
-// measured". Users are charged on their listener on both engines either way.
+// relay forwards and run links, and both measure them: Xray from its
+// statistics, sing-box from its connection ledger (a relayed connection is
+// counted under its transit key, never as a user's usage). A node that relays
+// nothing sends no transit counters, which the panel reads as "not measured".
+// Users are charged on their listener on both engines either way.
 //
 // audit.hits.v1 and audit.usage.v1 are among them only when the audit receiver
 // is listening, which is decided once at startup; a receiver that fails
@@ -435,14 +436,16 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // They are declared together and statically, for both engines: the receiver
 // serves both paths, and the panel works out from the engine whether usage is
 // actually collected (only Xray has a webhook, so a sing-box node enforces but
-// records nothing).
+// records nothing). audit.hits.egress.v1 goes with them: the receiver reads a
+// hit's egress off the outbound tag, and which hits carry it is up to the
+// policy (audit_egress), which PSP sets only for an Xray entry with egress.
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
 	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}
 	if auditHits {
-		capabilities = append(capabilities, protocol.CapabilityAuditHits, protocol.CapabilityAuditUsage)
+		capabilities = append(capabilities, protocol.CapabilityAuditHits, protocol.CapabilityAuditHitsEgress, protocol.CapabilityAuditUsage)
 	}
 	return capabilities
 }

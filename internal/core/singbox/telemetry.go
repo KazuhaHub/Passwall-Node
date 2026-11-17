@@ -190,6 +190,16 @@ type telemetryMapping struct {
 	clientByName    map[string]protocol.ClientKey
 	presentListener map[protocol.ListenerKey]bool
 	presentClient   map[protocol.ClientKey]bool
+
+	// Transit objects. transitByInbound maps the inbound tag of a forward or
+	// an incoming link to its "fwd_N"/"lnk_N" key; linkByOutbound maps an
+	// entry link's outbound tag to the link.
+	forwards         []protocol.ForwardKey
+	links            []protocol.LinkKey
+	transitByInbound map[string]string
+	linkByOutbound   map[string]protocol.LinkKey
+	presentForward   map[protocol.ForwardKey]bool
+	presentLink      map[protocol.LinkKey]bool
 }
 
 func (t *Telemetry) confirmedMapping(ctx context.Context, status agentcore.Status) (state.CoreDeployment, telemetryMapping, error) {
@@ -211,10 +221,11 @@ type connectionIdentity struct {
 	client   protocol.ClientKey
 	listener protocol.ListenerKey
 	sourceIP string
-	// transit marks a relayed connection. It has no user and is nobody's
-	// usage, so it never enters the ledger; it is tracked only so that its
-	// later update and close events, which carry no metadata, are recognised.
-	transit bool
+	// transit is the "fwd_N" or "lnk_N" key of a relayed connection. It has
+	// no user: its bytes belong to that transit object alone.
+	transit string
+	// egress is the link a user's connection left through, if any.
+	egress protocol.LinkKey
 }
 
 func translateConnectionEvents(message *connectionEvents, mapping telemetryMapping, current map[string]connectionIdentity) ([]state.CoreTrafficEvent, map[string]connectionIdentity, error) {
@@ -244,16 +255,12 @@ func translateConnectionEvents(message *connectionEvents, mapping telemetryMappi
 		if !exists {
 			return nil, nil, fmt.Errorf("connection %s event arrived without metadata", event.ID)
 		}
-		if identity.transit {
-			if event.Type == connectionEventClosed || (event.Connection != nil && event.Connection.ClosedAt > 0) {
-				delete(next, event.ID)
-			} else {
-				next[event.ID] = identity
-			}
-			continue
-		}
-		translated := state.CoreTrafficEvent{
-			ConnectionID: event.ID, ClientKey: identity.client, ListenerKey: identity.listener, SourceIP: identity.sourceIP,
+		translated := state.CoreTrafficEvent{ConnectionID: event.ID}
+		if identity.transit != "" {
+			translated.Transit = identity.transit
+		} else {
+			translated.ClientKey, translated.ListenerKey = identity.client, identity.listener
+			translated.SourceIP, translated.EgressLink = identity.sourceIP, identity.egress
 		}
 		switch event.Type {
 		case connectionEventNew:
@@ -295,7 +302,11 @@ func translateConnectionEvents(message *connectionEvents, mapping telemetryMappi
 
 func identifyConnection(value *connection, mapping telemetryMapping) (connectionIdentity, error) {
 	if strings.HasPrefix(value.Inbound, agentcore.TransitTagPrefix) {
-		return connectionIdentity{transit: true}, nil
+		key, exists := mapping.transitByInbound[value.Inbound]
+		if !exists {
+			return connectionIdentity{}, fmt.Errorf("unknown transit inbound %q", value.Inbound)
+		}
+		return connectionIdentity{transit: key}, nil
 	}
 	listener, exists := mapping.listenerByTag[value.Inbound]
 	if !exists {
@@ -313,7 +324,10 @@ func identifyConnection(value *connection, mapping telemetryMapping) (connection
 	if err != nil {
 		return connectionIdentity{}, fmt.Errorf("source IP %q: %w", host, err)
 	}
-	return connectionIdentity{client: client, listener: listener, sourceIP: address.Unmap().String()}, nil
+	return connectionIdentity{
+		client: client, listener: listener, sourceIP: address.Unmap().String(),
+		egress: mapping.linkByOutbound[value.Outbound],
+	}, nil
 }
 
 func decodeTelemetryMapping(deployment state.CoreDeployment) (telemetryMapping, error) {
@@ -329,6 +343,40 @@ func decodeTelemetryMapping(deployment state.CoreDeployment) (telemetryMapping, 
 		clients:       append([]protocol.Client(nil), desiredRoster.Clients...),
 		listenerByTag: make(map[string]protocol.ListenerKey), clientByName: make(map[string]protocol.ClientKey),
 		presentListener: make(map[protocol.ListenerKey]bool), presentClient: make(map[protocol.ClientKey]bool),
+		transitByInbound: make(map[string]string), linkByOutbound: make(map[string]protocol.LinkKey),
+		presentForward: make(map[protocol.ForwardKey]bool), presentLink: make(map[protocol.LinkKey]bool),
+	}
+	linkSeen := make(map[protocol.LinkKey]bool)
+	addLink := func(key protocol.LinkKey) error {
+		if _, err := key.RowID(); err != nil {
+			return fmt.Errorf("applied link key %q: %w", key, err)
+		}
+		if !linkSeen[key] {
+			linkSeen[key] = true
+			result.links = append(result.links, key)
+		}
+		return nil
+	}
+	if desiredConfig.Transit != nil {
+		for _, forward := range desiredConfig.Transit.Forwards {
+			if _, err := forward.Key.RowID(); err != nil {
+				return telemetryMapping{}, fmt.Errorf("applied forward key %q: %w", forward.Key, err)
+			}
+			result.forwards = append(result.forwards, forward.Key)
+			result.transitByInbound[agentcore.ForwardTag(forward.Key)] = string(forward.Key)
+		}
+		for _, link := range desiredConfig.Transit.LinksIn {
+			if err := addLink(link.Key); err != nil {
+				return telemetryMapping{}, err
+			}
+			result.transitByInbound[agentcore.LinkTag(link.Key)] = string(link.Key)
+		}
+		for _, link := range desiredConfig.Transit.LinksOut {
+			if err := addLink(link.Key); err != nil {
+				return telemetryMapping{}, err
+			}
+			result.linkByOutbound[agentcore.LinkTag(link.Key)] = link.Key
+		}
 	}
 	for _, listener := range desiredConfig.Listeners {
 		if _, err := listener.Key.RowID(); err != nil {
@@ -357,15 +405,24 @@ func decodeTelemetryMapping(deployment state.CoreDeployment) (telemetryMapping, 
 				Name string `json:"name"`
 			} `json:"users"`
 		} `json:"inbounds"`
+		Outbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"outbounds"`
 	}
 	if err := json.Unmarshal(deployment.Artifact, &artifact); err != nil {
 		return telemetryMapping{}, fmt.Errorf("decode applied sing-box artifact: %w", err)
 	}
 	for _, inbound := range artifact.Inbounds {
-		// Forwards are not measured on sing-box: its connection API is the
-		// only traffic source, and the durable ledger behind it is keyed by
-		// client and listener, which a relayed connection has neither of.
 		if strings.HasPrefix(inbound.Tag, agentcore.TransitTagPrefix) {
+			key, exists := result.transitByInbound[inbound.Tag]
+			if !exists {
+				return telemetryMapping{}, fmt.Errorf("applied sing-box contains unknown transit inbound %q", inbound.Tag)
+			}
+			if strings.HasPrefix(key, "fwd_") {
+				result.presentForward[protocol.ForwardKey(key)] = true
+			} else {
+				result.presentLink[protocol.LinkKey(key)] = true
+			}
 			continue
 		}
 		listener, exists := result.listenerByTag[inbound.Tag]
@@ -381,6 +438,13 @@ func decodeTelemetryMapping(deployment state.CoreDeployment) (telemetryMapping, 
 			result.presentClient[client] = true
 		}
 	}
+	for _, outbound := range artifact.Outbounds {
+		if link, exists := result.linkByOutbound[outbound.Tag]; exists {
+			result.presentLink[link] = true
+		}
+	}
+	sort.Slice(result.forwards, func(i, j int) bool { return result.forwards[i] < result.forwards[j] })
+	sort.Slice(result.links, func(i, j int) bool { return result.links[i] < result.links[j] })
 	sort.Slice(result.listeners, func(i, j int) bool { return result.listeners[i] < result.listeners[j] })
 	sort.Slice(result.clients, func(i, j int) bool { return result.clients[i].Key < result.clients[j].Key })
 	return result, nil
@@ -404,6 +468,28 @@ func assembleSingBoxCounters(_ state.CoreDeployment, mapping telemetryMapping, s
 			Key: listener, Present: mapping.presentListener[listener], UpBytes: value.UpBytes,
 			DownBytes: value.DownBytes, CounterEpoch: epoch,
 		})
+	}
+	// Transit counters follow Xray's shape: nothing at all when the node
+	// relays nothing, so a report without transit is unchanged.
+	if len(mapping.forwards) > 0 {
+		result.Forwards = make([]agentcore.ForwardCounters, 0, len(mapping.forwards))
+		for _, key := range mapping.forwards {
+			value := snapshot.Forwards[key]
+			result.Forwards = append(result.Forwards, agentcore.ForwardCounters{
+				Key: key, Present: mapping.presentForward[key], UpBytes: value.UpBytes,
+				DownBytes: value.DownBytes, CounterEpoch: epoch,
+			})
+		}
+	}
+	if len(mapping.links) > 0 {
+		result.Links = make([]agentcore.LinkCounters, 0, len(mapping.links))
+		for _, key := range mapping.links {
+			value := snapshot.Links[key]
+			result.Links = append(result.Links, agentcore.LinkCounters{
+				Key: key, Present: mapping.presentLink[key], UpBytes: value.UpBytes,
+				DownBytes: value.DownBytes, CounterEpoch: epoch,
+			})
+		}
 	}
 	return result
 }

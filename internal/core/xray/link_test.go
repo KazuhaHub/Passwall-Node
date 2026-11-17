@@ -194,3 +194,159 @@ func TestLinkTelemetry(t *testing.T) {
 		t.Fatalf("counters = %+v", counters)
 	}
 }
+
+// egressPolicy is a policy with every kind of rule an entry splits or leaves
+// whole, in an order that shows the position is kept.
+func egressPolicy(auditEgress bool) *protocol.DestinationPolicy {
+	return &protocol.DestinationPolicy{Collect: protocol.CollectHits, AuditEgress: auditEgress, Rules: []protocol.DestinationRule{
+		{ID: "p1", Action: protocol.RuleAllow, Domains: []string{"full:allowed.example"}},
+		{ID: "p2", Action: protocol.RuleBlock, Domains: []string{"full:blocked.example"}},
+		// A domain half and an address half share one outbound per link.
+		{ID: "p4", Action: protocol.RuleBlock, Domains: []string{"full:both.example"}, CIDRs: []string{"198.51.100.0/24"}},
+		// Scoped to one listener each: only that listener's group gets a rule.
+		{ID: "p5", Action: protocol.RuleBlock, Domains: []string{"full:local.example"}, Inbounds: []protocol.ListenerKey{protocol.NewListenerKey(41)}},
+		{ID: "p6", Action: protocol.RuleBlock, Domains: []string{"full:linked.example"}, Inbounds: []protocol.ListenerKey{protocol.NewListenerKey(42)}},
+		{ID: "p3", Action: protocol.RuleObserve, Domains: []string{"full:watched.example"}},
+	}}
+}
+
+func egressTunnels() *protocol.Transit {
+	return &protocol.Transit{
+		LinksOut: []protocol.LinkOut{ssLinkOut(7)},
+		Egress:   []protocol.EgressBinding{{Listener: protocol.NewListenerKey(42), Link: protocol.NewLinkKey(7)}},
+	}
+}
+
+func compileWith(t *testing.T, snapshot agentcore.Snapshot) agentcore.Artifact {
+	t.Helper()
+	artifact, err := (Compiler{AuditSocket: "/d/audit.sock", AuditToken: "tok"}).Compile(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return artifact
+}
+
+// AuditEgress splits the blocks like the permits, so a hit's outbound names the
+// link; every other rule is as it was, and the order is the original's.
+func TestAuditEgressSplitsBlocksPerLinkAndKeepsTheOrder(t *testing.T) {
+	snapshot := twoListenerSnapshot(t)
+	snapshot.DestinationPolicy = egressPolicy(true)
+	snapshot.Transit = egressTunnels()
+	artifact := compileWith(t, snapshot)
+	var config routing
+	if err := json.Unmarshal(artifact.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(egressSummary(config.Routing.Rules), "\n")
+	want := strings.Join([]string{
+		"psp-p1|[psp-lst_41]|direct",
+		"psp-p1~lnk_7|[psp-lst_42]|transit-lnk_7",
+		"psp-trailing-dot|<nil>|blocked",
+		"psp-p2|[psp-lst_41]|psp-deny-p2",
+		"psp-p2~lnk_7|[psp-lst_42]|psp-deny-p2~lnk_7",
+		"psp-p4a|[psp-lst_41]|psp-deny-p4",
+		"psp-p4a~lnk_7|[psp-lst_42]|psp-deny-p4~lnk_7",
+		"psp-p4b|[psp-lst_41]|psp-deny-p4",
+		"psp-p4b~lnk_7|[psp-lst_42]|psp-deny-p4~lnk_7",
+		"psp-p5|[psp-lst_41]|psp-deny-p5",
+		"psp-p6~lnk_7|[psp-lst_42]|psp-deny-p6~lnk_7",
+		"psp-p3|[psp-lst_41]|psp-watch-p3",
+		"psp-p3~lnk_7|[psp-lst_42]|psp-watch-p3~lnk_7",
+		"transit-egress~lnk_7|[psp-lst_42]|transit-lnk_7",
+	}, "\n")
+	if got != want {
+		t.Fatalf("rules:\n%s\nwant:\n%s", got, want)
+	}
+	// One blackhole per (rule, link), however many halves the rule has; the
+	// local one stays as it was.
+	counts := map[string]int{}
+	for _, outbound := range config.Outbounds {
+		tag, _ := outbound["tag"].(string)
+		if strings.HasPrefix(tag, "psp-deny-") {
+			counts[tag]++
+			if outbound["protocol"] != "blackhole" {
+				t.Fatalf("%s is %v, want blackhole", tag, outbound["protocol"])
+			}
+		}
+	}
+	for _, tag := range []string{"psp-deny-p2", "psp-deny-p2~lnk_7", "psp-deny-p4", "psp-deny-p4~lnk_7", "psp-deny-p5", "psp-deny-p6~lnk_7"} {
+		if counts[tag] != 1 {
+			t.Fatalf("outbound %s appears %d times: %v", tag, counts[tag], counts)
+		}
+	}
+	// A copy is audited like the rule it came from: every rule that routes to a
+	// deny or watch outbound, split or not, carries the hit webhook.
+	var hooked struct {
+		Routing struct {
+			Rules []struct {
+				RuleTag     string         `json:"ruleTag"`
+				OutboundTag string         `json:"outboundTag"`
+				Webhook     map[string]any `json:"webhook"`
+			} `json:"rules"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(artifact.Config, &hooked); err != nil {
+		t.Fatal(err)
+	}
+	audited := 0
+	for _, rule := range hooked.Routing.Rules {
+		if strings.HasPrefix(rule.OutboundTag, "psp-deny-") || strings.HasPrefix(rule.OutboundTag, "psp-watch-") {
+			audited++
+			if rule.Webhook["url"] != "/d/audit.sock:/hit" {
+				t.Fatalf("%s has webhook %v", rule.RuleTag, rule.Webhook)
+			}
+		}
+	}
+	if audited != 10 {
+		t.Fatalf("%d audited rules, want 10", audited)
+	}
+}
+
+// With the flag off the artifact is what it was before the flag existed: the
+// split of blocks is the only thing the flag changes.
+func TestWithoutAuditEgressTheBlocksAreNotSplit(t *testing.T) {
+	snapshot := twoListenerSnapshot(t)
+	snapshot.DestinationPolicy = egressPolicy(false)
+	snapshot.Transit = egressTunnels()
+	artifact := compileWith(t, snapshot)
+	if strings.Contains(string(artifact.Config), "psp-deny-p2~") || strings.Contains(string(artifact.Config), "psp-p2~") {
+		t.Fatal("a block was split with audit_egress off")
+	}
+	var config routing
+	if err := json.Unmarshal(artifact.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(egressSummary(config.Routing.Rules), "\n")
+	for _, line := range []string{"psp-p2|<nil>|psp-deny-p2", "psp-p4a|<nil>|psp-deny-p4", "psp-p5|[psp-lst_41]|psp-deny-p5", "psp-p6|[psp-lst_42]|psp-deny-p6"} {
+		if !strings.Contains(got, line) {
+			t.Fatalf("missing %q in\n%s", line, got)
+		}
+	}
+	// And the flag is the only difference between the two compiles' permits.
+	snapshot.DestinationPolicy = egressPolicy(true)
+	if on := compileWith(t, snapshot); on.Digest == artifact.Digest {
+		t.Fatal("the flag changed nothing with tunnels bound")
+	}
+}
+
+// No tunnels means nothing to split: the flag, on or off, changes no byte.
+func TestAuditEgressChangesNothingWithoutTunnels(t *testing.T) {
+	for name, transit := range map[string]*protocol.Transit{
+		"no transit":       nil,
+		"empty transit":    {},
+		"unserved binding": {LinksOut: []protocol.LinkOut{ssLinkOut(7)}, Egress: []protocol.EgressBinding{{Listener: protocol.NewListenerKey(99), Link: protocol.NewLinkKey(7)}}},
+		"link, no binding": {LinksOut: []protocol.LinkOut{ssLinkOut(7)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := twoListenerSnapshot(t)
+			snapshot.Transit = transit
+			snapshot.DestinationPolicy = egressPolicy(false)
+			off := compileWith(t, snapshot)
+			snapshot.DestinationPolicy = egressPolicy(true)
+			on := compileWith(t, snapshot)
+			if string(on.Config) != string(off.Config) || on.Digest != off.Digest {
+				t.Fatalf("the flag changed the artifact:\n%s\nvs\n%s", on.Config, off.Config)
+			}
+		})
+	}
+}

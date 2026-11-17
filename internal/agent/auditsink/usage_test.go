@@ -201,10 +201,10 @@ func TestHitAndUsagePathsAreSeparate(t *testing.T) {
 // is not deployed has no bearing, and a staged roster counts like a deployed one.
 func TestUsageIsAttributedAgainstTheStagedAndDeployedRosters(t *testing.T) {
 	sink := startTestSink(t, nil)
-	sink.SetRoster(map[string]protocol.SubjectKey{"u5@x": "usr_5"}, nil)
+	sink.SetRoster(map[string]protocol.SubjectKey{"u5@x": "usr_5"}, nil, Egress{})
 	sink.use(t, usageBody("u5@x", "a.example:443"))
 	sink.use(t, usageBody("u9@x", "a.example:443"))
-	sink.StageRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, nil)
+	sink.StageRoster(map[string]protocol.SubjectKey{"u9@x": "usr_9"}, nil, Egress{})
 	sink.use(t, usageBody("u9@x", "a.example:443"))
 	sink.DiscardStaged()
 	sink.use(t, usageBody("u9@x", "a.example:443"))

@@ -47,6 +47,7 @@ type connection struct {
 	Source        string `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`
 	User          string `protobuf:"bytes,10,opt,name=user,proto3" json:"user,omitempty"`
 	ClosedAt      int64  `protobuf:"varint,13,opt,name=closedAt,proto3" json:"closedAt,omitempty"`
+	Outbound      string `protobuf:"bytes,19,opt,name=outbound,proto3" json:"outbound,omitempty"`
 	UplinkTotal   int64  `protobuf:"varint,16,opt,name=uplinkTotal,proto3" json:"uplinkTotal,omitempty"`
 	DownlinkTotal int64  `protobuf:"varint,17,opt,name=downlinkTotal,proto3" json:"downlinkTotal,omitempty"`
 }

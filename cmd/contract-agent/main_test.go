@@ -111,7 +111,7 @@ func requireStatus(t *testing.T, report protocol.NodeReport, want *protocol.Poli
 		t.Fatalf("capabilities %v do not declare %s", report.Capabilities, protocol.CapabilityDestinationResolve)
 	}
 	// It has no audit receiver, so it must not declare what it cannot keep.
-	for _, capability := range []string{protocol.CapabilityAuditHits, protocol.CapabilityAuditUsage} {
+	for _, capability := range []string{protocol.CapabilityAuditHits, protocol.CapabilityAuditHitsEgress, protocol.CapabilityAuditUsage} {
 		if slices.Contains(report.Capabilities, capability) {
 			t.Fatalf("capabilities %v declare %s, but the contract agent has no audit receiver", report.Capabilities, capability)
 		}

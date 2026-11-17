@@ -199,11 +199,21 @@ type CounterBatchResult struct {
 // CoreTrafficEvent is one connection-ledger mutation emitted by a streaming
 // core telemetry API. Absolute events are idempotent snapshots; delta events
 // are accepted only after the connection identity has been observed.
+//
+// Two shapes are valid. A user event names a client, a listener and a source
+// IP, and may name EgressLink when the connection left through a link; its
+// bytes are the client's and the listener's, and also the link's. A transit
+// event names only Transit, a "fwd_N" or "lnk_N" key, for a connection a
+// forward or an incoming link relayed; it has no user, so its bytes are that
+// transit object's alone. EgressLink is not stored per connection: the stream
+// supplies it on every event of the connection.
 type CoreTrafficEvent struct {
 	ConnectionID string
 	ClientKey    protocol.ClientKey
 	ListenerKey  protocol.ListenerKey
 	SourceIP     string
+	Transit      string
+	EgressLink   protocol.LinkKey
 	Absolute     bool
 	UpBytes      int64
 	DownBytes    int64
@@ -221,6 +231,8 @@ type CoreTrafficSnapshot struct {
 	Ready     bool
 	Clients   map[protocol.ClientKey]CoreTrafficValue
 	Listeners map[protocol.ListenerKey]CoreTrafficValue
+	Forwards  map[protocol.ForwardKey]CoreTrafficValue
+	Links     map[protocol.LinkKey]CoreTrafficValue
 }
 
 // CoreDeployment is the exact desired snapshot last confirmed running. It is
