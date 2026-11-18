@@ -364,6 +364,14 @@ body has been read and decoded in full. `last_request_bytes` and
 was rejected and resent plain records the plain retry. `MaxResponseBytes` bounds
 wire bytes and is clamped to the 16 MiB protocol limit.
 
+Compression does not raise the limit on the agent's own report: it is still
+16 MiB of plain JSON, whether or not it is sent compressed. A full
+report costs about 220 bytes per client, so it reaches that limit at roughly
+73k clients on one node; past it the node can no longer send a full report and
+stops receiving roster updates and reporting traffic. Keep a node below about
+50k clients. Paged full reports, which remove this limit, are planned for 4.4
+(Passwall-Protocol issue #16).
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real
