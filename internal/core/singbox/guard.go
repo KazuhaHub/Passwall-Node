@@ -25,10 +25,14 @@ import (
 // no rule webhook, so there is nothing to count. The refusal itself is
 // enforced; only NodeReport.SourceGuardHits stays empty for this engine.
 //
+// Only guardable listeners (those whose source a client cannot set) are given
+// rules; see UnguardableClientRejection for what becomes of an allow_from client
+// on the others.
+//
 // A node with no guarded client emits nothing, so its configuration and digest
 // are what they were before.
-func (c Compiler) applyGuard(result *config, snapshot agentcore.Snapshot, served []protocol.ListenerKey) error {
-	plan, err := agentcore.PlanSourceGuard(snapshot, served)
+func (c Compiler) applyGuard(result *config, snapshot agentcore.Snapshot, guardable []protocol.ListenerKey) error {
+	plan, err := agentcore.PlanSourceGuard(snapshot, guardable)
 	if err != nil {
 		var guardErr *agentcore.GuardError
 		if errors.As(err, &guardErr) && guardErr.Client != "" {

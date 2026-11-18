@@ -105,3 +105,24 @@ func TestGuardPlanAttributesFailClosedRefusalsToTheMissingSet(t *testing.T) {
 		}
 	}
 }
+
+// A client whose guard does not validate (an empty one) is skipped, and the
+// plan still holds every rule of the clients that are fine: the compile refuses
+// that client alone, and the others' rules must keep resolving.
+func TestGuardPlanSkipsAClientWhoseGuardIsInvalid(t *testing.T) {
+	r := &Runtime{now: func() time.Time { return time.Unix(1, 0) }}
+	config := &protocol.ConfigBody{
+		Listeners: []protocol.Listener{{Key: "lst_1", Config: protocol.RawConfig(`{"enabled":true}`)}},
+		Transit:   &protocol.Transit{SourceSets: []protocol.SourceSet{{Key: "src_a", CIDRs: []string{"203.0.113.0/24"}}}},
+	}
+	roster := &protocol.RosterBody{Clients: []protocol.Client{
+		{Key: "cli_1", Subject: "usr_1", Enabled: true, Listeners: []protocol.ListenerKey{"lst_1"},
+			Credentials: protocol.Credential{Username: "u1"}, SourceGuard: &protocol.ClientSourceGuard{}},
+		{Key: "cli_2", Subject: "usr_2", Enabled: true, Listeners: []protocol.ListenerKey{"lst_1"},
+			Credentials: protocol.Credential{Username: "u2"}, SourceGuard: &protocol.ClientSourceGuard{AllowFrom: "src_a"}},
+	}}
+	plan := r.guardPlan(config, roster)
+	if rule, ok := plan["guard-allow-a"]; !ok || !rule.Allow || len(plan) != 2 {
+		t.Fatalf("plan = %+v", plan)
+	}
+}

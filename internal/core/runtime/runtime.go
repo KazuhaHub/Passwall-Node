@@ -280,7 +280,17 @@ func (r *Runtime) guardPlan(config *protocol.ConfigBody, roster *protocol.Roster
 	if config == nil || roster == nil {
 		return nil
 	}
-	snapshot := agentcore.Snapshot{Listeners: config.Listeners, Clients: roster.Clients, Transit: config.Transit}
+	// A client whose guard does not validate is skipped, not allowed to empty the
+	// plan: the compile refuses that client alone, and every other rule it emitted
+	// must still resolve.
+	clients := make([]protocol.Client, 0, len(roster.Clients))
+	for _, client := range roster.Clients {
+		if client.SourceGuard != nil && protocol.ValidateClientSourceGuard(client.SourceGuard) != nil {
+			continue
+		}
+		clients = append(clients, client)
+	}
+	snapshot := agentcore.Snapshot{Listeners: config.Listeners, Clients: clients, Transit: config.Transit}
 	plan, err := agentcore.PlanSourceGuard(snapshot, agentcore.ServedListenerKeys(config.Listeners))
 	if err != nil {
 		return nil

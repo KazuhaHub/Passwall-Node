@@ -109,39 +109,52 @@ func (s *Sink) recordGuard(event guardEvent) {
 	nowMS := s.now().UnixMilli()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rule, found := s.guardRuleLocked(event)
-	if !found {
+	rules := s.guardRulesLocked(event)
+	if len(rules) == 0 {
 		s.unmatched++
 		return
 	}
-	for _, set := range rule.Sets {
-		if !rule.Allow && !containsAddr(set.Prefixes, source) {
-			continue
+	// The deployed rule is tried first and the staged one after it: while a
+	// deployment rolls out, a tag both plans know can hold different networks, and
+	// the event is from whichever core refused it, so a source that only the
+	// staged rule's networks contain still belongs to the new core.
+	for _, rule := range rules {
+		matched := false
+		for _, set := range rule.Sets {
+			if !rule.Allow && !containsAddr(set.Prefixes, source) {
+				continue
+			}
+			s.addGuardLocked(guardKey{set.Key, listener, source}, nowMS)
+			matched = true
+			if rule.Allow {
+				break
+			}
 		}
-		s.addGuardLocked(guardKey{set.Key, listener, source}, nowMS)
-		if rule.Allow {
+		if matched {
 			return
 		}
 	}
+	s.unmatched++
 }
 
-// guardRuleLocked resolves the tag of an event. The deployed plan is read first:
-// while a deployment is staged the core still running is the old one, and a tag
-// both plans know is the same set combination (tags are content), with the
-// networks the old core refused by. A tag only the staged plan has belongs to
-// the new core.
-func (s *Sink) guardRuleLocked(event guardEvent) (GuardRule, bool) {
+// guardRulesLocked resolves the tag of an event to the rules it can mean: the
+// deployed plan's first (while a deployment is staged the core still running is
+// the old one, and a tag both plans know is the same set combination, tags being
+// content), then the staged plan's, which belongs to the new core.
+func (s *Sink) guardRulesLocked(event guardEvent) []GuardRule {
+	var rules []GuardRule
 	for _, plan := range []GuardPlan{s.guard, s.stagedGuard} {
 		for _, tag := range []string{event.RuleTag, event.OutboundTag} {
 			if tag == "" {
 				continue
 			}
 			if rule, ok := plan[tag]; ok {
-				return rule, true
+				rules = append(rules, rule)
+				break
 			}
 		}
 	}
-	return GuardRule{}, false
+	return rules
 }
 
 func (s *Sink) addGuardLocked(key guardKey, nowMS int64) {

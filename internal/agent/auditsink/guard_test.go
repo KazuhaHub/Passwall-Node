@@ -231,3 +231,44 @@ func TestFailClosedRefusalIsAttributedToTheMissingSet(t *testing.T) {
 		t.Fatalf("hits = %+v", hits)
 	}
 }
+
+// While a deployment rolls out, a deny tag both plans know can hold different
+// networks (the same combination of sets, one of which gained a network). An
+// event from the new core whose source is in the added network is attributed
+// through the staged plan, not dropped because the deployed plan lacks it.
+func TestStagedNetworksOfASharedDenyTagAreMatchedToo(t *testing.T) {
+	sink := newTestSink(t, nil)
+	prefixes := func(cidr ...string) []netip.Prefix {
+		var out []netip.Prefix
+		for _, c := range cidr {
+			out = append(out, netip.MustParsePrefix(c))
+		}
+		return out
+	}
+	oldRule := GuardRule{Sets: []GuardSet{{Key: "src_b", Prefixes: prefixes("198.51.100.0/24")}}}
+	newRule := GuardRule{Sets: []GuardSet{{Key: "src_b", Prefixes: prefixes("198.51.100.0/24", "192.0.2.0/24")}}}
+	const tag = "psp-guard-deny-788671d7f16c"
+	sink.SetGuard(GuardPlan{tag: oldRule})
+	sink.StageGuard(GuardPlan{tag: newRule})
+	postGuard(sink, testToken, guardEventJSON("192.0.2.9:1", "psp-lst_1", tag, ""))
+	postGuard(sink, testToken, guardEventJSON("198.51.100.7:1", "psp-lst_1", tag, ""))
+	hits := sink.GuardHits()
+	got := map[string]int64{}
+	for _, hit := range hits {
+		got[hit.SourceIP] = hit.Count
+	}
+	if len(hits) != 2 || got["192.0.2.9"] != 1 || got["198.51.100.7"] != 1 {
+		t.Fatalf("hits = %+v", hits)
+	}
+	// A source in neither plan's networks is not attributed to anything.
+	sink.mu.Lock()
+	before := sink.unmatched
+	sink.mu.Unlock()
+	postGuard(sink, testToken, guardEventJSON("203.0.113.5:1", "psp-lst_1", tag, ""))
+	sink.mu.Lock()
+	after := sink.unmatched
+	sink.mu.Unlock()
+	if len(sink.GuardHits()) != 2 || after != before+1 {
+		t.Fatal("an event matching no network was counted")
+	}
+}

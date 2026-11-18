@@ -172,49 +172,150 @@ func TestInvalidGuardIsRejectedAgainstItsClient(t *testing.T) {
 	}
 }
 
+const guardReality = `"network":"tcp","security":"reality","realitySettings":{"dest":"example.com:443","privateKey":"kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo","serverNames":["example.com"],"shortIds":[""]}`
+
+// unfitStreams are streams a client can set the source through, Xray reading
+// the keys without regard to case.
+var unfitStreams = map[string]string{
+	"trusted XFF":               `{` + guardReality + `,"sockopt":{"trustedXForwardedFor":["CF-Connecting-IP","X-Real-IP"]}}`,
+	"trusted XFF any case":      `{` + guardReality + `,"sockopt":{"TrustedXForwardedFor":["X-Real-IP"]}}`,
+	"trusted XFF lower case":    `{` + guardReality + `,"sockopt":{"trustedxforwardedfor":["X-Real-IP"]}}`,
+	"Sockopt any case":          `{` + guardReality + `,"Sockopt":{"TRUSTEDXFORWARDEDFOR":["X-Real-IP"]}}`,
+	"sockopt PROXY header":      `{` + guardReality + `,"sockopt":{"acceptProxyProtocol":true}}`,
+	"sockopt PROXY any case":    `{` + guardReality + `,"SOCKOPT":{"AcceptProxyProtocol":true}}`,
+	"tcp settings PROXY header": `{` + guardReality + `,"tcpSettings":{"acceptProxyProtocol":true}}`,
+	"ws settings PROXY header":  `{"network":"ws","wsSettings":{"acceptProxyProtocol":true,"path":"/"}}`,
+	"ws settings any case":      `{"network":"ws","WsSettings":{"ACCEPTPROXYPROTOCOL":true,"path":"/"}}`,
+	"httpupgrade PROXY header":  `{"network":"httpupgrade","httpupgradeSettings":{"acceptProxyProtocol":true}}`,
+	"raw settings PROXY header": `{` + guardReality + `,"rawSettings":{"acceptProxyProtocol":true}}`,
+}
+
+func TestGuardUnfitMatchesKeysWithoutRegardToCase(t *testing.T) {
+	for name, raw := range unfitStreams {
+		var stream map[string]any
+		if err := json.Unmarshal([]byte(raw), &stream); err != nil {
+			t.Fatal(err)
+		}
+		if guardUnfit(map[string]any{"streamSettings": stream}) == "" {
+			t.Errorf("%s: stream not unfit", name)
+		}
+		if guardUnfit(map[string]any{"StreamSettings": stream}) == "" {
+			t.Errorf("%s: StreamSettings key not unfit", name)
+		}
+	}
+	for name, inbound := range map[string]string{
+		"settings PROXY header": `{"settings":{"acceptProxyProtocol":true}}`,
+		"Settings any case":     `{"Settings":{"AcceptProxyProtocol":true}}`,
+		"settings XFF":          `{"SETTINGS":{"TrustedXForwardedFor":["X-Real-IP"]}}`,
+	} {
+		var object map[string]any
+		_ = json.Unmarshal([]byte(inbound), &object)
+		if guardUnfit(object) == "" {
+			t.Errorf("%s: not unfit", name)
+		}
+	}
+	for name, inbound := range map[string]string{
+		"nothing":          `{"streamSettings":{"network":"tcp"}}`,
+		"empty list":       `{"streamSettings":{"Sockopt":{"TrustedXForwardedFor":[]}}}`,
+		"proxy flag off":   `{"streamSettings":{"sockopt":{"AcceptProxyProtocol":false}}}`,
+		"another key":      `{"streamSettings":{"sockopt":{"mark":255}}}`,
+		"no stream at all": `{}`,
+	} {
+		var object map[string]any
+		_ = json.Unmarshal([]byte(inbound), &object)
+		if reason := guardUnfit(object); reason != "" {
+			t.Errorf("%s: unfit: %s", name, reason)
+		}
+	}
+	forwarded := map[string]any{"streamSettings": map[string]any{"sockopt": map[string]any{
+		"acceptProxyProtocol": true, "trustedXForwardedFor": []any{"X-Real-IP"}}}}
+	if guardUnfit(forwarded) != agentcore.UnguardableForwardedFor {
+		t.Error("the answer depends on the other key")
+	}
+}
+
+func unfitSnapshot(t *testing.T, stream string, guard *protocol.ClientSourceGuard) agentcore.Snapshot {
+	t.Helper()
+	snapshot := guardedSnapshot(t, guard,
+		protocol.SourceSet{Key: "src_a", CIDRs: []string{"203.0.113.0/24"}})
+	var spec listenerSpec
+	if err := json.Unmarshal(snapshot.Listeners[0].Config, &spec); err != nil {
+		t.Fatal(err)
+	}
+	spec.StreamSettings = stream
+	raw, _ := json.Marshal(spec)
+	snapshot.Listeners[0].Config = raw
+	return snapshot
+}
+
+func guardRuleTags(config compiledGuard) []any {
+	var tags []any
+	for _, rule := range config.Routing.Rules {
+		if tag, _ := rule["ruleTag"].(string); strings.HasPrefix(tag, "guard-") {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
 // A listener whose source address can come from the client (an
 // X-Forwarded-For header Xray is told to trust, or a PROXY protocol header it
-// is told to accept) is not guardable: the guard would judge a forgery.
-func TestGuardRefusesAListenerWhoseSourceTheClientCanSet(t *testing.T) {
-	const reality = `"network":"tcp","security":"reality","realitySettings":{"dest":"example.com:443","privateKey":"kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo","serverNames":["example.com"],"shortIds":[""]}`
-	for name, stream := range map[string]string{
-		"trusted XFF":               `{` + reality + `,"sockopt":{"trustedXForwardedFor":["CF-Connecting-IP","X-Real-IP"]}}`,
-		"sockopt PROXY header":      `{` + reality + `,"sockopt":{"acceptProxyProtocol":true}}`,
-		"tcp settings PROXY header": `{` + reality + `,"tcpSettings":{"acceptProxyProtocol":true}}`,
-		"ws settings PROXY header":  `{"network":"ws","wsSettings":{"acceptProxyProtocol":true,"path":"/"}}`,
-		"httpupgrade PROXY header":  `{"network":"httpupgrade","httpupgradeSettings":{"acceptProxyProtocol":true}}`,
-		"raw settings PROXY header": `{` + reality + `,"rawSettings":{"acceptProxyProtocol":true}}`,
-	} {
+// is told to accept) is not guardable. A client whose line is an allow_from is
+// left off it and reported rejected, with the reason, against the client; the
+// listener and the rest of the config deploy.
+func TestGuardRejectsAnAllowClientOnAListenerWhoseSourceTheClientCanSet(t *testing.T) {
+	for name, stream := range unfitStreams {
 		t.Run(name, func(t *testing.T) {
-			snapshot := guardedSnapshot(t, &protocol.ClientSourceGuard{AllowFrom: "src_a"},
-				protocol.SourceSet{Key: "src_a", CIDRs: []string{"203.0.113.0/24"}})
-			var spec listenerSpec
-			if err := json.Unmarshal(snapshot.Listeners[0].Config, &spec); err != nil {
-				t.Fatal(err)
+			snapshot := unfitSnapshot(t, stream, &protocol.ClientSourceGuard{AllowFrom: "src_a"})
+			config, artifact := compileGuard(t, Compiler{}, snapshot)
+			if len(artifact.Rejected) != 1 {
+				t.Fatalf("rejected = %v", artifact.Rejected)
 			}
-			spec.StreamSettings = stream
-			raw, _ := json.Marshal(spec)
-			snapshot.Listeners[0].Config = raw
-
-			_, err := Compiler{}.Compile(context.Background(), snapshot)
-			var objectErr *agentcore.ObjectError
-			if err == nil || !errors.As(err, &objectErr) || objectErr.Stream != protocol.StreamConfig || objectErr.Key != "lst_41" {
-				t.Fatalf("err = %v, want a rejection of lst_41", err)
+			rejection := artifact.Rejected[0]
+			if rejection.Stream != protocol.StreamRoster || rejection.Key != "cli_51" || rejection.Code != "core_config_rejected" {
+				t.Fatalf("rejection = %#v", rejection)
 			}
-			if !strings.Contains(err.Error(), "source guard: listener ") || !strings.Contains(err.Error(), "it cannot be guarded") {
-				t.Fatalf("message = %v", err)
+			if !strings.Contains(rejection.Error(), "source guard: listener lst_41 ") ||
+				!strings.Contains(rejection.Error(), "this client's line cannot be served on it") {
+				t.Fatalf("message = %v", rejection)
+			}
+			if len(guardRuleTags(config)) != 0 {
+				t.Fatalf("a guard rule was put on the listener: %v", config.Routing.Rules)
+			}
+			if strings.Contains(string(artifact.Config), snapshot.Clients[0].Credentials.UUID) {
+				t.Fatal("the rejected client is still on the listener")
 			}
 
 			// Unguarded, or guarded only by a client that is switched off, the
-			// listener is served as before.
+			// listener is served as before, with nobody rejected.
 			snapshot.Clients[0].SourceGuard = nil
-			if _, err := (Compiler{}).Compile(context.Background(), snapshot); err != nil {
-				t.Fatalf("unguarded listener refused: %v", err)
+			if _, artifact := compileGuard(t, Compiler{}, snapshot); len(artifact.Rejected) != 0 {
+				t.Fatalf("unguarded client rejected: %v", artifact.Rejected)
 			}
 			snapshot.Clients[0].SourceGuard = &protocol.ClientSourceGuard{AllowFrom: "src_a"}
 			snapshot.Clients[0].Enabled = false
-			if _, err := (Compiler{}).Compile(context.Background(), snapshot); err != nil {
-				t.Fatalf("listener of a disabled guarded client refused: %v", err)
+			if _, artifact := compileGuard(t, Compiler{}, snapshot); len(artifact.Rejected) != 0 {
+				t.Fatalf("disabled client rejected: %v", artifact.Rejected)
+			}
+		})
+	}
+}
+
+// A deny_from client is served on such a listener and its guard is simply not
+// applied there: nothing is rejected and no rule names the listener.
+func TestGuardDoesNotApplyADenyGuardToAListenerWhoseSourceTheClientCanSet(t *testing.T) {
+	for name, stream := range unfitStreams {
+		t.Run(name, func(t *testing.T) {
+			snapshot := unfitSnapshot(t, stream, &protocol.ClientSourceGuard{DenyFrom: []protocol.SourceSetKey{"src_a"}})
+			config, artifact := compileGuard(t, Compiler{}, snapshot)
+			if len(artifact.Rejected) != 0 {
+				t.Fatalf("rejected = %v", artifact.Rejected)
+			}
+			if len(guardRuleTags(config)) != 0 {
+				t.Fatalf("a guard rule was put on the listener: %v", config.Routing.Rules)
+			}
+			if !strings.Contains(string(artifact.Config), snapshot.Clients[0].Credentials.UUID) {
+				t.Fatal("the deny client is not served")
 			}
 		})
 	}

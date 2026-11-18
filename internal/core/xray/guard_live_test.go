@@ -135,3 +135,43 @@ func TestRealXraySourceGuardWebhookReachesTheReceiver(t *testing.T) {
 		t.Errorf("unauthorized = %d", stats.Unauthorized)
 	}
 }
+
+// TestRealXrayCaseVariantTrustedForwardedForIsNotGuardable: Xray reads
+// configuration keys without regard to case, so a listener spelled
+// "Sockopt"/"TrustedXForwardedFor" takes its source from the header just as the
+// exact spelling does. The compiler must treat it as not guardable: the allow
+// client is rejected on it, and the real core accepts the config that results.
+func TestRealXrayCaseVariantTrustedForwardedForIsNotGuardable(t *testing.T) {
+	binary, ok := os.LookupEnv("PSP_TEST_XRAY_BIN")
+	if !ok {
+		t.Skip("set PSP_TEST_XRAY_BIN to the Xray server binary")
+	}
+	for name, stream := range map[string]string{
+		"exact":      `{"network":"ws","wsSettings":{"path":"/p"},"sockopt":{"trustedXForwardedFor":["X-Forwarded-For"]}}`,
+		"case":       `{"network":"ws","wsSettings":{"path":"/p"},"Sockopt":{"TrustedXForwardedFor":["X-Forwarded-For"]}}`,
+		"lower case": `{"network":"ws","wsSettings":{"path":"/p"},"sockopt":{"trustedxforwardedfor":["X-Forwarded-For"]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := unfitSnapshot(t, stream, &protocol.ClientSourceGuard{AllowFrom: "src_a"})
+			snapshot.Clients[0].Credentials.Flow = ""
+			var spec listenerSpec
+			if err := json.Unmarshal(snapshot.Listeners[0].Config, &spec); err != nil {
+				t.Fatal(err)
+			}
+			spec.Listen, spec.Port = "127.0.0.1", policylive.FreePort(t)
+			snapshot.Listeners[0].Config, _ = json.Marshal(spec)
+			compiler := Compiler{APIListen: fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t))}
+			artifact, err := compiler.Compile(context.Background(), snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(artifact.Rejected) != 1 || artifact.Rejected[0].Key != "cli_51" {
+				t.Fatalf("rejected = %v, want the allow client of the listener", artifact.Rejected)
+			}
+			path := policylive.WriteFile(t, "server.json", allowLoopback(t, artifact.Config))
+			if out, err := exec.Command(binary, "run", "-test", "-c", path).CombinedOutput(); err != nil {
+				t.Fatalf("xray rejected the compiled config: %v\n%s", err, out)
+			}
+		})
+	}
+}

@@ -109,31 +109,30 @@ func TestServedListenerKeys(t *testing.T) {
 	}
 }
 
-func TestHasActiveGuard(t *testing.T) {
+func TestSplitAllowGuardedLeavesOnlyAllowClientsOff(t *testing.T) {
 	now := time.UnixMilli(1000)
-	guard := &protocol.ClientSourceGuard{AllowFrom: "src_a"}
-	active := guardClient(1, "a", guard, 1)
-	disabled := guardClient(2, "b", guard, 1)
+	allow := &protocol.ClientSourceGuard{AllowFrom: "src_a"}
+	deny := &protocol.ClientSourceGuard{DenyFrom: []protocol.SourceSetKey{"src_a"}}
+	active := guardClient(1, "a", allow, 1)
+	disabled := guardClient(2, "b", allow, 1)
 	disabled.Enabled = false
-	expired := guardClient(3, "c", guard, 1)
+	expired := guardClient(3, "c", allow, 1)
 	expired.ExpiresAtMS = 500
 	plain := guardClient(4, "d", nil, 1)
-	if !HasActiveGuard([]protocol.Client{plain, active}, now) {
-		t.Fatal("an enabled guarded client is not seen")
-	}
-	if HasActiveGuard([]protocol.Client{plain, disabled, expired}, now) {
-		t.Fatal("a disabled, expired or unguarded client counts")
+	denied := guardClient(5, "e", deny, 1)
+	kept, dropped := SplitAllowGuarded([]protocol.Client{plain, active, disabled, expired, denied}, now)
+	if len(dropped) != 1 || dropped[0].Key != active.Key || len(kept) != 4 {
+		t.Fatalf("kept = %v, dropped = %v", kept, dropped)
 	}
 }
 
-func TestUnguardableListenerErrorNamesTheListener(t *testing.T) {
-	err := UnguardableListenerError(protocol.NewListenerKey(7), UnguardableForwardedFor)
-	var objectErr *ObjectError
-	if !errors.As(err, &objectErr) || objectErr.Stream != protocol.StreamConfig || objectErr.Key != "lst_7" {
-		t.Fatalf("err = %#v", err)
+func TestUnguardableClientRejectionIsAgainstTheClient(t *testing.T) {
+	rejection := UnguardableClientRejection("cli_7", protocol.NewListenerKey(7), UnguardableForwardedFor)
+	if rejection.Stream != protocol.StreamRoster || rejection.Key != "cli_7" || rejection.Code != "core_config_rejected" {
+		t.Fatalf("rejection = %#v", rejection)
 	}
-	if !strings.Contains(err.Error(), "source guard: listener takes its source address from X-Forwarded-For; it cannot be guarded") {
-		t.Fatalf("message = %v", err)
+	if !strings.Contains(rejection.Error(), "source guard: listener lst_7 takes its source address from X-Forwarded-For; this client's line cannot be served on it") {
+		t.Fatalf("message = %v", rejection)
 	}
 }
 

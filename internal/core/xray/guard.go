@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 	"net/netip"
+	"strings"
 
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 )
@@ -20,12 +21,16 @@ import (
 // A set that already covers everything has nothing to refuse and gets no rule,
 // because an empty source list would match every source.
 //
+// Only guardable listeners (those whose source a client cannot set) are given
+// rules; see UnguardableClientRejection for what becomes of an allow_from client
+// on the others.
+//
 // Each rule has an outbound of its own rather than the shared "blocked": the
 // webhook event names the outbound it was routed to, which is how the receiver
 // tells the rules apart. A node with no guarded client emits nothing at all, so
 // its configuration and digest are what they were before.
-func (c Compiler) applyGuard(config *xrayConfig, snapshot agentcore.Snapshot, served []protocol.ListenerKey) error {
-	plan, err := agentcore.PlanSourceGuard(snapshot, served)
+func (c Compiler) applyGuard(config *xrayConfig, snapshot agentcore.Snapshot, guardable []protocol.ListenerKey) error {
+	plan, err := agentcore.PlanSourceGuard(snapshot, guardable)
 	if err != nil {
 		var guardErr *agentcore.GuardError
 		if errors.As(err, &guardErr) && guardErr.Client != "" {
@@ -120,34 +125,77 @@ func prependRules(config *xrayConfig, front []map[string]any) {
 // own, so it is fine, while one the listener was already set to accept would
 // let any client forge its source. sockopt.trustedXForwardedFor makes Xray take
 // the source from a header the client sends.
+//
+// Xray reads configuration keys case-insensitively ("TrustedXForwardedFor",
+// "Sockopt", "StreamSettings" are all honoured), so the keys are matched the
+// same way, at every level, and in every object of the stream and settings: a
+// spelling the core accepts must not slip past the check.
 func guardUnfit(inbound map[string]any) string {
-	stream, _ := inbound["streamSettings"].(map[string]any)
-	if sockopt, _ := stream["sockopt"].(map[string]any); sockopt != nil {
-		if trusted, _ := sockopt["trustedXForwardedFor"].([]any); len(trusted) > 0 {
-			return agentcore.UnguardableForwardedFor
-		}
-	}
-	if acceptsProxyHeader(stream) {
-		return agentcore.UnguardableProxyHeader
-	}
-	if settings, _ := inbound["settings"].(map[string]any); acceptsProxyHeader(settings) {
-		return agentcore.UnguardableProxyHeader
-	}
-	return ""
-}
-
-// acceptsProxyHeader is true when the object, or any object one level below it
-// (sockopt, tcpSettings, rawSettings, wsSettings, ...), sets acceptProxyProtocol.
-func acceptsProxyHeader(object map[string]any) bool {
-	if accepts, _ := object["acceptProxyProtocol"].(bool); accepts {
-		return true
-	}
-	for _, value := range object {
-		if nested, ok := value.(map[string]any); ok {
-			if accepts, _ := nested["acceptProxyProtocol"].(bool); accepts {
-				return true
+	reason := ""
+	for _, key := range []string{"streamSettings", "settings"} {
+		for _, object := range caseValues(inbound, key) {
+			if found := unfitIn(object); found == agentcore.UnguardableForwardedFor {
+				return found
+			} else if found != "" {
+				reason = found
 			}
 		}
 	}
+	return reason
+}
+
+// unfitIn walks the value, objects and lists, for a non-empty
+// trustedXForwardedFor or an acceptProxyProtocol that is on. A header list wins
+// over a PROXY flag so the answer does not depend on map order.
+func unfitIn(value any) string {
+	reason := ""
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, inner := range typed {
+			switch {
+			case strings.EqualFold(key, "trustedXForwardedFor") && nonEmpty(inner):
+				return agentcore.UnguardableForwardedFor
+			case strings.EqualFold(key, "acceptProxyProtocol") && inner == true:
+				reason = agentcore.UnguardableProxyHeader
+			}
+			if found := unfitIn(inner); found == agentcore.UnguardableForwardedFor {
+				return found
+			} else if found != "" {
+				reason = found
+			}
+		}
+	case []any:
+		for _, inner := range typed {
+			if found := unfitIn(inner); found == agentcore.UnguardableForwardedFor {
+				return found
+			} else if found != "" {
+				reason = found
+			}
+		}
+	}
+	return reason
+}
+
+func nonEmpty(value any) bool {
+	switch typed := value.(type) {
+	case []any:
+		return len(typed) > 0
+	case []string:
+		return len(typed) > 0
+	case string:
+		return typed != ""
+	}
 	return false
+}
+
+// caseValues are the values of every key of the object that equals name apart
+// from case.
+func caseValues(object map[string]any, name string) []any {
+	var out []any
+	for key, value := range object {
+		if strings.EqualFold(key, name) {
+			out = append(out, value)
+		}
+	}
+	return out
 }

@@ -202,6 +202,8 @@ func (c Compiler) compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	seenListeners := make(map[protocol.ListenerKey]struct{}, len(listeners))
 	binds := make(map[string]protocol.ListenerKey, len(listeners))
 	served := make([]protocol.ListenerKey, 0, len(listeners))
+	// guardable are the served listeners the source guard can judge.
+	var guardable []protocol.ListenerKey
 	// A fronted listener holds no public bind: the front owns that port and the
 	// listener is moved to a loopback port once the transit is planned.
 	var rejected []*agentcore.ObjectError
@@ -218,7 +220,9 @@ func (c Compiler) compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			return agentcore.Artifact{}, compileListenerError(listener.Key, errors.New("duplicate listener key"))
 		}
 		seenListeners[listener.Key] = struct{}{}
-		inbound, enabled, bind, err := c.compileInbound(release, listener, clientByListener[listener.Key], &rejected)
+		clients := clientByListener[listener.Key]
+		mark := len(rejected)
+		inbound, enabled, bind, err := c.compileInbound(release, listener, clients, &rejected)
 		if err != nil {
 			var clientErr *CompileError
 			if errors.As(err, &clientErr) {
@@ -235,8 +239,24 @@ func (c Compiler) compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		if !enabled {
 			continue
 		}
-		if reason := guardUnfit(inbound); reason != "" && agentcore.HasActiveGuard(clientByListener[listener.Key], snapshot.Now) {
-			return agentcore.Artifact{}, agentcore.UnguardableListenerError(listener.Key, reason)
+		// A listener whose source a client can set cannot carry a guard: no deny
+		// rule is put on it, and a client whose line is an allow_from is left off
+		// it (fail closed there, reported against the client). It is compiled
+		// again without those clients, so a duplicate that only they masked is
+		// judged on its own.
+		reason := guardUnfit(inbound)
+		if reason != "" {
+			if kept, dropped := agentcore.SplitAllowGuarded(clients, snapshot.Now); len(dropped) > 0 {
+				rejected = rejected[:mark]
+				for _, client := range dropped {
+					rejected = append(rejected, agentcore.UnguardableClientRejection(client.Key, listener.Key, reason))
+				}
+				if inbound, enabled, bind, err = c.compileInbound(release, listener, kept, &rejected); err != nil {
+					return agentcore.Artifact{}, compileListenerError(listener.Key, err)
+				}
+			}
+		} else {
+			guardable = append(guardable, listener.Key)
 		}
 		if fronted[listener.Key] {
 			port, _ := inbound["port"].(int)
@@ -321,7 +341,7 @@ func (c Compiler) compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	}
 	// The guard goes first so routeTransit, which prepends, ends up ahead of it:
 	// relayed traffic is never judged by it, and it precedes the policy.
-	if err := c.applyGuard(&config, snapshot, served); err != nil {
+	if err := c.applyGuard(&config, snapshot, guardable); err != nil {
 		return agentcore.Artifact{}, err
 	}
 	routeTransit(&config, transitInboundTags(transit))

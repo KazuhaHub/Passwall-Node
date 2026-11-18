@@ -360,27 +360,41 @@ whose source address does not fit the client's line.
   in the PROXY protocol header.
 - **Which listeners can be guarded.** The guard only ever judges the socket peer,
   or the PROXY header Passwall's own front writes. A listener whose source can
-  come from something the client sends is refused, like any other listener fault
-  (the listener is reported not applied, with the reason `source guard: ...; it
-  cannot be guarded`), whenever an enabled, unexpired client with a guard is
-  attached to it; it never runs unguarded. Not guardable:
+  come from something the client sends is not guardable, and the guard is never
+  silently absent on it:
+  - an **`allow_from`** client attached to it is **rejected on that listener**
+    (left off it, so it cannot connect there) and reported rejected against the
+    client, with the reason `source guard: listener lst_X takes its source address
+    from X-Forwarded-For; this client's line cannot be served on it` (or `accepts
+    a PROXY protocol header from its clients ...`). The rest of the configuration
+    deploys, and the client stays served on its other, guardable listeners. The
+    rejection is re-evaluated whenever the config or the roster changes and after
+    an engine switch, and lifts when the cause is gone.
+  - a **`deny_from`** client is served there and its guard is simply not applied
+    to that listener (no rule names it). The panel only allows lines whose
+    factors are equal on such a listener, so nothing is lost, and a legacy client
+    attached to several listeners does not take the non-guardable one down.
+  No guard reason fails the whole compile. Not guardable:
   - **sing-box**: every listener with a `transport`, that is `ws`, `httpupgrade`,
     `http`/`h2` and `grpc`. On sing-box 1.14 each of them replaces the connection's
     source with the first `X-Forwarded-For` value, and there is no inbound option
     to turn that off (checked with the real binary). Guardable: plain TCP (the
     default transport and `raw`), with or without TLS or REALITY. Behind a CDN
     (WebSocket, HTTPUpgrade) a sing-box listener therefore cannot carry a guard.
-  - **Xray**: a listener whose `streamSettings.sockopt.trustedXForwardedFor` is a
-    non-empty list (Xray then takes the source from the header), and a listener
-    that already accepts a PROXY protocol header (`acceptProxyProtocol` in
-    `sockopt` or any transport's settings, or in the inbound `settings`), since
-    any client could forge its source with one. Xray ignores `X-Forwarded-For`
-    otherwise, so every other transport (tcp/raw, ws, httpupgrade, grpc, xhttp)
-    is guardable. The PROXY header a Passwall front adds to the listener it
-    fronts is its own and does not count; a front already refuses a listener that
-    sets `acceptProxyProtocol` itself.
-  A panel can mirror this: do not offer a guard for a client whose listeners
-  include one of the above.
+  - **Xray**: a listener with a non-empty `trustedXForwardedFor` (Xray then takes
+    the source from the header), and a listener that already accepts a PROXY
+    protocol header (`acceptProxyProtocol` set to true), since any client could
+    forge its source with one. Xray reads configuration keys case-insensitively
+    (`TrustedXForwardedFor`, `Sockopt`, `StreamSettings` and so on are all
+    honoured), so both are matched without regard to case, anywhere in the
+    listener's stream settings (`sockopt` or any transport's settings) or its
+    inbound `settings`. Xray ignores `X-Forwarded-For` otherwise, so every other
+    transport (tcp/raw, ws, httpupgrade, grpc, xhttp) is guardable. The PROXY
+    header a Passwall front adds to the listener it fronts is its own and does
+    not count; a front already refuses a listener that sets `acceptProxyProtocol`
+    itself.
+  A panel can mirror this: offer an `allow_from` guard only to a client whose
+  listeners are all guardable.
 - **Xray** has no "not in" source condition, so an allow rule's source is the
   complement of the set (every address outside it, as the fewest canonical
   prefixes), one rule per allow set and one per distinct deny combination, each

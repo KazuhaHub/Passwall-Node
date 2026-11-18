@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -276,30 +275,43 @@ func activeGuard(client protocol.Client, now time.Time) bool {
 		(client.ExpiresAtMS == 0 || now.IsZero() || now.UnixMilli() < client.ExpiresAtMS)
 }
 
-// HasActiveGuard is true when any of the clients is served and has a source
-// guard: the clients whose listener must be one the guard can judge.
-func HasActiveGuard(clients []protocol.Client, now time.Time) bool {
-	for _, client := range clients {
-		if activeGuard(client, now) {
-			return true
-		}
-	}
-	return false
+// HasActiveAllowGuard is true for a client the core serves whose guard is an
+// allow_from: the clients that cannot be served on a listener the guard cannot
+// judge. A deny_from client can, because the panel only gives such a listener
+// lines whose factors are equal, so a deny rule has nothing to add there.
+func HasActiveAllowGuard(client protocol.Client, now time.Time) bool {
+	return activeGuard(client, now) && client.SourceGuard.AllowFrom != ""
 }
 
 // Why a listener cannot be guarded. The guard judges the socket's peer address
 // (or the one a PROXY header written by Passwall's own front gives); a listener
 // whose source can instead come from something the client sends would let a
-// client choose the address it is judged by.
+// client choose the address it is judged by. Each is the predicate of a sentence
+// that begins "listener <key> ".
 const (
-	UnguardableForwardedFor = "listener takes its source address from X-Forwarded-For; it cannot be guarded"
-	UnguardableProxyHeader  = "listener accepts a PROXY protocol header from its clients, which would let them choose their source address; it cannot be guarded"
+	UnguardableForwardedFor = "takes its source address from X-Forwarded-For"
+	UnguardableProxyHeader  = "accepts a PROXY protocol header from its clients, which would let them choose their source address"
 )
 
-// UnguardableListenerError refuses a listener a guarded client is attached to
-// but whose source address a client can set. It is reported like any other
-// listener fault, so the panel sees the listener as not applied, with the
-// reason, and the guard is never silently absent.
-func UnguardableListenerError(key protocol.ListenerKey, reason string) error {
-	return ListenerError(key, errors.New("source guard: "+reason))
+// UnguardableClientRejection is the rejection of a client with an allow_from
+// guard on a listener whose source address a client can set. The client is left
+// out of that listener only (fail closed there) and the rest of the config
+// deploys; it is reported against the client, with the reason.
+func UnguardableClientRejection(client protocol.ClientKey, listener protocol.ListenerKey, reason string) *ObjectError {
+	return &ObjectError{Stream: protocol.StreamRoster, Key: string(client), Code: "core_config_rejected",
+		Err: fmt.Errorf("source guard: listener %s %s; this client's line cannot be served on it", listener, reason)}
+}
+
+// SplitAllowGuarded separates the clients of a listener that the guard cannot
+// judge into those that can stay (no allow_from guard) and those that are left
+// off it, in their order.
+func SplitAllowGuarded(clients []protocol.Client, now time.Time) (kept, dropped []protocol.Client) {
+	for _, client := range clients {
+		if HasActiveAllowGuard(client, now) {
+			dropped = append(dropped, client)
+		} else {
+			kept = append(kept, client)
+		}
+	}
+	return kept, dropped
 }

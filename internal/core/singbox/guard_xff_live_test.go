@@ -61,8 +61,8 @@ func selfSigned(t *testing.T) (certPEM, keyPEM string) {
 		string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 }
 
-// TestRealSingBoxTransportsTrustForwardedFor is the reason the compiler refuses a
-// guarded client on these transports: on a real sing-box 1.14, a client that
+// TestRealSingBoxTransportsTrustForwardedFor is the reason the compiler leaves an allow_from
+// client off these transports and applies no deny rule there: on a real sing-box 1.14, a client that
 // sends X-Forwarded-For: 203.0.113.9 is routed as coming from 203.0.113.9 (here a
 // route rule on that range rejects it, though the socket peer is 127.0.0.1), and
 // no inbound option turns this off. If a release stops doing so, this fails and
