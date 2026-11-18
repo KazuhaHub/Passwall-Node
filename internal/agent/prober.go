@@ -85,6 +85,7 @@ type probeWindow struct {
 	digest        string
 	samples       []probeSample
 	lastSuccessMS int64
+	loopbackPort  int
 }
 
 // NewProber validates the options and applies the defaults.
@@ -134,9 +135,10 @@ func (p *Prober) Run(ctx context.Context) error {
 // probeTarget is one thing to probe: its identity, a digest of everything its
 // result depends on (a changed digest starts a fresh window), and one attempt.
 type probeTarget struct {
-	id      probeID
-	digest  string
-	attempt func(ctx context.Context) (time.Duration, error)
+	id           probeID
+	digest       string
+	loopbackPort int
+	attempt      func(ctx context.Context) (time.Duration, error)
 }
 
 // Round runs every probe once and returns how long to wait for the next round.
@@ -226,8 +228,13 @@ func (p *Prober) plan(ctx context.Context) ([]probeTarget, time.Duration, time.D
 		}
 		port, hasPort := ports[link.Key]
 		linkURL := settings.LinkURL
+		loopbackPort := 0
+		if coreUp && port >= protocol.ProbePortFirst && port <= protocol.ProbePortLast {
+			loopbackPort = port
+		}
 		targets = append(targets, probeTarget{
 			id: probeID{string(link.Key), protocol.ProbeKindE2E}, digest: digestOf(link, linkURL, port),
+			loopbackPort: loopbackPort,
 			attempt: func(ctx context.Context) (time.Duration, error) {
 				if !hasPort || !coreUp {
 					// No inbound to go through (no free loopback port, or the core
@@ -376,6 +383,7 @@ func (p *Prober) record(target probeTarget, rtt time.Duration, err error) {
 		// an object that no longer exists.
 		return
 	}
+	window.loopbackPort = target.loopbackPort
 	sample := probeSample{ok: err == nil, rtt: rtt}
 	if err == nil {
 		window.lastSuccessMS = p.options.Now().UnixMilli()
@@ -398,7 +406,7 @@ func (p *Prober) Results() []protocol.ProbeResult {
 		if len(window.samples) == 0 {
 			continue
 		}
-		result := protocol.ProbeResult{Key: id.key, Kind: id.kind, Attempts: len(window.samples), LastSuccessMS: window.lastSuccessMS}
+		result := protocol.ProbeResult{Key: id.key, Kind: id.kind, Attempts: len(window.samples), LastSuccessMS: window.lastSuccessMS, LoopbackPort: window.loopbackPort}
 		var rtts []int
 		for _, sample := range window.samples {
 			if sample.ok {

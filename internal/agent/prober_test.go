@@ -307,14 +307,14 @@ func TestAttemptsAreBoundedInConcurrency(t *testing.T) {
 func TestEndToEndGoesThroughTheProbeInboundAndReportsTimeToFirstByte(t *testing.T) {
 	transit := transportOnly(testLink(7, 30001))
 	transit.Probe.LinkURL = "http://probe.example.com/generate_204"
-	h := newHarness(t, transit, map[string]int{"transit-probe-lnk_7": 47123})
+	h := newHarness(t, transit, map[string]int{"transit-probe-lnk_7": 31123})
 	var status atomic.Int32
 	status.Store(204)
 	h.dial = func(_ context.Context, _, address string) (net.Conn, error) {
 		if address == "exit.example.com:30001" {
 			return accepted(), nil
 		}
-		if address != "127.0.0.1:47123" {
+		if address != "127.0.0.1:31123" {
 			t.Fatalf("e2e dialed %s", address)
 		}
 		near, far := net.Pipe()
@@ -331,10 +331,10 @@ func TestEndToEndGoesThroughTheProbeInboundAndReportsTimeToFirstByte(t *testing.
 	}
 	h.prober.Round(t.Context())
 	result := h.mustResult("lnk_7", protocol.ProbeKindE2E)
-	if result.Attempts != 1 || result.Failures != 0 || result.RTTMedianMS != 42 {
+	if result.Attempts != 1 || result.Failures != 0 || result.RTTMedianMS != 42 || result.LoopbackPort != 31123 {
 		t.Fatalf("e2e = %+v", result)
 	}
-	if transport := h.mustResult("lnk_7", protocol.ProbeKindTransport); transport.Failures != 0 {
+	if transport := h.mustResult("lnk_7", protocol.ProbeKindTransport); transport.Failures != 0 || transport.LoopbackPort != 0 {
 		t.Fatalf("transport = %+v", transport)
 	}
 	status.Store(503)

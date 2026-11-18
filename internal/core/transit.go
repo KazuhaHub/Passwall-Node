@@ -68,8 +68,8 @@ type ProbeInbound struct {
 // or move such a process out of it.
 const (
 	ProbeListen    = "127.0.0.1"
-	ProbePortFirst = 31000
-	ProbePortLast  = 31999
+	ProbePortFirst = protocol.ProbePortFirst
+	ProbePortLast  = protocol.ProbePortLast
 )
 
 // ProbeTagPrefix starts the core inbound tag of a probe inbound. It sits under
