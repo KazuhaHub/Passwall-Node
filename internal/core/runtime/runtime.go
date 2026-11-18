@@ -269,11 +269,18 @@ func (r *Runtime) publishAudit(config *protocol.ConfigBody, roster *protocol.Ros
 // guardPlan is the source guard of a deployment as the receiver reads it: the
 // compile's own planning, run over the stored config and roster, so the rule
 // tags a webhook event carries resolve to the sets the compile wrote them for.
+//
+// The compile plans over a snapshot in which a client a local gate closed is
+// disabled and at its own clock, which the receiver cannot reproduce. It plans
+// over the raw roster with no clock instead, so no client is expired out: the
+// plan holds at least every rule the compile emitted, and since a deny tag names
+// its set combination (core.GuardDenyTag) an extra rule cannot change what the
+// others mean.
 func (r *Runtime) guardPlan(config *protocol.ConfigBody, roster *protocol.RosterBody) auditsink.GuardPlan {
 	if config == nil || roster == nil || config.Transit == nil {
 		return nil
 	}
-	snapshot := agentcore.Snapshot{Listeners: config.Listeners, Clients: roster.Clients, Now: r.now(), Transit: config.Transit}
+	snapshot := agentcore.Snapshot{Listeners: config.Listeners, Clients: roster.Clients, Transit: config.Transit}
 	plan, err := agentcore.PlanSourceGuard(snapshot, agentcore.ServedListenerKeys(config.Listeners))
 	if err != nil {
 		return nil

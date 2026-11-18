@@ -1,12 +1,13 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -26,9 +27,24 @@ const (
 	GuardOutboundPrefix = "psp-guard-"
 )
 
+// GuardDenyTag is the rule tag of a deny combination: the first 12 hex digits of
+// the SHA-256 of its sorted set keys, joined by NUL. It names the combination and
+// not its position among the plan's rules, so one tag means the same combination
+// in every plan; the receiver relies on that while a deployment rolls out and
+// the old and the new core's events are both being read.
+func GuardDenyTag(sets []protocol.SourceSetKey) string {
+	keys := make([]string, 0, len(sets))
+	for _, key := range sets {
+		keys = append(keys, string(key))
+	}
+	sort.Strings(keys)
+	sum := sha256.Sum256([]byte(strings.Join(keys, "\x00")))
+	return GuardDenyTagPrefix + hex.EncodeToString(sum[:])[:12]
+}
+
 // GuardRule is one routing rule of the source guard, engine independent.
 type GuardRule struct {
-	// Tag is the rule tag: guard-allow-<suffix> or guard-deny-<n>.
+	// Tag is the rule tag: guard-allow-<suffix> or guard-deny-<hash> (GuardDenyTag).
 	Tag string
 	// Allow is true for an allow rule: the match is the users on Listeners whose
 	// source is OUTSIDE CIDRs. A deny rule matches a source INSIDE CIDRs.
@@ -195,8 +211,8 @@ func PlanSourceGuard(snapshot Snapshot, served []protocol.ListenerKey) (GuardPla
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	for index, name := range names {
-		rule := GuardRule{Tag: GuardDenyTagPrefix + strconv.Itoa(index+1)}
+	for _, name := range names {
+		rule := GuardRule{}
 		union := map[string]struct{}{}
 		for _, raw := range strings.Split(name, "\x00") {
 			key := protocol.SourceSetKey(raw)
@@ -208,6 +224,7 @@ func PlanSourceGuard(snapshot Snapshot, served []protocol.ListenerKey) (GuardPla
 				union[cidr] = struct{}{}
 			}
 		}
+		rule.Tag = GuardDenyTag(rule.Sets)
 		for cidr := range union {
 			rule.CIDRs = append(rule.CIDRs, cidr)
 		}
@@ -236,8 +253,8 @@ func (e *GuardError) Unwrap() error { return e.Err }
 
 // ServedListenerKeys are the listeners of a config that a compile serves: the
 // enabled ones, in key order. It exists for the audit receiver, which plans the
-// guard from the stored config and roster and must number the deny rules exactly
-// as the compile did. A listener whose config cannot be read is left out: the
+// guard from the stored config and roster and must find a rule for every tag the
+// compile emitted. A listener whose config cannot be read is left out: the
 // compile refuses it, so no deployment holds it.
 func ServedListenerKeys(listeners []protocol.Listener) []protocol.ListenerKey {
 	var served []protocol.ListenerKey

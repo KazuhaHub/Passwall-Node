@@ -67,7 +67,7 @@ func (s *Sink) SetGuard(plan GuardPlan) {
 	s.mu.Unlock()
 }
 
-// StageGuard is the plan of a deployment about to start, consulted before the
+// StageGuard is the plan of a deployment about to start, consulted after the
 // deployed one until the deployment is confirmed (SetGuard) or abandoned
 // (DiscardStaged), for the same reason the roster is staged.
 func (s *Sink) StageGuard(plan GuardPlan) {
@@ -125,8 +125,13 @@ func (s *Sink) recordGuard(event guardEvent) {
 	}
 }
 
+// guardRuleLocked resolves the tag of an event. The deployed plan is read first:
+// while a deployment is staged the core still running is the old one, and a tag
+// both plans know is the same set combination (tags are content), with the
+// networks the old core refused by. A tag only the staged plan has belongs to
+// the new core.
 func (s *Sink) guardRuleLocked(event guardEvent) (GuardRule, bool) {
-	for _, plan := range []GuardPlan{s.stagedGuard, s.guard} {
+	for _, plan := range []GuardPlan{s.guard, s.stagedGuard} {
 		for _, tag := range []string{event.RuleTag, event.OutboundTag} {
 			if tag == "" {
 				continue

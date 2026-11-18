@@ -385,7 +385,11 @@ whose source address does not fit the client's line.
   complement of the set (every address outside it, as the fewest canonical
   prefixes), one rule per allow set and one per distinct deny combination, each
   with a blackhole outbound of its own (`psp-guard-allow-<set>`,
-  `psp-guard-deny-<n>`). An allow set that covers every address emits no rule.
+  `psp-guard-deny-<hash>`). A deny rule is named by its content, the first 12 hex
+  digits of the SHA-256 of its sorted set keys joined by NUL, never by position,
+  so a tag means the same combination in every plan (the receiver reads a
+  rolling deployment's old and new events by it). An allow set that covers every
+  address emits no rule.
 - **sing-box** writes the allow rule as a logical AND of the user and inbound match
   with an inverted `source_ip_cidr`, and rejects.
 - **Refusals are reported on Xray only.** Each guard rule carries a webhook to the

@@ -112,7 +112,7 @@ func TestCompilerEmitsADenyRuleOverTheUnionOfExistingSets(t *testing.T) {
 		t.Fatalf("rules = %v", config.Routing.Rules)
 	}
 	rule := config.Routing.Rules[0]
-	if rule["ruleTag"] != "guard-deny-1" || rule["outboundTag"] != "psp-guard-deny-1" ||
+	if rule["ruleTag"] != "guard-deny-41c10ef944c3" || rule["outboundTag"] != "psp-guard-deny-41c10ef944c3" ||
 		!reflect.DeepEqual(rule["sourceIP"], []any{"1.0.0.0/8", "2001:db8::/32", "203.0.113.0/24"}) {
 		t.Fatalf("rule = %#v", rule)
 	}

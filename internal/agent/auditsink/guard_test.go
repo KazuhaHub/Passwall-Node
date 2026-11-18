@@ -19,7 +19,7 @@ func guardPlan() GuardPlan {
 	}}
 	return GuardPlan{
 		"guard-allow-a": allow, "psp-guard-allow-a": allow,
-		"guard-deny-1": deny, "psp-guard-deny-1": deny,
+		"guard-deny-41c10ef944c3": deny, "psp-guard-deny-41c10ef944c3": deny,
 	}
 }
 
@@ -79,8 +79,8 @@ func TestGuardRefusalsAreAggregatedPerSetListenerAndSource(t *testing.T) {
 func TestDenyRefusalNamesEverySetThatContainsTheSource(t *testing.T) {
 	sink := newTestSink(t, nil)
 	sink.SetGuard(guardPlan())
-	postGuard(sink, testToken, guardEventJSON("198.51.100.5:1", "psp-lst_1", "psp-guard-deny-1", ""))
-	postGuard(sink, testToken, guardEventJSON("198.51.100.200:1", "psp-lst_1", "psp-guard-deny-1", ""))
+	postGuard(sink, testToken, guardEventJSON("198.51.100.5:1", "psp-lst_1", "psp-guard-deny-41c10ef944c3", ""))
+	postGuard(sink, testToken, guardEventJSON("198.51.100.200:1", "psp-lst_1", "psp-guard-deny-41c10ef944c3", ""))
 	sets := map[protocol.SourceSetKey]int64{}
 	for _, hit := range sink.GuardHits() {
 		sets[hit.Set] += hit.Count
@@ -90,7 +90,7 @@ func TestDenyRefusalNamesEverySetThatContainsTheSource(t *testing.T) {
 		t.Fatalf("sets = %v", sets)
 	}
 	// A source no set contains matches nothing, and is counted unmatched.
-	postGuard(sink, testToken, guardEventJSON("192.0.2.1:1", "psp-lst_1", "psp-guard-deny-1", ""))
+	postGuard(sink, testToken, guardEventJSON("192.0.2.1:1", "psp-lst_1", "psp-guard-deny-41c10ef944c3", ""))
 	if len(sink.GuardHits()) != 3 {
 		t.Fatalf("hits = %+v", sink.GuardHits())
 	}
@@ -187,5 +187,34 @@ func TestGuardEntriesAgeOut(t *testing.T) {
 	now = now.Add(2 * time.Minute)
 	if hits := sink.GuardHits(); len(hits) != 0 {
 		t.Fatalf("entry survived its age: %+v", hits)
+	}
+}
+
+// While a deployment is rolling out the old core is still running: its events
+// are read in the deployed plan first, and only a tag the deployed plan does not
+// know falls back to the staged one. The tags are content, so a tag found in
+// either plan names the same combination.
+func TestDeployedGuardPlanIsConsultedBeforeTheStagedOne(t *testing.T) {
+	sink := newTestSink(t, nil)
+	prefixes := func(cidr string) []netip.Prefix { return []netip.Prefix{netip.MustParsePrefix(cidr)} }
+	oldRule := GuardRule{Sets: []GuardSet{{Key: "src_b", Prefixes: prefixes("198.51.100.0/24")}}}
+	newRule := GuardRule{Sets: []GuardSet{{Key: "src_b", Prefixes: prefixes("192.0.2.0/24")}}}
+	onlyNew := GuardRule{Allow: true, Sets: []GuardSet{{Key: "src_n", Prefixes: prefixes("203.0.113.0/24")}}}
+	sink.SetGuard(GuardPlan{"guard-deny-788671d7f16c": oldRule, "psp-guard-deny-788671d7f16c": oldRule})
+	sink.StageGuard(GuardPlan{
+		"guard-deny-788671d7f16c": newRule, "psp-guard-deny-788671d7f16c": newRule,
+		"psp-guard-allow-n": onlyNew,
+	})
+	// The old core refused 198.51.100.7 by the old set's range.
+	postGuard(sink, testToken, guardEventJSON("198.51.100.7:1", "psp-lst_1", "psp-guard-deny-788671d7f16c", ""))
+	// A rule only the new plan has is still attributed.
+	postGuard(sink, testToken, guardEventJSON("192.0.2.77:1", "psp-lst_1", "psp-guard-allow-n", ""))
+	hits := sink.GuardHits()
+	got := map[protocol.SourceSetKey]string{}
+	for _, hit := range hits {
+		got[hit.Set] = hit.SourceIP
+	}
+	if len(hits) != 2 || got["src_b"] != "198.51.100.7" || got["src_n"] != "192.0.2.77" {
+		t.Fatalf("hits = %+v", hits)
 	}
 }
