@@ -113,3 +113,41 @@ func prependRules(config *xrayConfig, front []map[string]any) {
 	rules, _ := config.Routing["rules"].([]map[string]any)
 	config.Routing["rules"] = append(append([]map[string]any(nil), front...), rules...)
 }
+
+// guardUnfit says why a listener's source address cannot be trusted by the
+// guard, or "". It reads the inbound as the user wrote it: the PROXY header a
+// Passwall front adds is put on afterwards (moveToLoopback) and is the front's
+// own, so it is fine, while one the listener was already set to accept would
+// let any client forge its source. sockopt.trustedXForwardedFor makes Xray take
+// the source from a header the client sends.
+func guardUnfit(inbound map[string]any) string {
+	stream, _ := inbound["streamSettings"].(map[string]any)
+	if sockopt, _ := stream["sockopt"].(map[string]any); sockopt != nil {
+		if trusted, _ := sockopt["trustedXForwardedFor"].([]any); len(trusted) > 0 {
+			return agentcore.UnguardableForwardedFor
+		}
+	}
+	if acceptsProxyHeader(stream) {
+		return agentcore.UnguardableProxyHeader
+	}
+	if settings, _ := inbound["settings"].(map[string]any); acceptsProxyHeader(settings) {
+		return agentcore.UnguardableProxyHeader
+	}
+	return ""
+}
+
+// acceptsProxyHeader is true when the object, or any object one level below it
+// (sockopt, tcpSettings, rawSettings, wsSettings, ...), sets acceptProxyProtocol.
+func acceptsProxyHeader(object map[string]any) bool {
+	if accepts, _ := object["acceptProxyProtocol"].(bool); accepts {
+		return true
+	}
+	for _, value := range object {
+		if nested, ok := value.(map[string]any); ok {
+			if accepts, _ := nested["acceptProxyProtocol"].(bool); accepts {
+				return true
+			}
+		}
+	}
+	return false
+}

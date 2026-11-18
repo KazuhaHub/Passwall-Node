@@ -2,11 +2,13 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 )
@@ -103,8 +105,7 @@ func PlanSourceGuard(snapshot Snapshot, served []protocol.ListenerKey) (GuardPla
 	deny := map[string]*group{}
 	for _, client := range snapshot.Clients {
 		guard := client.SourceGuard
-		if guard == nil || !client.Enabled ||
-			(client.ExpiresAtMS > 0 && !snapshot.Now.IsZero() && snapshot.Now.UnixMilli() >= client.ExpiresAtMS) {
+		if !activeGuard(client, snapshot.Now) {
 			continue
 		}
 		if err := protocol.ValidateClientSourceGuard(guard); err != nil {
@@ -250,4 +251,38 @@ func ServedListenerKeys(listeners []protocol.Listener) []protocol.ListenerKey {
 	}
 	sort.Slice(served, func(i, j int) bool { return served[i] < served[j] })
 	return served
+}
+
+// activeGuard is true for a client the core serves and that carries a guard.
+func activeGuard(client protocol.Client, now time.Time) bool {
+	return client.SourceGuard != nil && client.Enabled &&
+		(client.ExpiresAtMS == 0 || now.IsZero() || now.UnixMilli() < client.ExpiresAtMS)
+}
+
+// HasActiveGuard is true when any of the clients is served and has a source
+// guard: the clients whose listener must be one the guard can judge.
+func HasActiveGuard(clients []protocol.Client, now time.Time) bool {
+	for _, client := range clients {
+		if activeGuard(client, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// Why a listener cannot be guarded. The guard judges the socket's peer address
+// (or the one a PROXY header written by Passwall's own front gives); a listener
+// whose source can instead come from something the client sends would let a
+// client choose the address it is judged by.
+const (
+	UnguardableForwardedFor = "listener takes its source address from X-Forwarded-For; it cannot be guarded"
+	UnguardableProxyHeader  = "listener accepts a PROXY protocol header from its clients, which would let them choose their source address; it cannot be guarded"
+)
+
+// UnguardableListenerError refuses a listener a guarded client is attached to
+// but whose source address a client can set. It is reported like any other
+// listener fault, so the panel sees the listener as not applied, with the
+// reason, and the guard is never silently absent.
+func UnguardableListenerError(key protocol.ListenerKey, reason string) error {
+	return ListenerError(key, errors.New("source guard: "+reason))
 }

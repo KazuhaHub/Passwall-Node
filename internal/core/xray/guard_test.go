@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
@@ -168,5 +169,65 @@ func TestInvalidGuardIsRejectedAgainstItsClient(t *testing.T) {
 	var compileErr *CompileError
 	if err == nil || !errors.As(err, &compileErr) || compileErr.Key != "cli_51" {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A listener whose source address can come from the client (an
+// X-Forwarded-For header Xray is told to trust, or a PROXY protocol header it
+// is told to accept) is not guardable: the guard would judge a forgery.
+func TestGuardRefusesAListenerWhoseSourceTheClientCanSet(t *testing.T) {
+	const reality = `"network":"tcp","security":"reality","realitySettings":{"dest":"example.com:443","privateKey":"kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo","serverNames":["example.com"],"shortIds":[""]}`
+	for name, stream := range map[string]string{
+		"trusted XFF":               `{` + reality + `,"sockopt":{"trustedXForwardedFor":["CF-Connecting-IP","X-Real-IP"]}}`,
+		"sockopt PROXY header":      `{` + reality + `,"sockopt":{"acceptProxyProtocol":true}}`,
+		"tcp settings PROXY header": `{` + reality + `,"tcpSettings":{"acceptProxyProtocol":true}}`,
+		"ws settings PROXY header":  `{"network":"ws","wsSettings":{"acceptProxyProtocol":true,"path":"/"}}`,
+		"httpupgrade PROXY header":  `{"network":"httpupgrade","httpupgradeSettings":{"acceptProxyProtocol":true}}`,
+		"raw settings PROXY header": `{` + reality + `,"rawSettings":{"acceptProxyProtocol":true}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := guardedSnapshot(t, &protocol.ClientSourceGuard{AllowFrom: "src_a"},
+				protocol.SourceSet{Key: "src_a", CIDRs: []string{"203.0.113.0/24"}})
+			var spec listenerSpec
+			if err := json.Unmarshal(snapshot.Listeners[0].Config, &spec); err != nil {
+				t.Fatal(err)
+			}
+			spec.StreamSettings = stream
+			raw, _ := json.Marshal(spec)
+			snapshot.Listeners[0].Config = raw
+
+			_, err := Compiler{}.Compile(context.Background(), snapshot)
+			var objectErr *agentcore.ObjectError
+			if err == nil || !errors.As(err, &objectErr) || objectErr.Stream != protocol.StreamConfig || objectErr.Key != "lst_41" {
+				t.Fatalf("err = %v, want a rejection of lst_41", err)
+			}
+			if !strings.Contains(err.Error(), "source guard: listener ") || !strings.Contains(err.Error(), "it cannot be guarded") {
+				t.Fatalf("message = %v", err)
+			}
+
+			// Unguarded, or guarded only by a client that is switched off, the
+			// listener is served as before.
+			snapshot.Clients[0].SourceGuard = nil
+			if _, err := (Compiler{}).Compile(context.Background(), snapshot); err != nil {
+				t.Fatalf("unguarded listener refused: %v", err)
+			}
+			snapshot.Clients[0].SourceGuard = &protocol.ClientSourceGuard{AllowFrom: "src_a"}
+			snapshot.Clients[0].Enabled = false
+			if _, err := (Compiler{}).Compile(context.Background(), snapshot); err != nil {
+				t.Fatalf("listener of a disabled guarded client refused: %v", err)
+			}
+		})
+	}
+}
+
+func TestGuardIgnoresAnEmptyTrustedForwardedForAndAProxyFlagThatIsOff(t *testing.T) {
+	snapshot := guardedSnapshot(t, &protocol.ClientSourceGuard{AllowFrom: "src_a"},
+		protocol.SourceSet{Key: "src_a", CIDRs: []string{"203.0.113.0/24"}})
+	var spec listenerSpec
+	_ = json.Unmarshal(snapshot.Listeners[0].Config, &spec)
+	spec.StreamSettings = `{"network":"tcp","security":"reality","realitySettings":{"dest":"example.com:443","privateKey":"kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo","serverNames":["example.com"],"shortIds":[""]},"sockopt":{"trustedXForwardedFor":[],"acceptProxyProtocol":false}}`
+	snapshot.Listeners[0].Config, _ = json.Marshal(spec)
+	if _, err := (Compiler{}).Compile(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -235,6 +235,9 @@ func (c Compiler) compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		if !enabled {
 			continue
 		}
+		if reason := guardUnfit(inbound); reason != "" && agentcore.HasActiveGuard(clientByListener[listener.Key], snapshot.Now) {
+			return agentcore.Artifact{}, agentcore.UnguardableListenerError(listener.Key, reason)
+		}
 		if fronted[listener.Key] {
 			port, _ := inbound["port"].(int)
 			support.Listeners[listener.Key] = agentcore.FrontListener{Port: port, Unfit: frontUnfit(inbound)}

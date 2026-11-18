@@ -115,3 +115,41 @@ func TestInvalidGuardIsRejectedAgainstItsClient(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Every sing-box HTTP-carried transport (WebSocket, HTTPUpgrade, HTTP, gRPC)
+// replaces the connection's source with the first X-Forwarded-For value and has
+// no setting to stop it, so a guarded client cannot sit on one.
+func TestGuardRefusesAListenerOnATransportThatTrustsForwardedFor(t *testing.T) {
+	for name, stream := range map[string]string{
+		"ws":          `{"network":"ws","wsSettings":{"path":"/p"}}`,
+		"httpupgrade": `{"network":"httpupgrade","httpupgradeSettings":{"path":"/p"}}`,
+		"grpc":        `{"network":"grpc","grpcSettings":{"serviceName":"s"}}`,
+		"http":        `{"network":"http","httpSettings":{"path":"/p"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := guardedSnapshot(t, &protocol.ClientSourceGuard{AllowFrom: "src_a"},
+				protocol.SourceSet{Key: "src_a", CIDRs: []string{"203.0.113.0/24"}})
+			var spec listenerSpec
+			if err := json.Unmarshal(snapshot.Listeners[0].Config, &spec); err != nil {
+				t.Fatal(err)
+			}
+			spec.StreamSettings = stream
+			snapshot.Listeners[0].Config, _ = json.Marshal(spec)
+			snapshot.Clients[0].Credentials.Flow = ""
+			compiler := Compiler{APIListen: "127.0.0.1:10086", APISecret: testAPISecret}
+
+			_, err := compiler.Compile(context.Background(), snapshot)
+			var objectErr *agentcore.ObjectError
+			if err == nil || !errors.As(err, &objectErr) || objectErr.Stream != protocol.StreamConfig || objectErr.Key != "lst_41" {
+				t.Fatalf("err = %v, want a rejection of lst_41", err)
+			}
+			if !strings.Contains(err.Error(), "source guard: listener takes its source address from X-Forwarded-For; it cannot be guarded") {
+				t.Fatalf("message = %v", err)
+			}
+			snapshot.Clients[0].SourceGuard = nil
+			if _, err := compiler.Compile(context.Background(), snapshot); err != nil {
+				t.Fatalf("unguarded listener refused: %v", err)
+			}
+		})
+	}
+}

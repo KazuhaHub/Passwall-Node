@@ -358,6 +358,29 @@ whose source address does not fit the client's line.
   closed). **`deny_from`**: refused from inside any listed set; missing sets are
   ignored. The source is the address the core sees; behind a front it is the one
   in the PROXY protocol header.
+- **Which listeners can be guarded.** The guard only ever judges the socket peer,
+  or the PROXY header Passwall's own front writes. A listener whose source can
+  come from something the client sends is refused, like any other listener fault
+  (the listener is reported not applied, with the reason `source guard: ...; it
+  cannot be guarded`), whenever an enabled, unexpired client with a guard is
+  attached to it; it never runs unguarded. Not guardable:
+  - **sing-box**: every listener with a `transport`, that is `ws`, `httpupgrade`,
+    `http`/`h2` and `grpc`. On sing-box 1.14 each of them replaces the connection's
+    source with the first `X-Forwarded-For` value, and there is no inbound option
+    to turn that off (checked with the real binary). Guardable: plain TCP (the
+    default transport and `raw`), with or without TLS or REALITY. Behind a CDN
+    (WebSocket, HTTPUpgrade) a sing-box listener therefore cannot carry a guard.
+  - **Xray**: a listener whose `streamSettings.sockopt.trustedXForwardedFor` is a
+    non-empty list (Xray then takes the source from the header), and a listener
+    that already accepts a PROXY protocol header (`acceptProxyProtocol` in
+    `sockopt` or any transport's settings, or in the inbound `settings`), since
+    any client could forge its source with one. Xray ignores `X-Forwarded-For`
+    otherwise, so every other transport (tcp/raw, ws, httpupgrade, grpc, xhttp)
+    is guardable. The PROXY header a Passwall front adds to the listener it
+    fronts is its own and does not count; a front already refuses a listener that
+    sets `acceptProxyProtocol` itself.
+  A panel can mirror this: do not offer a guard for a client whose listeners
+  include one of the above.
 - **Xray** has no "not in" source condition, so an allow rule's source is the
   complement of the set (every address outside it, as the fewest canonical
   prefixes), one rule per allow set and one per distinct deny combination, each

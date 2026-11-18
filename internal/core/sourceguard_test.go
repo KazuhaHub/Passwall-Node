@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,5 +106,33 @@ func TestServedListenerKeys(t *testing.T) {
 	})
 	if !reflect.DeepEqual(got, []protocol.ListenerKey{"lst_1", "lst_3"}) {
 		t.Fatalf("served = %v", got)
+	}
+}
+
+func TestHasActiveGuard(t *testing.T) {
+	now := time.UnixMilli(1000)
+	guard := &protocol.ClientSourceGuard{AllowFrom: "src_a"}
+	active := guardClient(1, "a", guard, 1)
+	disabled := guardClient(2, "b", guard, 1)
+	disabled.Enabled = false
+	expired := guardClient(3, "c", guard, 1)
+	expired.ExpiresAtMS = 500
+	plain := guardClient(4, "d", nil, 1)
+	if !HasActiveGuard([]protocol.Client{plain, active}, now) {
+		t.Fatal("an enabled guarded client is not seen")
+	}
+	if HasActiveGuard([]protocol.Client{plain, disabled, expired}, now) {
+		t.Fatal("a disabled, expired or unguarded client counts")
+	}
+}
+
+func TestUnguardableListenerErrorNamesTheListener(t *testing.T) {
+	err := UnguardableListenerError(protocol.NewListenerKey(7), UnguardableForwardedFor)
+	var objectErr *ObjectError
+	if !errors.As(err, &objectErr) || objectErr.Stream != protocol.StreamConfig || objectErr.Key != "lst_7" {
+		t.Fatalf("err = %#v", err)
+	}
+	if !strings.Contains(err.Error(), "source guard: listener takes its source address from X-Forwarded-For; it cannot be guarded") {
+		t.Fatalf("message = %v", err)
 	}
 }

@@ -157,6 +157,11 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		if !enabled {
 			continue
 		}
+		// Every sing-box transport carried over HTTP replaces the source with the
+		// first X-Forwarded-For value and offers no way to turn that off.
+		if _, carried := inbound["transport"]; carried && agentcore.HasActiveGuard(clientByListener[listener.Key], snapshot.Now) {
+			return agentcore.Artifact{}, agentcore.UnguardableListenerError(listener.Key, agentcore.UnguardableForwardedFor)
+		}
 		if other, exists := binds[bind]; exists {
 			return agentcore.Artifact{}, compileListenerError(listener.Key, fmt.Errorf("bind %s conflicts with listener %s", bind, other))
 		}
