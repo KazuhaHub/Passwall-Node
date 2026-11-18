@@ -380,6 +380,11 @@ whose source address does not fit the client's line.
   The panel uses them as the source set of a relay line this node is the entry of.
 - The capability is declared while the selected engine is Xray or sing-box, and a
   node with no guarded client compiles byte-identical configuration.
+- Real-core tests (skipped when the variables are unset): `PSP_TEST_XRAY_BIN`
+  (Xray server), `PSP_TEST_SING_BOX_BIN` and `PSP_TEST_XRAY_CLIENT_BIN` (an Xray
+  used as the client); run `go test ./internal/core/xray ./internal/core/singbox
+  -run SourceGuard`. They connect from 127.0.0.1 through seven guarded and
+  unguarded clients, check the refusals, and (Xray) the `/guard` webhook.
 
 ### Compressed sync (`sync.gzip.v1`)
 
