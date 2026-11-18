@@ -883,3 +883,42 @@ func TestEndToEndNeverDownloadsTheBody(t *testing.T) {
 		t.Fatal("the probe did not close the connection")
 	}
 }
+
+// A server past the exit that streams headers without end costs the probe a
+// bounded read, and the attempt fails instead of buffering until the timeout.
+func TestEndToEndBoundsTheResponseHeaders(t *testing.T) {
+	transit := transportOnly(testLink(7, 30001))
+	transit.Probe.LinkURL = "http://probe.example.com/headers"
+	h := newHarness(t, transit, map[string]int{"transit-probe-lnk_7": 47123})
+	var counted *countingConn
+	h.dial = func(_ context.Context, _, address string) (net.Conn, error) {
+		if address == "exit.example.com:30001" {
+			return accepted(), nil
+		}
+		near, far := net.Pipe()
+		counted = &countingConn{Conn: near}
+		go func() {
+			defer far.Close()
+			if _, err := http.ReadRequest(bufio.NewReader(far)); err != nil {
+				return
+			}
+			if _, err := io.WriteString(far, "HTTP/1.1 200 OK\r\n"); err != nil {
+				return
+			}
+			line := []byte("X-Padding: " + strings.Repeat("a", 1000) + "\r\n")
+			for {
+				if _, err := far.Write(line); err != nil {
+					return
+				}
+			}
+		}()
+		return counted, nil
+	}
+	h.prober.Round(t.Context())
+	if result := h.mustResult("lnk_7", protocol.ProbeKindE2E); result.Failures == 0 {
+		t.Fatalf("a response whose headers never end passed: %+v", result)
+	}
+	if got := counted.read.Load(); got > maxProbeResponseHeaderBytes+64*1024 {
+		t.Fatalf("the probe read %d bytes of headers", got)
+	}
+}

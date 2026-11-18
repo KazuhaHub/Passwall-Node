@@ -492,6 +492,11 @@ func (p *Prober) connect(ctx context.Context, address string) (time.Duration, er
 	return rtt, nil
 }
 
+// maxProbeResponseHeaderBytes bounds what an end-to-end probe reads of the
+// response: its status line and headers. A response that does not finish its
+// headers within it fails the attempt.
+const maxProbeResponseHeaderBytes = 64 << 10
+
 // e2e fetches the link URL through the probe inbound on a loopback port. The
 // time is from the first connect to the first byte of the response, so it
 // includes the link's own handshake and the TLS handshake to the URL's host.
@@ -533,7 +538,10 @@ func (p *Prober) e2e(ctx context.Context, port int, linkURL string) (time.Durati
 	if err := request.Write(stream); err != nil {
 		return 0, err
 	}
-	reader := bufio.NewReader(stream)
+	// Only the status line and headers are read. They are bounded: a server
+	// past the exit that streams headers without end would otherwise be
+	// buffered until the attempt's timeout, on every probe.
+	reader := bufio.NewReader(io.LimitReader(stream, maxProbeResponseHeaderBytes))
 	if _, err := reader.Peek(1); err != nil {
 		// The core closes the connection when the link cannot carry it, which
 		// is a line that is down, not a server that answered.
