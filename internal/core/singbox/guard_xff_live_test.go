@@ -13,9 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
-	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
 	"github.com/KazuhaHub/passwall-node/v4/internal/testutil/guardlive"
 	"github.com/KazuhaHub/passwall-protocol/protocol"
 	"golang.org/x/net/http2"
@@ -198,9 +196,10 @@ func grpcForgedReaches(t *testing.T, port, targetPort int, forge bool) bool {
 }
 
 // TestRealSingBoxGuardedWebSocketListenerIsRefusedNotGuarded: the guard would
-// have judged the forged address, so the compiler refuses the listener instead
-// of emitting a rule a client can steer. The same roster without the guard
-// compiles into a config the real core accepts.
+// have judged the forged address, so no guard rule is emitted for the
+// listener. Its allow-guarded clients are rejected on it (fail closed, each
+// reported against the client), its deny-guarded and unguarded clients are
+// served, and the rest of the config compiles into one the real core accepts.
 func TestRealSingBoxGuardedWebSocketListenerIsRefusedNotGuarded(t *testing.T) {
 	binary, ok := os.LookupEnv("PSP_TEST_SING_BOX_BIN")
 	if !ok {
@@ -221,18 +220,29 @@ func TestRealSingBoxGuardedWebSocketListenerIsRefusedNotGuarded(t *testing.T) {
 		}
 	}
 	compiler := Compiler{APIListen: fmt.Sprintf("127.0.0.1:%d", policylive.FreePort(t)), APISecret: testAPISecret}
-	_, err = compiler.Compile(context.Background(), snapshot)
-	var objectErr *agentcore.ObjectError
-	if err == nil || !errors.As(err, &objectErr) || objectErr.Key != string(guardlive.Listener) ||
-		!strings.Contains(err.Error(), "X-Forwarded-For") {
-		t.Fatalf("a guarded client on a WebSocket listener compiled: err = %v", err)
-	}
-	for i := range snapshot.Clients {
-		snapshot.Clients[i].SourceGuard = nil
-	}
 	artifact, err := compiler.Compile(context.Background(), snapshot)
 	if err != nil {
-		t.Fatalf("the unguarded roster is refused too: %v", err)
+		t.Fatalf("a guard reason failed the whole compile: %v", err)
+	}
+	rejected := map[string]string{}
+	for _, rejection := range artifact.Rejected {
+		rejected[rejection.Key] = rejection.Error()
+	}
+	for _, client := range snapshot.Clients {
+		reason, isRejected := rejected[string(client.Key)]
+		allow := client.SourceGuard != nil && client.SourceGuard.AllowFrom != ""
+		switch {
+		case allow && (!isRejected || !strings.Contains(reason, "X-Forwarded-For")):
+			t.Errorf("allow-guarded client %s was not rejected on the WebSocket listener: %q", client.Key, reason)
+		case !allow && isRejected:
+			t.Errorf("client %s without an allow guard was rejected: %s", client.Key, reason)
+		}
+	}
+	if len(rejected) == 0 {
+		t.Fatal("the fixture has no allow-guarded client to reject")
+	}
+	if bytes.Contains(artifact.Config, []byte("guard-")) {
+		t.Fatal("a guard rule was emitted for a listener whose source a client can set")
 	}
 	path := policylive.WriteFile(t, "server.json", artifact.Config)
 	if out, err := exec.Command(binary, "check", "-c", path).CombinedOutput(); err != nil {
