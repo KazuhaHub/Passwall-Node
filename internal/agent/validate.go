@@ -101,6 +101,9 @@ func validateRoster(body *protocol.RosterBody) error {
 		default:
 			return fmt.Errorf("client %s has unsupported flow %q", client.Key, client.Credentials.Flow)
 		}
+		if err := protocol.ValidateClientSourceGuard(client.SourceGuard); err != nil {
+			return fmt.Errorf("client %s: %w", client.Key, err)
+		}
 		listeners := make(map[protocol.ListenerKey]struct{}, len(client.Listeners))
 		for _, key := range client.Listeners {
 			if _, err := key.RowID(); err != nil {

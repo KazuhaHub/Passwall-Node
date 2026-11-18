@@ -46,6 +46,14 @@ type AuditRoster interface {
 	SetRoster(users map[string]protocol.SubjectKey, ruleIDs []string, egress auditsink.Egress)
 }
 
+// AuditGuard is implemented by a receiver that also attributes source guard
+// refusals. It is separate from AuditRoster so that a receiver without it keeps
+// working; the runtime hands it the plan whenever it hands the roster.
+type AuditGuard interface {
+	StageGuard(plan auditsink.GuardPlan)
+	SetGuard(plan auditsink.GuardPlan)
+}
+
 type CompilerFactory func(protocol.CoreSelection) (agentcore.Compiler, error)
 
 type Options struct {
@@ -253,6 +261,32 @@ func (r *Runtime) publishAudit(config *protocol.ConfigBody, roster *protocol.Ros
 	}
 	users, ruleIDs, egress := auditSnapshot(config, roster)
 	r.audit.SetRoster(users, ruleIDs, egress)
+	if guard, ok := r.audit.(AuditGuard); ok {
+		guard.SetGuard(r.guardPlan(config, roster))
+	}
+}
+
+// guardPlan is the source guard of a deployment as the receiver reads it: the
+// compile's own planning, run over the stored config and roster, so the rule
+// tags a webhook event carries resolve to the sets the compile wrote them for.
+func (r *Runtime) guardPlan(config *protocol.ConfigBody, roster *protocol.RosterBody) auditsink.GuardPlan {
+	if config == nil || roster == nil || config.Transit == nil {
+		return nil
+	}
+	snapshot := agentcore.Snapshot{Listeners: config.Listeners, Clients: roster.Clients, Now: r.now(), Transit: config.Transit}
+	plan, err := agentcore.PlanSourceGuard(snapshot, agentcore.ServedListenerKeys(config.Listeners))
+	if err != nil {
+		return nil
+	}
+	out := auditsink.GuardPlan{}
+	for _, rule := range plan.Rules {
+		planned := auditsink.GuardRule{Allow: rule.Allow}
+		for _, key := range rule.Sets {
+			planned.Sets = append(planned.Sets, auditsink.GuardSet{Key: key, Prefixes: plan.Sets[key]})
+		}
+		out[rule.Tag], out[rule.OutboundTag()] = planned, planned
+	}
+	return out
 }
 
 // stageAudit hands the receiver the snapshot of a deployment about to start.
@@ -262,6 +296,9 @@ func (r *Runtime) stageAudit(config *protocol.ConfigBody, roster *protocol.Roste
 	}
 	users, ruleIDs, egress := auditSnapshot(config, roster)
 	r.audit.StageRoster(users, ruleIDs, egress)
+	if guard, ok := r.audit.(AuditGuard); ok {
+		guard.StageGuard(r.guardPlan(config, roster))
+	}
 }
 
 // auditSnapshot also carries the egress the deployment compiles: whether hits

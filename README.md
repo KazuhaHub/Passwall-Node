@@ -344,6 +344,43 @@ receives is.
 
 Without `Fronts` the compiled configuration is byte-identical to before.
 
+### Source guard (`transit.source_guard.v1`)
+
+Direct, plain-forward and CDN lines end on one landing listener, so the listener
+cannot tell which line a connection came through. The panel sends named source
+sets (`Transit.SourceSets`) and tags each client with a guard
+(`Client.SourceGuard`); the agent compiles them into routing rules, placed after
+the transit rule and before the destination policy, that refuse a connection
+whose source address does not fit the client's line.
+
+- **`allow_from`**: the client is accepted only from inside the set, on any of its
+  listeners. A set missing from the config refuses the client entirely (fail
+  closed). **`deny_from`**: refused from inside any listed set; missing sets are
+  ignored. The source is the address the core sees; behind a front it is the one
+  in the PROXY protocol header.
+- **Xray** has no "not in" source condition, so an allow rule's source is the
+  complement of the set (every address outside it, as the fewest canonical
+  prefixes), one rule per allow set and one per distinct deny combination, each
+  with a blackhole outbound of its own (`psp-guard-allow-<set>`,
+  `psp-guard-deny-<n>`). An allow set that covers every address emits no rule.
+- **sing-box** writes the allow rule as a logical AND of the user and inbound match
+  with an inverted `source_ip_cidr`, and rejects.
+- **Refusals are reported on Xray only.** Each guard rule carries a webhook to the
+  audit socket's `/guard` path (when the socket exists); the receiver keeps at
+  most 256 distinct (set, listener, source) entries with a count and a last-seen
+  time, evicting the oldest, and ages an entry out 24 hours after it was last
+  seen. The aggregate is attached to every full report as `source_guard_hits`
+  and is not cleared when sent. sing-box refuses connections at routing, before
+  they enter the ledger the telemetry reads, and has no rule webhook, so it
+  enforces the guard and reports no hits. Under size pressure the hits are
+  dropped after host telemetry and before the audit batch.
+- **Interface addresses.** Full reports carry `interface_addresses`: the node's
+  own global unicast addresses, minus loopback, link-local, multicast, private
+  (RFC 1918, ULA), shared (CGNAT) and documentation ranges, sorted, at most 64.
+  The panel uses them as the source set of a relay line this node is the entry of.
+- The capability is declared while the selected engine is Xray or sing-box, and a
+  node with no guarded client compiles byte-identical configuration.
+
 ### Compressed sync (`sync.gzip.v1`)
 
 The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with

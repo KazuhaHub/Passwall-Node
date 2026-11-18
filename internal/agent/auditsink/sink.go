@@ -204,6 +204,9 @@ type Sink struct {
 	stagedRules  map[string]struct{}
 	egress       egressSet
 	stagedEgress egressSet
+	guard        GuardPlan
+	stagedGuard  GuardPlan
+	guardHits    map[guardKey]guardEntry
 	hits         map[hitKey]counted
 	trial        map[trialKey]counted
 	usage        map[usageKey]uint32
@@ -241,7 +244,7 @@ func New(options Options) (*Sink, error) {
 		path: options.Path, token: []byte(options.Token), now: options.Now,
 		subjects: map[string]protocol.SubjectKey{}, rules: map[string]struct{}{},
 		hits: map[hitKey]counted{}, trial: map[trialKey]counted{}, broken: make(chan error, 1),
-		usage:      map[usageKey]uint32{},
+		usage: map[usageKey]uint32{}, guardHits: map[guardKey]guardEntry{},
 		maxHitKeys: options.MaxHitKeys, maxTrialKeys: options.MaxTrialKeys, maxUsageKeys: options.MaxUsageKeys,
 	}
 	sink.server = &http.Server{
@@ -377,6 +380,7 @@ func (s *Sink) StageRoster(subjects map[string]protocol.SubjectKey, ruleIDs []st
 func (s *Sink) DiscardStaged() {
 	s.mu.Lock()
 	s.stagedUsers, s.stagedRules, s.stagedEgress = nil, nil, egressSet{}
+	s.stagedGuard = nil
 	s.mu.Unlock()
 }
 
@@ -416,7 +420,7 @@ func (s *Sink) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Sink) handle(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != HitPath && r.URL.Path != UsagePath {
+	if r.URL.Path != HitPath && r.URL.Path != UsagePath && r.URL.Path != GuardPath {
 		http.NotFound(w, r)
 		return
 	}
@@ -445,6 +449,10 @@ func (s *Sink) handle(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "bad request", http.StatusBadRequest)
 		}
+		return
+	}
+	if r.URL.Path == GuardPath {
+		s.handleGuard(w, body)
 		return
 	}
 	if r.URL.Path == UsagePath {

@@ -203,6 +203,10 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	}
 	applyEgress(&result, transit.Unrouted(served), transit.Egress)
 	finishRoutes(&result)
+	// The guard goes first so routeTransit, which prepends, ends up ahead of it.
+	if err := c.applyGuard(&result, snapshot, served); err != nil {
+		return agentcore.Artifact{}, err
+	}
 	routeTransit(&result, transitInboundTags(transit))
 	routeProbes(&result, transit.Probes)
 	encoded, err := json.MarshalIndent(result, "", "  ")

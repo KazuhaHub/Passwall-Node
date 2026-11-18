@@ -53,11 +53,19 @@ type ReportBuilder struct {
 	// Probes is the link and forward self-test, attached to full reports from
 	// an agent that declares protocol.CapabilityTransitProbe. nil attaches
 	// nothing, and so does an empty result.
-	Probes       func() []protocol.ProbeResult
-	Store        state.Store
-	OutboxLimit  int
-	Now          func() time.Time
-	maxBodyBytes int64
+	Probes func() []protocol.ProbeResult
+	// SourceGuardHits is the aggregate of connections the source guard refused,
+	// attached to full reports from an agent that declares
+	// protocol.CapabilitySourceGuard. nil attaches nothing, and so does an empty
+	// result.
+	SourceGuardHits func() []protocol.SourceGuardHit
+	// InterfaceAddresses is the node's own public source addresses, attached
+	// like SourceGuardHits. See PublicInterfaceAddresses.
+	InterfaceAddresses func() []string
+	Store              state.Store
+	OutboxLimit        int
+	Now                func() time.Time
+	maxBodyBytes       int64
 }
 
 // BuiltReport retains the outbox ids that may be acknowledged only after the
@@ -184,6 +192,20 @@ func (b ReportBuilder) Build(ctx context.Context, options BuildOptions) (BuiltRe
 			// that sends nothing receives no roster.
 			if probes := b.Probes(); len(probes) > 0 && protocol.ValidateProbeResults(probes) == nil {
 				report.Probes = probes
+			}
+		}
+		// Both are validated on their own and dropped whole when they fail, like
+		// the probes: a bad row must not stop the node's reports.
+		if hasCapability(report.Capabilities, protocol.CapabilitySourceGuard) {
+			if b.SourceGuardHits != nil {
+				if hits := b.SourceGuardHits(); len(hits) > 0 && protocol.ValidateSourceGuardHits(hits) == nil {
+					report.SourceGuardHits = hits
+				}
+			}
+			if b.InterfaceAddresses != nil {
+				if addresses := b.InterfaceAddresses(); len(addresses) > 0 && protocol.ValidateInterfaceAddresses(addresses) == nil {
+					report.InterfaceAddresses = addresses
+				}
 			}
 		}
 	}
@@ -336,11 +358,13 @@ type fitResult struct {
 	HitsTrimmed  int
 	// AuditDeferred says a frozen batch was left out whole.
 	AuditDeferred bool
+	// GuardHitsDropped says the source guard hits were left out of this report.
+	GuardHitsDropped bool
 }
 
 // fitReportToWire shrinks a report to fit, in a FIXED degradation order:
-// telemetry, then audit usage rows, then audit hit rows, then everything but
-// the outbox.
+// telemetry, then source guard hits, then audit usage rows, then audit hit rows,
+// then everything but the outbox.
 //
 // TELEMETRY GOES FIRST, and that order is the whole point. It is the only
 // content in a report that is regenerated every interval, so losing it costs a
@@ -366,6 +390,19 @@ func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64
 	if report.Host != nil {
 		report.Host = nil
 		result.HostDropped = true
+		if ok, err := fits(); ok || err != nil {
+			return result, err
+		}
+	}
+	// Guard hits are a bounded window of recent refusals (at most 256 rows) that
+	// the next full report carries again, so losing them for one round costs a
+	// delayed warning and nothing is unreported. They go ahead of the audit rows,
+	// which are a one-shot batch, and after telemetry, which is regenerated. The
+	// interface addresses are a few lines and stay until the report becomes
+	// partial.
+	if len(report.SourceGuardHits) > 0 {
+		report.SourceGuardHits = nil
+		result.GuardHitsDropped = true
 		if ok, err := fits(); ok || err != nil {
 			return result, err
 		}
@@ -404,6 +441,8 @@ func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64
 	report.ForwardCounters = nil
 	report.LinkCounters = nil
 	report.Probes = nil
+	report.SourceGuardHits = nil
+	report.InterfaceAddresses = nil
 	report.Clients = nil
 	report.Subjects = nil
 	body, err := encodeReport(report)

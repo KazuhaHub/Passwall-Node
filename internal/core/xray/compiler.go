@@ -316,6 +316,11 @@ func (c Compiler) compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			return agentcore.Artifact{}, err
 		}
 	}
+	// The guard goes first so routeTransit, which prepends, ends up ahead of it:
+	// relayed traffic is never judged by it, and it precedes the policy.
+	if err := c.applyGuard(&config, snapshot, served); err != nil {
+		return agentcore.Artifact{}, err
+	}
 	routeTransit(&config, transitInboundTags(transit))
 	routeFronts(&config, transit)
 	routeProbes(&config, transit.Probes)

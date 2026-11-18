@@ -332,8 +332,15 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	hostTelemetry = hostReporter != nil
 	capabilities := staticCapabilities(hostTelemetry, audit != nil)
+	reports := nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters, prober.Results, coreRuntime.Engine)
+	reports.InterfaceAddresses = agent.PublicInterfaceAddresses(nil)
+	if audit != nil {
+		// Only Xray reports refusals (see singbox.Compiler.applyGuard); on
+		// sing-box the table stays empty and nothing is attached.
+		reports.SourceGuardHits = audit.Sink.GuardHits
+	}
 	synchronizer := agent.Synchronizer{
-		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters, prober.Results, coreRuntime.Engine),
+		Reports: reports,
 		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
@@ -422,7 +429,10 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 }
 
 // engineCapabilities adds to every report the capabilities that only some
-// engines have. transit.sni.v1 is declared while the selected engine is Xray:
+// engines have. transit.source_guard.v1 is declared while the selected engine is
+// Xray or sing-box, which both compile the guard into routing rules (sing-box
+// reports no refusals; see the README); like the one below it follows the
+// engine and is unknown before the first convergence. transit.sni.v1 is declared while the selected engine is Xray:
 // the panel must send Transit.Fronts only to a node that declared it, and a
 // node that switched to sing-box (which cannot front) must stop declaring it,
 // which the next report reflects because this is asked for every report.
@@ -430,8 +440,14 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 func engineCapabilities(base func() []string, engine func() string) func() []string {
 	return func() []string {
 		capabilities := base()
-		if engine != nil && engine() == "xray" {
-			capabilities = append(capabilities, protocol.CapabilityTransitSNI)
+		if engine == nil {
+			return capabilities
+		}
+		switch engine() {
+		case "xray":
+			capabilities = append(capabilities, protocol.CapabilityTransitSNI, protocol.CapabilitySourceGuard)
+		case "sing-box":
+			capabilities = append(capabilities, protocol.CapabilitySourceGuard)
 		}
 		return capabilities
 	}

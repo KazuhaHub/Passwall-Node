@@ -281,3 +281,87 @@ func TestNodeReportBuilderAttachesProbesToFullReportsOnly(t *testing.T) {
 		t.Fatalf("partial report carries probes: %+v", partial.Report.Probes)
 	}
 }
+
+// transit.source_guard.v1 follows the selected engine and is declared for both,
+// which compile the guard; it is not declared before the engine is known.
+func TestSourceGuardCapabilityFollowsTheSelectedEngine(t *testing.T) {
+	engine := ""
+	source := engineCapabilities(func() []string { return nil }, func() string { return engine })
+	for _, test := range []struct {
+		engine string
+		want   bool
+	}{{"", false}, {"xray", true}, {"sing-box", true}, {"other", false}} {
+		engine = test.engine
+		if got := slices.Contains(source(), protocol.CapabilitySourceGuard); got != test.want {
+			t.Fatalf("engine %q: declared = %v, want %v", test.engine, got, test.want)
+		}
+	}
+	if slices.Contains(staticCapabilities(true, true), protocol.CapabilitySourceGuard) {
+		t.Fatal("transit.source_guard.v1 is declared statically")
+	}
+}
+
+// The guard's observations ride full reports only, gated by the capability, and
+// the whole report still passes the sender's check.
+func TestNodeReportBuilderAttachesSourceGuardObservationsToFullReportsOnly(t *testing.T) {
+	store, err := statesqlite.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	registry, err := agent.NewTaskRegistry(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := agent.NewTaskWorker(agent.TaskWorkerOptions{Store: store, Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker, nil, nil, nil,
+		func() string { return "xray" })
+	builder.SourceGuardHits = func() []protocol.SourceGuardHit {
+		return []protocol.SourceGuardHit{{Set: "src_a", Listener: "lst_1", SourceIP: "203.0.113.9", Count: 2, LastSeenMS: 5}}
+	}
+	builder.InterfaceAddresses = func() []string { return []string{"1.2.3.4"} }
+	full, err := builder.Build(t.Context(), agent.BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Report.SourceGuardHits) != 1 || !slices.Equal(full.Report.InterfaceAddresses, []string{"1.2.3.4"}) {
+		t.Fatalf("full report = hits %+v, addresses %v", full.Report.SourceGuardHits, full.Report.InterfaceAddresses)
+	}
+	if err := protocol.ValidateNodeReport(full.Report); err != nil {
+		t.Fatalf("report refused: %v", err)
+	}
+	partial, err := builder.Build(t.Context(), agent.BuildOptions{Partial: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.Report.SourceGuardHits != nil || partial.Report.InterfaceAddresses != nil {
+		t.Fatalf("partial report carries guard observations: %+v", partial.Report)
+	}
+	// Without the capability (engine not known yet) nothing is attached.
+	builder = nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker, nil, nil, nil, nil)
+	builder.SourceGuardHits = func() []protocol.SourceGuardHit {
+		return []protocol.SourceGuardHit{{Set: "src_a", Listener: "lst_1", SourceIP: "203.0.113.9", Count: 2, LastSeenMS: 5}}
+	}
+	builder.InterfaceAddresses = func() []string { return []string{"1.2.3.4"} }
+	bare, err := builder.Build(t.Context(), agent.BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.Report.SourceGuardHits != nil || bare.Report.InterfaceAddresses != nil {
+		t.Fatalf("report without the capability carries guard observations: %+v", bare.Report)
+	}
+	// An invalid row is dropped whole, not sent.
+	builder = nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker, nil, nil, nil,
+		func() string { return "xray" })
+	builder.InterfaceAddresses = func() []string { return []string{"10.0.0.1"} }
+	invalid, err := builder.Build(t.Context(), agent.BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invalid.Report.InterfaceAddresses != nil {
+		t.Fatalf("invalid interface addresses were sent: %v", invalid.Report.InterfaceAddresses)
+	}
+}
