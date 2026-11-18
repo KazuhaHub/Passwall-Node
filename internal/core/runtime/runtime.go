@@ -59,6 +59,9 @@ type Options struct {
 	// Audit, when set, is given the deployed roster and rule IDs. Nil means this
 	// node records no hits.
 	Audit AuditRoster
+	// Issues, when set, receives the conditions a compile found that do not stop
+	// the deployment (agentcore.Artifact.Issues). Nil discards them.
+	Issues agent.IssueSink
 }
 
 type Runtime struct {
@@ -69,6 +72,7 @@ type Runtime struct {
 	now             func() time.Time
 	warnf           func(format string, args ...any)
 	audit           AuditRoster
+	issues          agent.IssueSink
 	convergeMu      sync.Mutex
 	scheduleWake    chan struct{}
 	// idle describes the last successful convergence. converge reads and writes
@@ -78,6 +82,66 @@ type Runtime struct {
 	// read by the report builder while converge runs, so it has its own lock.
 	policyMu     sync.RWMutex
 	policyStatus protocol.PolicyStatus
+	// selectedEngine is the engine the desired config asks for, and rejected the
+	// objects the last compile left out (agentcore.Artifact.Rejected). Both are
+	// read by report building and object convergence while converge writes them.
+	stateMu        sync.RWMutex
+	selectedEngine string
+	rejected       []*agentcore.ObjectError
+}
+
+// Engine is the engine the node is to run: the one the desired config selects,
+// as of the last convergence attempt, or "" before the first. A capability that
+// only one engine has is declared from it, so a switch of engine is reflected on
+// the next report.
+func (r *Runtime) Engine() string {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.selectedEngine
+}
+
+func (r *Runtime) setSelectedEngine(engine string) {
+	r.stateMu.Lock()
+	r.selectedEngine = engine
+	r.stateMu.Unlock()
+}
+
+func (r *Runtime) setRejected(rejected []*agentcore.ObjectError) {
+	r.stateMu.Lock()
+	r.rejected = rejected
+	r.stateMu.Unlock()
+}
+
+// Rejections are the objects the deployment the core is running left out, one
+// entry per object. The processor reconciles every object's reported state
+// against them after each round, so an object that was unchanged, and therefore
+// not asked about, is still reported as what it is.
+func (r *Runtime) Rejections() []agent.ObjectRejection {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	var out []agent.ObjectRejection
+	for _, rejected := range r.rejected {
+		code := strings.TrimSpace(rejected.Code)
+		if code == "" {
+			code = "core_config_rejected"
+		}
+		for _, key := range append([]string{rejected.Key}, rejected.Related...) {
+			out = append(out, agent.ObjectRejection{Stream: rejected.Stream, Key: key, Code: code, Err: rejected})
+		}
+	}
+	return out
+}
+
+// rejection is the compile's rejection of the object, or nil.
+func (r *Runtime) rejection(stream, key string) *agentcore.ObjectError {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	for _, rejected := range r.rejected {
+		if rejected.Names(stream, key) {
+			return rejected
+		}
+	}
+	return nil
 }
 
 // idleRecord is the identity of the last successful convergence: everything a
@@ -89,6 +153,9 @@ type idleRecord struct {
 	version     string
 	digest      string
 	policy      string
+	// rejected is what the compile left out of this deployment. It goes with the
+	// record: it is published only when the deployment it belongs to is confirmed.
+	rejected []*agentcore.ObjectError
 }
 
 func New(options Options) (*Runtime, error) {
@@ -103,7 +170,7 @@ func New(options Options) (*Runtime, error) {
 	}
 	return &Runtime{
 		store: options.Store, installer: options.Installer, supervisor: options.Supervisor,
-		compilerFactory: options.CompilerFactory, now: options.Now, warnf: options.Warnf, audit: options.Audit, scheduleWake: make(chan struct{}, 1),
+		compilerFactory: options.CompilerFactory, now: options.Now, warnf: options.Warnf, audit: options.Audit, issues: options.Issues, scheduleWake: make(chan struct{}, 1),
 		policyStatus: protocol.PolicyStatus{State: protocol.PolicyStateApplied},
 	}, nil
 }
@@ -149,6 +216,10 @@ func (r *Runtime) RestoreStatus(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read last confirmed core deployment: %w", err)
 	}
+	// The engine the node runs, so the first report after a restart still
+	// declares what only that engine has (transit.sni.v1 for Xray) before the
+	// first convergence has looked at the desired config again.
+	r.setSelectedEngine(deployment.Engine)
 	var config protocol.ConfigBody
 	if err := json.Unmarshal(deployment.ConfigBody, &config); err != nil {
 		// Never a reason to refuse to start: the node would then stop
@@ -432,10 +503,19 @@ func (r *round) ensure(ctx context.Context) error {
 func (r *round) objectResult(ctx context.Context, stream, key string) error {
 	err := r.ensure(ctx)
 	if err == nil {
+		// The deployment went ahead without this object: it is rejected, and
+		// nothing else is.
+		if rejected := r.owner.rejection(stream, key); rejected != nil {
+			code := strings.TrimSpace(rejected.Code)
+			if code == "" {
+				code = "core_config_rejected"
+			}
+			return &agent.RejectedError{Code: code, Err: rejected}
+		}
 		return nil
 	}
 	var compileErr *agentcore.ObjectError
-	if errors.As(err, &compileErr) && compileErr.Stream == stream && compileErr.Key == key {
+	if errors.As(err, &compileErr) && compileErr.Names(stream, key) {
 		code := strings.TrimSpace(compileErr.Code)
 		if code == "" {
 			code = "core_config_rejected"
@@ -458,6 +538,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	r.setSelectedEngine(selection.Engine)
 	compiler, err := r.compilerFactory(selection)
 	if err != nil {
 		return fmt.Errorf("construct %s compiler: %w", selection.Engine, err)
@@ -503,6 +584,7 @@ func (r *Runtime) converge(ctx context.Context) error {
 	if r.idle.valid && r.idle.fingerprint == fingerprint && status.State == agentcore.ProcessRunning &&
 		status.Engine == r.idle.engine && status.Version == r.idle.version && status.ConfigDigest == r.idle.digest {
 		r.setPolicyStatus(appliedPolicy(r.idle.policy))
+		r.setRejected(r.idle.rejected)
 		return nil
 	}
 	artifact, err := compiler.Compile(ctx, snapshot)
@@ -525,12 +607,13 @@ func (r *Runtime) converge(ctx context.Context) error {
 	if err := validateArtifact(artifact); err != nil {
 		return fmt.Errorf("compiler returned invalid artifact: %w", err)
 	}
+	r.recordArtifactIssues(ctx, artifact)
 	// Read again: a core that died while the policy was compiling is not
 	// running what it was running when this round began.
 	status = r.supervisor.Status()
 	record := idleRecord{
 		valid: true, fingerprint: fingerprint, engine: selection.Engine, version: selection.Version,
-		digest: artifact.Digest, policy: policyDigest,
+		digest: artifact.Digest, policy: policyDigest, rejected: artifact.Rejected,
 	}
 	if status.State == agentcore.ProcessRunning && status.Engine == selection.Engine &&
 		status.Version == selection.Version && status.ConfigDigest == artifact.Digest {
@@ -663,6 +746,7 @@ func (r *Runtime) saveDeployment(
 		}
 	}
 	r.idle = record
+	r.setRejected(record.rejected)
 	r.setPolicyStatus(appliedPolicy(record.policy))
 	r.publishAudit(config, roster)
 	r.wakeExpirySchedule()
@@ -731,3 +815,25 @@ var (
 	_ agent.RoundScopedRuntime = (*Runtime)(nil)
 	_ agent.RuntimeRound       = (*round)(nil)
 )
+
+// recordArtifactIssues reports what the compile found and did not refuse. An
+// issue that cannot be stored is warned about and never fails the deployment:
+// it describes a rule the compile left out, not a reason to leave the node
+// unconfigured.
+func (r *Runtime) recordArtifactIssues(ctx context.Context, artifact agentcore.Artifact) {
+	for _, issue := range artifact.Issues {
+		if r.issues == nil {
+			if r.warnf != nil {
+				r.warnf("%s: %s: %s", issue.Code, issue.Key, issue.Detail)
+			}
+			continue
+		}
+		_, err := r.issues.Record(ctx, agent.LocalIssue{
+			Kind: agent.LocalIssueKind(issue.Code), Stream: protocol.StreamConfig, Key: issue.Key,
+			DedupeKey: fmt.Sprintf("%s:%s:%s", issue.Code, issue.Key, artifact.Digest), Detail: issue.Detail,
+		})
+		if err != nil && r.warnf != nil {
+			r.warnf("record %s for %s: %v", issue.Code, issue.Key, err)
+		}
+	}
+}

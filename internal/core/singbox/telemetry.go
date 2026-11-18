@@ -376,6 +376,11 @@ func decodeTelemetryMapping(deployment state.CoreDeployment) (telemetryMapping, 
 				return telemetryMapping{}, err
 			}
 			result.linkByOutbound[agentcore.LinkTag(link.Key)] = link.Key
+			if desiredConfig.Transit.Probe != nil && desiredConfig.Transit.Probe.LinkURL != "" {
+				// A probe connection is transit, never a user's: it is booked
+				// on the link it leaves through, as the link's own traffic.
+				result.transitByInbound[agentcore.ProbeTag(link.Key)] = string(link.Key)
+			}
 		}
 	}
 	for _, listener := range desiredConfig.Listeners {

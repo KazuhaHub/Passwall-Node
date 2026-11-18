@@ -22,8 +22,18 @@ const (
 	LocalIssueDirectiveUnknownClient    LocalIssueKind = "directive_unknown_client"
 	LocalIssueObjectPendingTimeout      LocalIssueKind = "object_pending_timeout"
 	LocalIssueObjectRejectedTimeout     LocalIssueKind = "object_rejected_timeout"
-	LocalIssueCoreConvergenceFailed     LocalIssueKind = "core_convergence_failed"
-	LocalIssueCoreTelemetryFailed       LocalIssueKind = "core_telemetry_failed"
+	// LocalIssueObjectLeftOut: the deployment the core runs was compiled without
+	// this object and says why (a duplicate credential, a front the engine cannot
+	// carry). The object's state is rejected; the reason travels here, because an
+	// object status has only a code.
+	LocalIssueObjectLeftOut         LocalIssueKind = "object_left_out"
+	LocalIssueCoreConvergenceFailed LocalIssueKind = "core_convergence_failed"
+	LocalIssueCoreTelemetryFailed   LocalIssueKind = "core_telemetry_failed"
+	// LocalIssueRoutePolicyApproximate: an Xray compile left a policy rule out
+	// of a route's segment because its destination cannot be intersected exactly
+	// with the route rule (transit.route.v1). Fail closed; the key is the
+	// listener and the detail names the rules and routes.
+	LocalIssueRoutePolicyApproximate LocalIssueKind = "route_policy_approximate"
 	// LocalIssueHostTelemetryFailed reports a whole-collection failure. A single
 	// unreadable SECTION is not this: it is an Unavailable token on the sample
 	// itself, because a container that can never read conntrack would otherwise

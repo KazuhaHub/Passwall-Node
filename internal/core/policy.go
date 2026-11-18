@@ -250,3 +250,272 @@ func containsListener(keys []protocol.ListenerKey, key protocol.ListenerKey) boo
 // gain a blocking rule. It is decided on the policy, as MatchDestination does,
 // not on which rules survive this compile.
 func (p PolicyPlan) TrailingDotGuard() bool { return p.trailingDot }
+
+// ExitsAllow reports whether a rule scoped to exits applies to traffic leaving
+// through exit: an empty scope applies to every exit.
+func ExitsAllow(exits []protocol.LinkKey, exit protocol.LinkKey) bool {
+	if len(exits) == 0 {
+		return true
+	}
+	for _, candidate := range exits {
+		if candidate == exit {
+			return true
+		}
+	}
+	return false
+}
+
+// scoped is the plan restricted to listeners. keep decides, per rule and
+// listener, whether the rule applies there. A rule keeps no listener is dropped,
+// and every kept rule names its listeners explicitly (Inbounds non-nil), in the
+// order of its own Inbounds when it had them.
+func (p PolicyPlan) scoped(listeners []protocol.ListenerKey, keep func(PlannedRule, protocol.ListenerKey) bool) PolicyPlan {
+	member := make(map[protocol.ListenerKey]bool, len(listeners))
+	for _, key := range listeners {
+		member[key] = true
+	}
+	out := p
+	out.Rules = nil
+	for _, rule := range p.Rules {
+		candidates := rule.Inbounds
+		if candidates == nil {
+			candidates = listeners
+		}
+		var kept []protocol.ListenerKey
+		for _, key := range candidates {
+			if member[key] && keep(rule, key) {
+				kept = append(kept, key)
+			}
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		rule.Inbounds = kept
+		out.Rules = append(out.Rules, rule)
+	}
+	out.ExemptAt = len(out.Rules)
+	for index, rule := range out.Rules {
+		if rule.Phase >= phaseBlock {
+			out.ExemptAt = index
+			break
+		}
+	}
+	return out
+}
+
+// ForBase is the plan for the listeners that have no route rules, which leave
+// through their default exit only: a rule scoped to exits (DestinationRule.Exits)
+// applies to a listener only when its default exit is one of them. restrict
+// additionally names the listeners of every rule, which a compile with routed
+// listeners needs so that no rule of the base list can also judge a routed
+// listener's traffic ahead of its segments. Without restrict and without a rule
+// that has Exits the plan is returned as it is, byte for byte.
+func (p PolicyPlan) ForBase(unrouted []protocol.ListenerKey, defaultExit func(protocol.ListenerKey) protocol.LinkKey, restrict bool) PolicyPlan {
+	if !restrict {
+		scoped := false
+		for _, rule := range p.Rules {
+			if len(rule.Rule.Exits) > 0 {
+				scoped = true
+				break
+			}
+		}
+		if !scoped {
+			return p
+		}
+	}
+	scopedPlan := p.scoped(unrouted, func(rule PlannedRule, key protocol.ListenerKey) bool {
+		return ExitsAllow(rule.Rule.Exits, defaultExit(key))
+	})
+	if restrict {
+		return scopedPlan
+	}
+	// Only the rules with Exits are named explicitly; the rest keep meaning
+	// "every inbound", as they always did.
+	out := p
+	out.Rules = nil
+	index := 0
+	for _, rule := range p.Rules {
+		if len(rule.Rule.Exits) == 0 {
+			out.Rules = append(out.Rules, rule)
+			continue
+		}
+		for index < len(scopedPlan.Rules) && scopedPlan.Rules[index].Rule.ID != rule.Rule.ID {
+			index++
+		}
+		if index < len(scopedPlan.Rules) {
+			out.Rules = append(out.Rules, scopedPlan.Rules[index])
+			index++
+		}
+	}
+	out.ExemptAt = len(out.Rules)
+	for i, rule := range out.Rules {
+		if rule.Phase >= phaseBlock {
+			out.ExemptAt = i
+			break
+		}
+	}
+	return out
+}
+
+// ForSegment is the plan for one segment of a routed group: the rules that
+// apply to traffic leaving through exit, confined to the group's listeners.
+func (p PolicyPlan) ForSegment(group []protocol.ListenerKey, exit protocol.LinkKey) PolicyPlan {
+	return p.scoped(group, func(rule PlannedRule, _ protocol.ListenerKey) bool {
+		return ExitsAllow(rule.Rule.Exits, exit)
+	})
+}
+
+// MaxRoutedEntries bounds what a compile with routed listeners may write: the
+// destination entries (domains, CIDRs) of its rules, counted before anything is
+// built. A policy rule's matcher can have tens of thousands of entries and is
+// copied into every segment of every group, so the product, not the rule count,
+// is what costs memory; at roughly 60 bytes an entry, a million is tens of MiB
+// of configuration and well under 512 MiB of heap while it is encoded.
+const MaxRoutedEntries = 1_000_000
+
+// SkipRoutedEstimate is a test hook: with it set the compilers skip the cheap
+// up-front estimate, so a test can show that the incremental RouteBudget alone
+// refuses what it must. Nothing outside tests sets it.
+var SkipRoutedEstimate bool
+
+func ruleEntries(rule protocol.DestinationRule) int {
+	n := len(rule.Domains) + len(rule.CIDRs)
+	if rule.Private {
+		n += len(protocol.PrivateDestinationCIDRs())
+	}
+	return n
+}
+
+func routeEntries(route protocol.RouteRule) int { return len(route.Domains) + len(route.CIDRs) }
+
+// CountEntries is the number of elements in every list a rule holds, nested
+// rules and objects included: destination entries, users, source ranges,
+// inbound tags, whatever the field. The budget charges a rule with this and with
+// no list of field names, so a field added later cannot be forgotten.
+func CountEntries(value any) int {
+	switch v := value.(type) {
+	case map[string]any:
+		n := 0
+		for _, inner := range v {
+			n += CountEntries(inner)
+		}
+		return n
+	case []map[string]any:
+		n := 0
+		for _, inner := range v {
+			n += CountEntries(inner)
+		}
+		return n
+	case []any:
+		n := 0
+		for _, inner := range v {
+			n += 1 + CountEntries(inner)
+		}
+		return n
+	case []string:
+		return len(v)
+	case []int:
+		return len(v)
+	}
+	return 0
+}
+
+// RouteBudget is the authoritative guard of a routed compile: the compilers
+// count every destination entry and rule AS THEY APPEND it while generating
+// segments, and stop at the first one past MaxRoutedEntries or MaxRoutedRules,
+// so memory is bounded by construction, whatever shape the policy and routes
+// have. Check is for a step about to allocate a known amount (an intersection
+// of two lists, say) so it is refused before it does.
+type RouteBudget struct {
+	entries, rules int
+}
+
+func (b *RouteBudget) over() error {
+	switch {
+	case b.entries > MaxRoutedEntries:
+		return fmt.Errorf("more than %d destination entries (the compile has reached %d)", MaxRoutedEntries, b.entries)
+	case b.rules > MaxRoutedRules:
+		return fmt.Errorf("more than %d core rules (the compile has reached %d)", MaxRoutedRules, b.rules)
+	}
+	return nil
+}
+
+// Add counts one appended rule with entries destination entries.
+func (b *RouteBudget) Add(entries int) error {
+	b.rules++
+	b.entries += entries
+	return b.over()
+}
+
+// AddEntries counts destination entries that are not a rule of their own (a
+// rule set's).
+func (b *RouteBudget) AddEntries(entries int) error {
+	b.entries += entries
+	return b.over()
+}
+
+// Check refuses a step that would allocate about pending entries when that
+// would pass the budget.
+func (b *RouteBudget) Check(pending int) error {
+	if b.entries+pending > MaxRoutedEntries {
+		return fmt.Errorf("more than %d destination entries (%d so far, and the next step needs about %d)", MaxRoutedEntries, b.entries, pending)
+	}
+	return nil
+}
+
+// EstimateRoutedEntries is a cheap estimate of the destination
+// entries one group adds, from the plan and the group alone. It may
+// UNDERCOUNT (it does not see the exempt step, the usage and trailing-dot rules,
+// the copies of a route's matcher, or the hostname-through-address rules), so it
+// is only a fast path that refuses the obvious before anything is built; the
+// RouteBudget the builders count into is what bounds the compile. With shared, a compiler writes each
+// policy rule's matcher once (an inline rule set) and each segment refers to
+// it, so the matchers count once, in seen (carried across groups), and a
+// segment costs a reference per rule. Without it every segment carries its own
+// copy, intersected with the route rule: at most the product of the two lists.
+func EstimateRoutedEntries(plan PolicyPlan, group RouteGroup, shared bool, seen map[string]bool) int {
+	total := 0
+	segment := func(exit protocol.LinkKey, route *protocol.RouteRule) {
+		if route != nil {
+			total += routeEntries(*route) + 1
+		}
+		segmentPlan := plan.ForSegment(group.Listeners, exit)
+		total += len(segmentPlan.ExemptUsers)
+		for _, planned := range segmentPlan.Rules {
+			rule := planned.Rule
+			if shared {
+				total += 1 + len(planned.Users)
+				if !seen[rule.ID] {
+					seen[rule.ID] = true
+					total += ruleEntries(rule) + len(rule.SourceCIDRs)
+				}
+				continue
+			}
+			extra := len(rule.SourceCIDRs) + len(planned.Users) + len(planned.Inbounds)
+			cost := ruleEntries(rule) + 1 + extra
+			if route != nil {
+				domains, addresses := len(rule.Domains), len(rule.CIDRs)
+				if rule.Private {
+					addresses += len(protocol.PrivateDestinationCIDRs())
+				}
+				cost = max(domains*max(len(route.Domains), 1), domains) + max(addresses*max(len(route.CIDRs), 1), addresses) + 1 + extra
+			}
+			total += cost
+		}
+	}
+	for position := range group.Rules {
+		segment(group.Rules[position].Exit, &group.Rules[position])
+	}
+	segment(group.Default, nil)
+	return total
+}
+
+// HasProtocolRules reports whether any planned rule names a protocol.
+func (p PolicyPlan) HasProtocolRules() bool {
+	for _, rule := range p.Rules {
+		if len(rule.Rule.Protocols) > 0 {
+			return true
+		}
+	}
+	return false
+}

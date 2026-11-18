@@ -1,8 +1,10 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,11 +20,93 @@ type TransitPlan struct {
 	LinksIn  []protocol.LinkIn
 	LinksOut []protocol.LinkOut
 	Egress   map[protocol.ListenerKey]protocol.LinkKey
+	// Routes are the route rules of each served listener that has any, in rule
+	// order (transit.route.v1). A listener absent from it has no routes and
+	// leaves through its default exit only.
+	Routes map[protocol.ListenerKey][]protocol.RouteRule
+	// Probes are the loopback inbounds that carry the end-to-end link probe,
+	// one per outgoing link, in link key order. Empty unless Transit.Probe has a
+	// link URL.
+	Probes []ProbeInbound
+	// ProbeUnavailable lists the links that wanted a probe inbound and found no
+	// free loopback port. The link is compiled without one and the agent reports
+	// its e2e probe as probe_unavailable; the configuration is never rejected
+	// for it.
+	ProbeUnavailable []protocol.LinkKey
+	// Fronts are the SNI fronts (transit.sni.v1) in key order. Everything below
+	// is empty without them, and then the plan is what it was.
+	Fronts []protocol.Front
+	// ListenerLoopback is the port each fronted listener is bound to on
+	// FrontLoopbackHost instead of its public bind.
+	ListenerLoopback map[protocol.ListenerKey]int
+	// LinkLoopback is the same for an incoming link a front routes to; the agent
+	// picks it, from the probe range.
+	LinkLoopback map[protocol.LinkKey]int
+	// FrontedForwards are the forwards a front routes to. They are not in
+	// Forwards: the front owns their socket.
+	FrontedForwards map[protocol.ForwardKey]protocol.Forward
+}
+
+// ProbeInbound is one link's probe inbound: a loopback listener whose every
+// connection is relayed to Host:Port (the link URL's endpoint) through the
+// link, so the agent can fetch the URL end to end through the core.
+type ProbeInbound struct {
+	Link protocol.LinkKey
+	// Port is the loopback port, on ProbeListen.
+	Port int
+	// Host and TargetPort are the link URL's host and port.
+	Host       string
+	TargetPort int
+}
+
+// The loopback range probe inbounds are allocated from. It lies below Linux's
+// default ephemeral range (32768-60999), so a client socket the kernel picked
+// cannot be sitting on a probe port. The allocator avoids only the binds the
+// compile knows (listeners, forwards, links, the core API); an unrelated local
+// process listening in this range is a residual risk that would make the core
+// refuse its inbound. Reserve the range with net.ipv4.ip_local_reserved_ports
+// or move such a process out of it.
+const (
+	ProbeListen    = "127.0.0.1"
+	ProbePortFirst = 31000
+	ProbePortLast  = 31999
+)
+
+// ProbeTagPrefix starts the core inbound tag of a probe inbound. It sits under
+// TransitTagPrefix, so every parser that treats "transit-" as "not a user
+// listener" treats a probe as one, and it is not "transit-lnk_", which is a
+// link's own tag.
+const ProbeTagPrefix = TransitTagPrefix + "probe-"
+
+// ProbeTag is the core inbound tag of a link's probe inbound.
+func ProbeTag(key protocol.LinkKey) string { return ProbeTagPrefix + string(key) }
+
+// ProbeEndpoint is the host and port a link URL names: the URL's own port, or
+// 443 for https and 80 for http.
+func ProbeEndpoint(linkURL string) (string, int, error) {
+	parsed, err := url.Parse(linkURL)
+	if err != nil {
+		return "", 0, err
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return "", 0, fmt.Errorf("probe link_url has no host")
+	}
+	port := 80
+	if parsed.Scheme == "https" {
+		port = 443
+	}
+	if text := parsed.Port(); text != "" {
+		if port, err = strconv.Atoi(text); err != nil || port < 1 || port > 65535 {
+			return "", 0, fmt.Errorf("probe link_url port %q is invalid", text)
+		}
+	}
+	return host, port, nil
 }
 
 // Empty reports whether there is nothing to relay.
 func (p TransitPlan) Empty() bool {
-	return len(p.Forwards) == 0 && len(p.LinksIn) == 0 && len(p.LinksOut) == 0 && len(p.Egress) == 0
+	return len(p.Forwards) == 0 && len(p.LinksIn) == 0 && len(p.LinksOut) == 0 && len(p.Egress) == 0 && len(p.Fronts) == 0
 }
 
 // PlanTransit validates the snapshot's transit and returns it in key order.
@@ -42,9 +126,32 @@ func (p TransitPlan) Empty() bool {
 //
 // An egress binding for a listener this compile does not serve (disabled, or
 // not on this node) binds nothing and is dropped.
-func PlanTransit(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string) (TransitPlan, error) {
+//
+// reserved are further "host:port" binds that only the probe allocation avoids
+// (the core's own API address, say): the compiler does not otherwise know
+// them, and a transit object colliding with one is not this function's to
+// reject.
+func PlanTransit(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string, reserved ...string) (TransitPlan, error) {
+	return planTransit(transit, binds, served, wildcard, nil, reserved)
+}
+
+// PlanTransitFronted is PlanTransit for an engine that compiles SNI fronts
+// (transit.sni.v1). binds must not hold the public bind of a fronted listener
+// (see FrontedListenerKeys): the front holds that port, and the listener is
+// bound to its loopback port instead. A front whose listeners cannot sit behind
+// it, or whose binds collide, rejects itself and everything it fronts.
+func PlanTransitFronted(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string, support FrontSupport, reserved ...string) (TransitPlan, error) {
+	return planTransit(transit, binds, served, wildcard, &support, reserved)
+}
+
+func planTransit(transit *protocol.Transit, binds map[string]string, served []protocol.ListenerKey, wildcard string, support *FrontSupport, reserved []string) (TransitPlan, error) {
 	if transit == nil {
 		return TransitPlan{}, nil
+	}
+	if support == nil {
+		if err := RejectFronts(transit); err != nil {
+			return TransitPlan{}, err
+		}
 	}
 	for _, forward := range transit.Forwards {
 		if err := protocol.ValidateForward(forward); err != nil {
@@ -59,6 +166,37 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 	for _, link := range transit.LinksOut {
 		if err := protocol.ValidateLinkOut(link); err != nil {
 			return TransitPlan{}, LinkError(link.Key, err)
+		}
+	}
+	// A route that leaves through a link this agent does not have rejects ITS
+	// LISTENER, before the transit as a whole is validated: the panel sees which
+	// listener is broken, and the connection can never fall back to leaving
+	// locally for lack of the exit it names.
+	if len(transit.Routes) > 0 {
+		isServed := make(map[protocol.ListenerKey]bool, len(served))
+		for _, key := range served {
+			isServed[key] = true
+		}
+		haveLink := make(map[protocol.LinkKey]bool, len(transit.LinksOut))
+		for _, link := range transit.LinksOut {
+			haveLink[link.Key] = true
+		}
+		for _, routes := range transit.Routes {
+			if !isServed[routes.Listener] {
+				continue
+			}
+			for _, rule := range routes.Rules {
+				if rule.Exit != protocol.LocalExit && !haveLink[rule.Exit] {
+					return TransitPlan{}, ListenerError(routes.Listener,
+						fmt.Errorf("route %s leaves through %s, which is not one of this node's outgoing links", rule.ID, rule.Exit))
+				}
+			}
+			for _, binding := range transit.Egress {
+				if binding.Listener == routes.Listener && !haveLink[binding.Link] {
+					return TransitPlan{}, ListenerError(routes.Listener,
+						fmt.Errorf("default exit %s is not one of this node's outgoing links", binding.Link))
+				}
+			}
 		}
 	}
 	if err := protocol.ValidateTransit(transit); err != nil {
@@ -104,14 +242,79 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 	sort.Slice(plan.Forwards, func(i, j int) bool { return plan.Forwards[i].Key < plan.Forwards[j].Key })
 	sort.Slice(plan.LinksIn, func(i, j int) bool { return plan.LinksIn[i].Key < plan.LinksIn[j].Key })
 	sort.Slice(plan.LinksOut, func(i, j int) bool { return plan.LinksOut[i].Key < plan.LinksOut[j].Key })
+	var frontedForward map[protocol.ForwardKey]protocol.FrontKey
+	var frontedLink map[protocol.LinkKey]protocol.FrontKey
+	var reservedPorts map[int]bool
+	fronted := support != nil && len(transit.Fronts) > 0
+	if fronted {
+		var err error
+		if reservedPorts, err = planFrontBinds(&plan, transit, *support, claim, reserved); err != nil {
+			return TransitPlan{}, err
+		}
+		frontedForward, frontedLink = frontedTargets(plan.Fronts)
+		// A fronted forward has no socket of its own: the front owns it.
+		kept := plan.Forwards[:0:0]
+		for _, forward := range plan.Forwards {
+			if _, isFronted := frontedForward[forward.Key]; isFronted {
+				if plan.FrontedForwards == nil {
+					plan.FrontedForwards = map[protocol.ForwardKey]protocol.Forward{}
+				}
+				plan.FrontedForwards[forward.Key] = forward
+				continue
+			}
+			kept = append(kept, forward)
+		}
+		plan.Forwards = kept
+	}
 	for _, forward := range plan.Forwards {
 		if err := claim(string(forward.Key), forward.Listen, forward.Port); err != nil {
 			return TransitPlan{}, ForwardError(forward.Key, err)
 		}
 	}
 	for _, link := range plan.LinksIn {
+		if _, isFronted := frontedLink[link.Key]; isFronted {
+			continue
+		}
 		if err := claim(string(link.Key), link.Listen, link.Port); err != nil {
 			return TransitPlan{}, LinkError(link.Key, err)
+		}
+	}
+	// Only now, with every socket of the transit claimed, can a fronted link be
+	// given a loopback port that nothing else holds.
+	if fronted {
+		if err := planFrontLinks(&plan, claim, reservedPorts); err != nil {
+			return TransitPlan{}, err
+		}
+	}
+	if probe := transit.Probe; probe != nil && probe.LinkURL != "" && len(plan.LinksOut) > 0 {
+		// A URL that names no usable endpoint (a port of 0 or above 65535, say)
+		// makes the e2e probe of every link unavailable. It never rejects the
+		// configuration: the protocol validator is not this function's gate.
+		host, port, endpointErr := ProbeEndpoint(probe.LinkURL)
+		for _, bind := range reserved {
+			if reservedHost, reservedPort, err := net.SplitHostPort(bind); err == nil {
+				taken = append(taken, bound{reservedHost, reservedPort, "reserved"})
+			}
+		}
+		for _, link := range plan.LinksOut {
+			if endpointErr != nil {
+				plan.ProbeUnavailable = append(plan.ProbeUnavailable, link.Key)
+				continue
+			}
+			// The search starts at a point derived from the key and walks up,
+			// so a link normally keeps its port. When two keys start on the
+			// same port the one earlier in key order takes it, so a port can
+			// still move when another link is added or removed.
+			_, allocated := allocateLoopback(string(link.Key), func(candidate int) bool {
+				if err := claim("probe "+string(link.Key), ProbeListen, candidate); err != nil {
+					return false
+				}
+				plan.Probes = append(plan.Probes, ProbeInbound{Link: link.Key, Port: candidate, Host: host, TargetPort: port})
+				return true
+			})
+			if !allocated {
+				plan.ProbeUnavailable = append(plan.ProbeUnavailable, link.Key)
+			}
 		}
 	}
 	isServed := make(map[protocol.ListenerKey]bool, len(served))
@@ -126,6 +329,15 @@ func PlanTransit(transit *protocol.Transit, binds map[string]string, served []pr
 			plan.Egress = make(map[protocol.ListenerKey]protocol.LinkKey)
 		}
 		plan.Egress[binding.Listener] = binding.Link
+	}
+	for _, routes := range transit.Routes {
+		if !isServed[routes.Listener] {
+			continue
+		}
+		if plan.Routes == nil {
+			plan.Routes = make(map[protocol.ListenerKey][]protocol.RouteRule)
+		}
+		plan.Routes[routes.Listener] = append([]protocol.RouteRule(nil), routes.Rules...)
 	}
 	return plan, nil
 }
@@ -143,6 +355,11 @@ func ForwardError(key protocol.ForwardKey, err error) error {
 
 // LinkError attributes a compile failure to one link.
 func LinkError(key protocol.LinkKey, err error) error {
+	return &ObjectError{Stream: protocol.StreamConfig, Key: string(key), Code: "core_config_rejected", Err: err}
+}
+
+// ListenerError attributes a compile failure to one listener.
+func ListenerError(key protocol.ListenerKey, err error) error {
 	return &ObjectError{Stream: protocol.StreamConfig, Key: string(key), Code: "core_config_rejected", Err: err}
 }
 
@@ -188,4 +405,91 @@ func StripEgressSuffix(name string) string {
 		return before
 	}
 	return name
+}
+
+// DefaultExit is where a served listener leaves when no route rule matches: its
+// egress link, else protocol.LocalExit.
+func (p TransitPlan) DefaultExit(listener protocol.ListenerKey) protocol.LinkKey {
+	if link, bound := p.Egress[listener]; bound {
+		return link
+	}
+	return protocol.LocalExit
+}
+
+// RouteGroup is a set of routed listeners that route identically: the same
+// rules and the same default exit. A compiler emits each segment once per group
+// with the group's inbounds, instead of once per listener.
+type RouteGroup struct {
+	Listeners []protocol.ListenerKey
+	Default   protocol.LinkKey
+	Rules     []protocol.RouteRule
+}
+
+// RouteGroups groups the routed listeners among served, in the order the first
+// listener of each group appears in served.
+func (p TransitPlan) RouteGroups(served []protocol.ListenerKey) []RouteGroup {
+	var groups []RouteGroup
+	index := map[string]int{}
+	for _, key := range served {
+		rules, routed := p.Routes[key]
+		if !routed {
+			continue
+		}
+		exit := p.DefaultExit(key)
+		encoded, _ := json.Marshal(struct {
+			Default protocol.LinkKey
+			Rules   []protocol.RouteRule
+		}{exit, rules})
+		at, seen := index[string(encoded)]
+		if !seen {
+			at = len(groups)
+			index[string(encoded)] = at
+			groups = append(groups, RouteGroup{Default: exit, Rules: rules})
+		}
+		groups[at].Listeners = append(groups[at].Listeners, key)
+	}
+	return groups
+}
+
+// Unrouted are the served listeners without route rules, in order.
+func (p TransitPlan) Unrouted(served []protocol.ListenerKey) []protocol.ListenerKey {
+	var out []protocol.ListenerKey
+	for _, key := range served {
+		if _, routed := p.Routes[key]; !routed {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// The budget of a compile with routed listeners. A route rule is copied into
+// every segment of its group (once per policy rule that applies there), so the
+// output is roughly routes x policy rules; both cores load the whole file into
+// memory and test rules in order for every connection. 20,000 generated rules
+// is two orders above what a real list needs (64 routes x 64 policy rules is
+// 4,096), and 32 MiB keeps the encoded config well under what a core parses
+// quickly and what the agent stores per deployment. A listener over either is
+// rejected as itself.
+const (
+	MaxRoutedRules       = 20000
+	MaxRoutedConfigBytes = 32 << 20
+)
+
+// SegmentSuffix is what a rule, outbound or catch-all copied for one segment of
+// a routed group carries after its own name: "~<exit>~r<k>" for the segment of
+// route rule r<k> (exit is "local" or the link key), "~<exit>~r0" for the
+// default segment, which is no route rule's. r0 is not a valid route id, so it
+// names no rule. A group after the first adds "~g<n>": Xray refuses a repeated
+// rule tag, and two groups emit the same segment with different matchers.
+// The suffix is on rule tags; outbounds keep the "~lnk_<id>" the audit receiver
+// reads, and the plain name for local.
+func SegmentSuffix(exit protocol.LinkKey, ruleID string, group int) string {
+	if ruleID == "" {
+		ruleID = "r0"
+	}
+	suffix := "~" + string(exit) + "~" + ruleID
+	if group > 0 {
+		suffix += "~g" + strconv.Itoa(group+1)
+	}
+	return suffix
 }

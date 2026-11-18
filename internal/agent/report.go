@@ -50,6 +50,10 @@ type ReportBuilder struct {
 	// LinkCounters is the latest link sample, attached to full reports from
 	// an agent that declares protocol.CapabilityTransitLink.
 	LinkCounters func() []protocol.LinkCounters
+	// Probes is the link and forward self-test, attached to full reports from
+	// an agent that declares protocol.CapabilityTransitProbe. nil attaches
+	// nothing, and so does an empty result.
+	Probes       func() []protocol.ProbeResult
 	Store        state.Store
 	OutboxLimit  int
 	Now          func() time.Time
@@ -173,6 +177,14 @@ func (b ReportBuilder) Build(ctx context.Context, options BuildOptions) (BuiltRe
 		}
 		if b.LinkCounters != nil && hasCapability(report.Capabilities, protocol.CapabilityTransitLink) {
 			report.LinkCounters = b.LinkCounters()
+		}
+		if b.Probes != nil && hasCapability(report.Capabilities, protocol.CapabilityTransitProbe) {
+			// Validated on its own and dropped whole when it fails, as the policy
+			// status is: one bad row must not stop the node's reports, and a node
+			// that sends nothing receives no roster.
+			if probes := b.Probes(); len(probes) > 0 && protocol.ValidateProbeResults(probes) == nil {
+				report.Probes = probes
+			}
 		}
 	}
 
@@ -391,6 +403,7 @@ func fitReportToWire(report *protocol.NodeReport, hasOutbox bool, maxBytes int64
 	report.ListenerCounters = nil
 	report.ForwardCounters = nil
 	report.LinkCounters = nil
+	report.Probes = nil
 	report.Clients = nil
 	report.Subjects = nil
 	body, err := encodeReport(report)

@@ -1,0 +1,146 @@
+{
+  "log": {
+    "access": "none",
+    "loglevel": "warning"
+  },
+  "api": {
+    "listen": "127.0.0.1:10085",
+    "services": [
+      "StatsService"
+    ],
+    "tag": "psp-api"
+  },
+  "stats": {},
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserOnline": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true
+    }
+  },
+  "inbounds": [
+    {
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "email": "u1@x",
+            "flow": "xtls-rprx-vision",
+            "id": "0f62f495-b5ca-4509-b6cd-54a040deafd5",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "realitySettings": {
+          "privateKey": "sCg4m4EzwI-ABTXkpBUlq7bXjvoGzOubGY3J8dhTL2o",
+          "serverNames": [
+            "a.example.com"
+          ],
+          "shortIds": [
+            "a1b2"
+          ],
+          "target": "www.example.com:443"
+        },
+        "security": "reality"
+      },
+      "tag": "psp-lst_1"
+    },
+    {
+      "port": 444,
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "realitySettings": {
+          "privateKey": "sCg4m4EzwI-ABTXkpBUlq7bXjvoGzOubGY3J8dhTL2o",
+          "serverNames": [
+            "b.example.com"
+          ],
+          "shortIds": [
+            "a1b2"
+          ],
+          "target": "www.example.com:443"
+        },
+        "security": "reality"
+      },
+      "tag": "psp-lst_2"
+    },
+    {
+      "port": 21001,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "203.0.113.9",
+        "network": "tcp",
+        "port": 8443
+      },
+      "tag": "transit-fwd_3"
+    },
+    {
+      "port": 21002,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "flow": "xtls-rprx-vision",
+            "id": "a3b5c7d9-1111-4222-8333-444455556666"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "realitySettings": {
+          "privateKey": "sCg4m4EzwI-ABTXkpBUlq7bXjvoGzOubGY3J8dhTL2o",
+          "serverNames": [
+            "link.example.com"
+          ],
+          "shortIds": [
+            "a1b2"
+          ],
+          "target": "www.example.com:443"
+        },
+        "security": "reality"
+      },
+      "tag": "transit-lnk_4"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "inboundTag": [
+          "transit-fwd_3",
+          "transit-lnk_4"
+        ],
+        "outboundTag": "direct",
+        "ruleTag": "transit-forwards",
+        "type": "field"
+      }
+    ]
+  }
+}

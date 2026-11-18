@@ -43,6 +43,19 @@ type RuntimeRound interface {
 	Finalize(context.Context) error
 }
 
+// ObjectRejection is one object the deployment the core runs left out.
+type ObjectRejection struct {
+	Stream, Key, Code string
+	Err               error
+}
+
+// RejectionSource is implemented by a runtime that can deploy without some
+// objects (agentcore.Artifact.Rejected). After a round the processor makes every
+// object's state agree with it, whether or not the object was asked about.
+type RejectionSource interface {
+	Rejections() []ObjectRejection
+}
+
 // RejectedError marks content that retrying unchanged cannot fix. Ordinary
 // errors remain pending and may heal on retry.
 type RejectedError struct {

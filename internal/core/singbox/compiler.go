@@ -48,6 +48,9 @@ type config struct {
 	Inbounds  []map[string]any `json:"inbounds"`
 	Outbounds []map[string]any `json:"outbounds"`
 	Route     map[string]any   `json:"route"`
+	// routed holds the rules of the routed listeners until the egress split has
+	// run on the rest (see applyRoutes); it is never encoded.
+	routed *routedRules
 }
 
 func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (agentcore.Artifact, error) {
@@ -71,6 +74,15 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		return agentcore.Artifact{}, fmt.Errorf("sing-box log level %q is invalid", logLevel)
 	}
 
+	// An engine that cannot front leaves every front, and what it fronts, out
+	// of the compile and reports them rejected: a fronted listener must never
+	// be bound on its public port by itself, and the rest of the configuration
+	// still applies.
+	var rejected []*agentcore.ObjectError
+	snapshot, frontRejection := agentcore.WithoutFronts(snapshot)
+	if frontRejection != nil {
+		rejected = append(rejected, frontRejection)
+	}
 	listeners := append([]protocol.Listener(nil), snapshot.Listeners...)
 	clients := append([]protocol.Client(nil), snapshot.Clients...)
 	sort.Slice(listeners, func(i, j int) bool { return listeners[i].Key < listeners[j].Key })
@@ -134,7 +146,7 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			return agentcore.Artifact{}, compileListenerError(listener.Key, errors.New("duplicate listener key"))
 		}
 		seenListeners[listener.Key] = struct{}{}
-		inbound, enabled, bind, err := c.compileInbound(listener, clientByListener[listener.Key])
+		inbound, enabled, bind, err := c.compileInbound(listener, clientByListener[listener.Key], &rejected)
 		if err != nil {
 			var objectErr *agentcore.ObjectError
 			if errors.As(err, &objectErr) {
@@ -164,15 +176,17 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for bind, key := range binds {
 		occupied[bind] = string(key)
 	}
-	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "::")
+	transit, err := agentcore.PlanTransit(snapshot.Transit, occupied, served, "::", apiListen)
 	if err != nil {
 		return agentcore.Artifact{}, err
 	}
 	for _, link := range transit.LinksOut {
 		result.Outbounds = append(result.Outbounds, compileLinkOut(link))
 	}
-	if snapshot.DestinationPolicy != nil {
-		if err := c.applyPolicy(&result, snapshot, served); err != nil {
+	// A routed listener's rules are built by applyRoutes; the policy covers the
+	// rest (see applyPolicy). Without routes this is exactly what it was.
+	if snapshot.DestinationPolicy != nil || len(transit.Routes) > 0 {
+		if err := c.applyPolicy(&result, snapshot, served, transit); err != nil {
 			return agentcore.Artifact{}, err
 		}
 	}
@@ -184,15 +198,28 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	for _, link := range transit.LinksIn {
 		result.Inbounds = append(result.Inbounds, compileLinkIn(link))
 	}
-	applyEgress(&result, served, transit.Egress)
+	for _, probe := range transit.Probes {
+		result.Inbounds = append(result.Inbounds, compileProbeInbound(probe))
+	}
+	applyEgress(&result, transit.Unrouted(served), transit.Egress)
+	finishRoutes(&result)
 	routeTransit(&result, transitInboundTags(transit))
+	routeProbes(&result, transit.Probes)
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return agentcore.Artifact{}, fmt.Errorf("encode sing-box config: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	if len(encoded) > agentcore.MaxRoutedConfigBytes && len(transit.Routes) > 0 {
+		for _, key := range served {
+			if _, routed := transit.Routes[key]; routed {
+				return agentcore.Artifact{}, agentcore.ListenerError(key,
+					fmt.Errorf("the compiled configuration is %d bytes, more than the %d a routed compile may take", len(encoded), agentcore.MaxRoutedConfigBytes))
+			}
+		}
+	}
 	digest := sha256.Sum256(encoded)
-	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:])}, nil
+	return agentcore.Artifact{Config: encoded, Digest: hex.EncodeToString(digest[:]), Rejected: agentcore.DedupeRejected(rejected)}, nil
 }
 
 // compileForward relays the port to the target unchanged: a direct inbound
@@ -227,7 +254,33 @@ func routeTransit(result *config, tags []string) {
 	result.Route["rules"] = append([]map[string]any{rule}, rules...)
 }
 
-func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.Client) (map[string]any, bool, string, error) {
+// compileProbeInbound is a link's probe inbound: a loopback direct inbound
+// whose destination is overridden to the link URL's endpoint. It has no user.
+func compileProbeInbound(probe agentcore.ProbeInbound) map[string]any {
+	return map[string]any{
+		"type": "direct", "tag": agentcore.ProbeTag(probe.Link), "listen": agentcore.ProbeListen, "listen_port": probe.Port,
+		"network": "tcp", "override_address": probe.Host, "override_port": probe.TargetPort,
+	}
+}
+
+// routeProbes puts one rule per probe inbound ahead of everything, the transit
+// rule included, so a probe leaves through the link it tests and is never
+// judged by the destination policy (or its sniff and resolve actions).
+func routeProbes(result *config, probes []agentcore.ProbeInbound) {
+	if len(probes) == 0 {
+		return
+	}
+	front := make([]map[string]any, 0, len(probes))
+	for _, probe := range probes {
+		front = append(front, map[string]any{
+			"inbound": []string{agentcore.ProbeTag(probe.Link)}, "action": "route", "outbound": agentcore.LinkTag(probe.Link),
+		})
+	}
+	rules, _ := result.Route["rules"].([]map[string]any)
+	result.Route["rules"] = append(front, rules...)
+}
+
+func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.Client, rejected *[]*agentcore.ObjectError) (map[string]any, bool, string, error) {
 	var spec listenerSpec
 	if err := strictJSON(listener.Config, &spec); err != nil {
 		return nil, false, "", fmt.Errorf("decode listener config: %w", err)
@@ -263,10 +316,16 @@ func (c Compiler) compileInbound(listener protocol.Listener, clients []protocol.
 	}
 	inbound["listen"] = listen
 	users := make([]any, 0, len(clients))
+	// sing-box keys VLESS users by the whole UUID, so nothing is masked.
+	credentials := agentcore.NewCredentialSet(protocolName, false)
 	for _, client := range clients {
 		user, userErr := compileUser(protocolName, client)
 		if userErr != nil {
 			return nil, false, "", compileClientError(client.Key, userErr)
+		}
+		if original, duplicate := credentials.Add(client); duplicate {
+			*rejected = append(*rejected, agentcore.DuplicateCredentialRejection(client.Key, original, listener.Key))
+			continue
 		}
 		users = append(users, user)
 	}

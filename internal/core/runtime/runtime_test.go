@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +174,170 @@ func TestRoundMapsOnlyRejectedCompileObjectAndMemoizesFailure(t *testing.T) {
 	}
 }
 
+// One cause can reject several objects: an SNI front and everything it fronts
+// are each rejected with their own code, and nothing else is.
+func TestRoundRejectsEveryObjectOfARelatedCompileError(t *testing.T) {
+	store := openRuntimeStore(t)
+	listener := protocol.Listener{Key: protocol.NewListenerKey(7), Config: protocol.RawConfig(`{"protocol":"vless"}`)}
+	saveRuntimeBody(t, store, protocol.StreamConfig, protocol.ConfigBody{Listeners: []protocol.Listener{listener}})
+	compiler := &compilerStub{err: agentcore.RejectFronts(&protocol.Transit{Fronts: []protocol.Front{{
+		Key: "fnt_1", Port: 443, Listeners: []protocol.FrontedListener{{Listener: listener.Key, LoopbackPort: 20001}},
+		Routes:  []protocol.FrontRoute{{ServerNames: []string{"a.example.com"}, Target: protocol.FrontTarget{Listener: listener.Key}}},
+		Default: protocol.FrontTarget{Listener: listener.Key},
+	}}})}
+	runtime := newRuntimeForTest(t, store, compiler, &installerStub{}, &supervisorStub{})
+	round := runtime.NewRound()
+	transit := round.(agent.TransitRuntime)
+	var rejected *agent.RejectedError
+	for name, call := range map[string]func() error{
+		"front":    func() error { return transit.UpsertTransit(t.Context(), "fnt_1") },
+		"listener": func() error { return round.UpsertListener(t.Context(), listener) },
+	} {
+		if err := call(); !errors.As(err, &rejected) || rejected.Code != "core_config_rejected" {
+			t.Errorf("%s: err = %v, want a rejection", name, err)
+		}
+	}
+	if err := transit.UpsertTransit(t.Context(), "fwd_9"); err == nil || errors.As(err, &rejected) {
+		t.Errorf("an unrelated object: err = %v, want the shared retryable failure", err)
+	}
+}
+
+// Objects the compile left out are rejected as themselves while the deployment
+// goes ahead for everything else, and the runtime says which engine the desired
+// config selects, which is what an engine-only capability is declared from.
+func TestRoundRejectsOnlyTheObjectsAnArtifactLeftOut(t *testing.T) {
+	store := openRuntimeStore(t)
+	kept := protocol.Listener{Key: protocol.NewListenerKey(1), Config: protocol.RawConfig(`{"protocol":"vless"}`)}
+	left := protocol.Listener{Key: protocol.NewListenerKey(2), Config: protocol.RawConfig(`{"protocol":"vless"}`)}
+	clientKept := protocol.Client{Key: protocol.NewClientKey(3), Subject: protocol.NewSubjectKey(3), Listeners: []protocol.ListenerKey{kept.Key}}
+	clientLeft := protocol.Client{Key: protocol.NewClientKey(4), Subject: protocol.NewSubjectKey(4), Listeners: []protocol.ListenerKey{kept.Key}}
+	saveRuntimeBody(t, store, protocol.StreamConfig, protocol.ConfigBody{
+		Core: protocol.CoreSelection{Engine: "xray", Version: "26.7.28"}, Listeners: []protocol.Listener{kept, left},
+	})
+	saveRuntimeBody(t, store, protocol.StreamRoster, protocol.RosterBody{Clients: []protocol.Client{clientKept, clientLeft}})
+	artifact := testArtifact(`{"inbounds":[]}`)
+	artifact.Rejected = []*agentcore.ObjectError{
+		{Stream: protocol.StreamConfig, Key: string(left.Key), Code: "core_config_rejected", Err: errors.New("left out")},
+		agentcore.DuplicateCredentialRejection(clientLeft.Key, clientKept.Key, kept.Key),
+	}
+	compiler := &compilerStub{artifact: artifact}
+	installer := &installerStub{result: install.Installation{Engine: "xray", Version: "26.7.28", BinaryPath: "/cores/xray/26.7.28/xray"}}
+	supervisor := &supervisorStub{}
+	runtime := newRuntimeForTest(t, store, compiler, installer, supervisor)
+	if runtime.Engine() != "" {
+		t.Fatalf("engine before any convergence = %q", runtime.Engine())
+	}
+	round := runtime.NewRound()
+	var rejected *agent.RejectedError
+	if err := round.UpsertListener(t.Context(), kept); err != nil {
+		t.Fatalf("the kept listener: %v", err)
+	}
+	if err := round.UpsertClient(t.Context(), clientKept); err != nil {
+		t.Fatalf("the kept client: %v", err)
+	}
+	if err := round.UpsertListener(t.Context(), left); !errors.As(err, &rejected) || rejected.Code != "core_config_rejected" {
+		t.Fatalf("the listener left out: %v", err)
+	}
+	if err := round.UpsertClient(t.Context(), clientLeft); !errors.As(err, &rejected) || !strings.Contains(err.Error(), "duplicates client cli_3") {
+		t.Fatalf("the client left out: %v", err)
+	}
+	// The reason travels with each rejection, for the issue that reports it.
+	reasons := map[string]string{}
+	for _, rejection := range runtime.Rejections() {
+		reasons[rejection.Stream+"/"+rejection.Key] = rejection.Err.Error()
+	}
+	if !strings.Contains(reasons["config/lst_2"], "left out") || !strings.Contains(reasons["roster/cli_4"], "credential duplicates client cli_3") {
+		t.Fatalf("rejection reasons = %v", reasons)
+	}
+	if supervisor.deployCalls != 1 || runtime.Engine() != "xray" {
+		t.Fatalf("deploys %d, engine %q", supervisor.deployCalls, runtime.Engine())
+	}
+}
+
+// The rejections belong to the deployment the core runs. A convergence whose
+// deploy fails leaves the core on the earlier deployment, and the earlier
+// deployment's rejections with it.
+func TestAFailedDeployKeepsTheRejectionsOfTheDeploymentThatRuns(t *testing.T) {
+	store := openRuntimeStore(t)
+	listener := protocol.Listener{Key: protocol.NewListenerKey(1), Config: protocol.RawConfig(`{"protocol":"vless"}`)}
+	config := protocol.ConfigBody{Core: protocol.CoreSelection{Engine: "xray", Version: "26.7.28"}, Listeners: []protocol.Listener{listener}}
+	saveRuntimeBody(t, store, protocol.StreamConfig, config)
+	rejection := func(key string) *agentcore.ObjectError {
+		return &agentcore.ObjectError{Stream: protocol.StreamConfig, Key: key, Code: "core_config_rejected", Err: errors.New("left out")}
+	}
+	artifact := testArtifact(`{"inbounds":[]}`)
+	artifact.Rejected = []*agentcore.ObjectError{rejection("fnt_1")}
+	compiler := &compilerStub{artifact: artifact}
+	installer := &installerStub{result: install.Installation{Engine: "xray", Version: "26.7.28", BinaryPath: "/cores/xray/26.7.28/xray"}}
+	supervisor := &supervisorStub{}
+	runtime := newRuntimeForTest(t, store, compiler, installer, supervisor)
+	if err := runtime.Converge(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	keys := func() []string {
+		var out []string
+		for _, rejected := range runtime.Rejections() {
+			out = append(out, rejected.Key)
+		}
+		return out
+	}
+	if !reflect.DeepEqual(keys(), []string{"fnt_1"}) {
+		t.Fatalf("rejections = %v", keys())
+	}
+
+	// A new config whose deployment fails: the new compile left out another
+	// object, but nothing of it runs.
+	config.Listeners = append(config.Listeners, protocol.Listener{Key: protocol.NewListenerKey(2), Config: protocol.RawConfig(`{"protocol":"vless"}`)})
+	saveRuntimeBodyAt(t, store, protocol.StreamConfig, config, 2)
+	next := testArtifact(`{"inbounds":[{"tag":"x"}]}`)
+	next.Rejected = []*agentcore.ObjectError{rejection("fnt_2")}
+	compiler.artifact = next
+	supervisor.err = errors.New("core refused")
+	if err := runtime.Converge(t.Context()); err == nil {
+		t.Fatal("the deployment was expected to fail")
+	}
+	if !reflect.DeepEqual(keys(), []string{"fnt_1"}) {
+		t.Fatalf("a failed deploy changed the rejections to %v", keys())
+	}
+	// The same inputs again on the idle path report the same set.
+	supervisor.err = nil
+	if err := runtime.Converge(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(keys(), []string{"fnt_2"}) {
+		t.Fatalf("rejections after the deploy = %v", keys())
+	}
+	if err := runtime.Converge(t.Context()); err != nil || !reflect.DeepEqual(keys(), []string{"fnt_2"}) {
+		t.Fatalf("idle: rejections = %v (%v)", keys(), err)
+	}
+}
+
+// After a restart the first report is built before anything converges; the
+// engine the node runs comes from the confirmed deployment, so what only that
+// engine has is still declared.
+func TestRestoreStatusRestoresTheEngineOfTheConfirmedDeployment(t *testing.T) {
+	store := openRuntimeStore(t)
+	listener := protocol.Listener{Key: protocol.NewListenerKey(1), Config: protocol.RawConfig(`{"protocol":"vless"}`)}
+	saveRuntimeBody(t, store, protocol.StreamConfig, protocol.ConfigBody{
+		Core: protocol.CoreSelection{Engine: "xray", Version: "26.7.28"}, Listeners: []protocol.Listener{listener},
+	})
+	installer := &installerStub{result: install.Installation{Engine: "xray", Version: "26.7.28", BinaryPath: "/cores/xray/26.7.28/xray"}}
+	first := newRuntimeForTest(t, store, &compilerStub{artifact: testArtifact(`{"inbounds":[]}`)}, installer, &supervisorStub{})
+	if err := first.Converge(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := newRuntimeForTest(t, store, &compilerStub{artifact: testArtifact(`{"inbounds":[]}`)}, installer, &supervisorStub{})
+	if restarted.Engine() != "" {
+		t.Fatalf("engine before restore = %q", restarted.Engine())
+	}
+	if err := restarted.RestoreStatus(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Engine() != "xray" {
+		t.Fatalf("engine after restore = %q", restarted.Engine())
+	}
+}
+
 func TestEmptyCoreSelectionResolvesRecommendedRelease(t *testing.T) {
 	store := openRuntimeStore(t)
 	saveRuntimeBody(t, store, protocol.StreamConfig, protocol.ConfigBody{})
@@ -314,13 +480,18 @@ func openRuntimeStore(t *testing.T) state.Store {
 
 func saveRuntimeBody(t *testing.T, store state.Store, stream string, body any) {
 	t.Helper()
+	saveRuntimeBodyAt(t, store, stream, body, 1)
+}
+
+func saveRuntimeBodyAt(t *testing.T, store state.Store, stream string, body any, version uint64) {
+	t.Helper()
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(encoded)
 	if err := store.SaveStream(t.Context(), state.StreamDocument{
-		Stream: stream, Version: protocol.Version{Epoch: 1, Version: 1},
+		Stream: stream, Version: protocol.Version{Epoch: 1, Version: version},
 		ETag: protocol.ETag(hex.EncodeToString(digest[:])), Body: encoded, AcceptedAtMS: 1,
 	}); err != nil {
 		t.Fatal(err)
@@ -333,3 +504,42 @@ func testArtifact(config string) agentcore.Artifact {
 }
 
 var _ Installer = (*installerStub)(nil)
+
+// What a compile found and did not refuse is reported through the issue sink,
+// once per artifact and listener, and a sink that fails never fails the round.
+func TestRoundReportsTheIssuesOfTheCompile(t *testing.T) {
+	store := openRuntimeStore(t)
+	listener := protocol.Listener{Key: protocol.NewListenerKey(1), Config: protocol.RawConfig(`{"protocol":"vless"}`)}
+	saveRuntimeBody(t, store, protocol.StreamConfig, protocol.ConfigBody{
+		Core: protocol.CoreSelection{Engine: "xray", Version: "26.7.28"}, Listeners: []protocol.Listener{listener},
+	})
+	artifact := testArtifact(`{"inbounds":[]}`)
+	artifact.Issues = []agentcore.ArtifactIssue{{Code: agentcore.IssueRoutePolicyApproximate, Key: "lst_1", Detail: "p1 on r1"}}
+	var recorded []agent.LocalIssue
+	compiler := &compilerStub{artifact: artifact}
+	installer := &installerStub{result: install.Installation{Engine: "xray", Version: "26.7.28", BinaryPath: "/cores/xray/26.7.28/xray"}}
+	runtime, err := New(Options{
+		Store: store, Installer: installer, Supervisor: &supervisorStub{},
+		CompilerFactory: func(protocol.CoreSelection) (agentcore.Compiler, error) { return compiler, nil },
+		Now:             func() time.Time { return time.Unix(1_700_000_000, 0) },
+		Issues: agent.IssueSinkFunc(func(_ context.Context, issue agent.LocalIssue) (bool, error) {
+			recorded = append(recorded, issue)
+			return true, errors.New("outbox unavailable")
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := runtime.NewRound()
+	if err := round.UpsertListener(t.Context(), listener); err != nil {
+		t.Fatal(err)
+	}
+	if err := round.Finalize(t.Context()); err != nil {
+		t.Fatalf("an issue sink that fails failed the round: %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].Kind != "route_policy_approximate" || recorded[0].Key != "lst_1" ||
+		recorded[0].Stream != protocol.StreamConfig || recorded[0].Detail != "p1 on r1" ||
+		recorded[0].DedupeKey != "route_policy_approximate:lst_1:"+artifact.Digest {
+		t.Fatalf("recorded = %+v", recorded)
+	}
+}

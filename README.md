@@ -161,6 +161,209 @@ Caveats worth repeating to an operator:
 - sing-box's `resolve` action exists from 1.11; the core catalog offers only
   1.14 and a test fails if an older release becomes selectable.
 
+### Link probes
+
+An agent that declares `transit.probe.v1` (both engines do) self-tests the lines
+it is the entry of when the panel sends `Transit.Probe`, and reports the result
+in `NodeReport.Probes` on full reports only.
+
+- `transport`: a plain TCP connect from the agent to each outgoing link's exit.
+- `e2e` (only with a `link_url`): an HTTP(S) GET of the URL **through the core and
+  the link**, via a loopback probe inbound (`127.0.0.1:31000-31999`, one per link,
+  tagged `transit-probe-<link>`, routed first to that link's outbound, so the
+  destination policy never judges it and it is never audited). With no free port
+  the link reports `probe_unavailable`; the configuration is never rejected.
+- `forward`: per named forward, `tcp` (connect to the target), `quic` (a Version
+  Negotiation probe) or `tls` (a ClientHello naming the front route's server
+  name, success on a ServerHello).
+
+Each result summarizes the last 20 attempts (min/median/max RTT of the
+successes, failure count, last error class, last success time), is kept in
+memory only and starts over when the probed object's configuration changes.
+The probe port range (127.0.0.1:31000-31999) sits below Linux's default ephemeral
+range (32768-60999). The
+allocator avoids only binds the compile knows, so an unrelated local process
+listening in 31000-31999 would make the core refuse that inbound; reserve the
+range with `net.ipv4.ip_local_reserved_ports=31000-31999`. A port collision
+between two links is resolved by key order, so a port can move when links are
+added or removed. The probe inbound has no authentication: any local process
+can reach the link URL's host and port through the exit (acceptable on a
+single-tenant node). An explicit link URL port must be between 1 and 65535.
+The next interval starts after a round ends; a round runs at most 8 attempts at once, each bounded by the
+timeout, so with every line timing out it lasts about ceil(N/8) x timeout. The
+response body is never downloaded: the probe stops at the headers.
+Probe traffic is metered as the link's own and never as a user's. Without
+`Transit.Probe` the compiled configuration is byte-identical to before.
+
+### Routing by destination (`transit.route.v1`)
+
+An agent that declares `transit.route.v1` (both engines do) compiles
+`Transit.Routes`: one listener leaves through different exits depending on where
+the connection is going (streaming through one link, mail from the node itself,
+the rest through the listener's egress binding), and a policy rule may be scoped
+to those exits (`DestinationRule.Exits`). The exit is the first route rule that
+matches, else the listener's default (its egress link, else `local`). A listener
+without routes compiles exactly as before; the golden artifacts are unchanged.
+
+For each routed listener, after the transit rules and in this order, both
+engines emit (the protocol's compile contract):
+
+1. for each route rule k, in order: **segment k**, every policy rule whose `exits`
+   is empty or names exit k, in policy order and with its own action, ANDed with
+   route k; then a **catch-all** on route k to exit k;
+2. the **default segment**: the rules whose `exits` allow the default exit, as the
+   egress split gives them, ending with the link catch-all.
+
+An earlier segment's catch-all consumes the traffic of its route rule, which is
+what makes "first match wins" hold for a connection that also matches a later
+rule. Permit rules (allow, the exempt step, the usage catch-all) go to the
+segment's exit; a report-only rule goes to a report-only outbound whose dialer is
+the exit's link (the plain one for `local`); a block keeps its blackhole, split
+per link under `audit_egress`. A route whose exit link is not in the compile
+rejects its listener (a `config` object error); nothing falls back to `local`.
+
+- **sing-box** ANDs exactly with `logical`/`and` rules, so nothing is approximated.
+  A route rule's destination is written once, as an inline rule set
+  (`route.rule_set`, tag `psp-route-<group>-<id>`), and the segments refer to it,
+  so the size grows with routes plus rules, not their product. Under `on_demand`
+  the routed listeners get a `resolve` action of their own, scoped to their
+  inbounds, ahead of their first address rule; the unrouted listeners keep exactly
+  the resolve they had.
+- **Sniffing on sing-box.** sing-box dials the destination the client asked for
+  and cannot dial a sniffed name (Xray can), so with a policy that needs the sniff
+  the route, the policy and the dial must not be allowed to read different names.
+  A routed listener is therefore split by what the client asked for. A connection
+  that asked for a **domain** is decided entirely before the sniff, on that name
+  (segments, then a catch-all gated on `domain_regex "."`), and never reaches the
+  sniff, so a Host or SNI it writes changes neither its exit nor which exit-scoped
+  rule applies. Rules that name a protocol still apply to it: when the policy has
+  one, a BitTorrent-only `sniff` (`"sniffer":["bittorrent"]`, which sets the
+  protocol and not the domain) runs for requested domains on the routed inbounds
+  ahead of the segments. A connection that asked for an **address** goes
+  through the general sniff. When that sniff leaves UDP unclassified and a
+  protocol rule is present, a BitTorrent-only sniff runs before the address
+  segments. The live test checks that a uTP SYN is blocked and ordinary UDP
+  still reaches the routed exit. After sniffing, route rules use only addresses,
+  ports and network. On Xray the claimed name is the one dialed.
+- **Xray** ANDs with `protocol.IntersectDestinations`, one (policy rule, route
+  rule) pair at a time. When the result is not exact it is a superset: a **block**
+  keeps it (it can only over-block); an **allow** or **report-only** copy is left
+  out of that segment (fail closed, so the traffic falls to later rules) and the
+  agent reports the issue `route_policy_approximate`, keyed by the listener, with
+  the rule and route ids. A route's own `ports` and `network` always intersect
+  exactly. Under `on_demand`, a rule that names hostnames only against a route
+  that names addresses is exact after all: "the hostname AND it resolves into the
+  route's CIDRs" is one Xray rule with a `domain` and an `ip` field, which Xray
+  ANDs, so it is kept whatever its action. The trailing-dot guard is intersected by hand (it is a block on every
+  dotted hostname; `IntersectDestinations` would turn it into a block of the
+  whole route).
+- **Tags.** Segment rule tags carry `~<exit>~r<k>` (`~lnk_8~r1`, `~local~r2`; the
+  default segment is `~<exit>~r0`), after the rule id and the `a`/`b` half, since
+  Xray refuses a repeated rule tag. Listeners that route identically share one
+  group's rules; a further group adds `~g<n>`. Outbound tags keep what the audit
+  receiver reads: `psp-deny-<id>~lnk_<n>` for a link's segment under
+  `audit_egress`, the plain name for `local` (no egress).
+- **Budget.** A routed compile may generate at most 20,000 core rules per
+  listener group, 32 MiB of configuration and about 1,000,000 destination
+  entries (domains and CIDRs, summed over groups). The cap is enforced as the
+  entries are appended (a budget the builders count into), so memory is bounded
+  whatever the shape; a cheap estimate before building only refuses the obvious.
+  Past any the routed listener (the first of the offending group) is
+  rejected as itself (config object error). On sing-box a policy rule's matcher of
+  16 or more entries is written once, as an inline rule set, and the segments
+  refer to it, so a 50,000-domain block list against 64 routes is 2.7 MB and
+  about 12 MiB of heap; Xray has no shared matcher, so the same compile is
+  refused up front (about 3.25 million entries).
+- **Scoping.** With routed listeners every other rule names its inbounds, so no
+  rule of the unrouted list can judge a routed listener ahead of its segments.
+  A rule with `exits` also scopes an unrouted listener, by its default exit.
+- **Resolve.** A route's CIDRs meet a hostname only under `on_demand` (Xray
+  `IPOnDemand`, sing-box `resolve`), as a policy rule's do; under as-is a name
+  never matches them.
+- **Sniffing.** Xray's sniffing check is made on the whole policy, so it may ask
+  for sniffing on a listener whose rules all sit in segments it never reaches.
+
+### SNI fronts (`transit.sni.v1`, Xray only)
+
+An agent declares `transit.sni.v1` **while the engine its desired config selects is
+Xray** (it is asked for on every report, so a switch to sing-box withdraws it on
+the next one; before the first convergence it is not declared) and compiles
+`Transit.Fronts` on **Xray**: one TCP port, normally 443, is shared by several
+TLS or REALITY uses, and each raw connection is routed on the SNI of its
+ClientHello without decrypting anything. A listener keeps its public port in its
+own config (subscriptions still say 443); the agent binds it to
+`127.0.0.1:<loopback_port>` and the front hands it the connection with PROXY
+protocol v2, so the listener still sees the client's own address (online IPs and
+source-CIDR rules are right). A forward behind a front is relayed byte for byte
+and keeps its counters (they are read off the relay's outbound); an incoming
+link behind a front is moved to a loopback port the agent picks from the probe
+range; everything the routes do not name, an absent SNI included, goes to the
+default, and a default that is `external` is dialed at its own address, never at
+the name the client sent. A front's connections are never a user's and are not
+judged by the destination policy; the user connection a fronted listener
+receives is.
+
+- **Fail closed.** A fronted listener must be enabled, TCP, TLS or REALITY, have
+  the front's port as its own, and not accept PROXY protocol itself
+  (`sockopt.acceptProxyProtocol`, or the same in `rawSettings`/`tcpSettings`): the
+  front prefixes its own header and the listener would expect two. Its loopback
+  port must not collide with any other bind (the core's API and the probe range
+  included; a fronted link's port is picked after every other bind is claimed). An
+  `external` default must not be one of this host's own interface addresses on the
+  front's port when the front listens on every address or on that one (the
+  connection would come straight back; IPv4-mapped spellings are normalised).
+  A public address the host only owns through NAT is on no interface and is not
+  seen here: the panel, which knows the address the server is observed at, must
+  check it. A front that fails any of these, on Xray as on sing-box, is left out
+  with everything it fronts and reported rejected as config objects; the other
+  fronts and the rest of the configuration compile and are deployed.
+- **sing-box.** It cannot front. Each front and everything it fronts (its
+  listeners, forwards and links) is left out of the compile and reported rejected
+  as a config object (`SNI fronts require Xray`); **the rest of the configuration
+  compiles and is deployed**, and no fronted listener is bound on its public port
+  by itself. The panel should still send `Fronts` only to a node that declared
+  `transit.sni.v1`.
+- **Clients.** A client must not split its ClientHello across several TLS
+  records: the front reads the SNI from the first one, and a hello in two records
+  does not reach its route. (A hello split across TCP segments is fine.)
+- **Plain HTTP.** A probe that sends nothing TLS-shaped (plain HTTP, a port scan)
+  is handed to the default only when the sniff gives up, about one second later.
+- **Probe.** `ProbeMethodTLS` on a forward behind a front sends a ClientHello
+  with the route's first server name to the front and passes if a ServerHello
+  comes back through the relay.
+- **Duplicate credentials.** Two enabled clients of one listener with the same
+  credential are one user to the core, so the **later** one (clients are in key
+  order) is left off that listener and reported rejected as a per-client roster
+  error naming the earlier one; the first is served and **the rest of the
+  configuration compiles and is deployed**. The comparison is the engine's: on
+  Xray a VLESS UUID is compared with bytes 6 and 7 masked (Xray keys its users that
+  way); on sing-box VLESS, and for VMess on both, the whole UUID; Trojan and
+  Shadowsocks compare the password. The same credential on different listeners is
+  fine, and an empty credential is reported as missing ("UUID is required"), not as
+  a duplicate. (No compiler here supports Hysteria 2.)
+
+Without `Fronts` the compiled configuration is byte-identical to before.
+
+### Compressed sync (`sync.gzip.v1`)
+
+The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with
+`Content-Encoding: gzip`, so a roster larger than the 16 MiB wire limit still
+fits (decoded bodies are capped at 64 MiB). Negotiation is two-sided and never
+guessed: the first report is plain; a panel that accepts compressed requests says
+so with `Accept-Encoding: gzip` on a 2xx response, and only then does the agent
+compress. Only a 2xx response changes that state; a 5xx or a failed connection
+leaves it alone. If the panel answers a compressed request with 400 or 415 the
+agent resends the same report once in plain and stays plain for one hour. The
+agent sends `Accept-Encoding: gzip` on its own requests, so the panel may
+compress responses; the HTTP transport has `DisableCompression` set and every
+body is decoded by `protocol.DecodeSyncBody` under the protocol limits, never by
+Go's unlimited automatic inflation. A panel that does not advertise sees exactly
+the plain behaviour it always did. The learned state changes only after a 2xx
+body has been read and decoded in full. `last_request_bytes` and
+`last_response_bytes` are wire sizes (compressed when compressed); a round that
+was rejected and resent plain records the plain retry. `MaxResponseBytes` bounds
+wire bytes and is clamped to the 16 MiB protocol limit.
+
 ## Design record
 
 The protocol was not designed here. It was derived from three years of a real

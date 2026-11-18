@@ -214,6 +214,9 @@ func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.Clien
 			Tag      string          `json:"tag"`
 			Settings json.RawMessage `json:"settings"`
 		} `json:"inbounds"`
+		Outbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"outbounds"`
 	}
 	if err := json.Unmarshal(artifact, &config); err != nil {
 		return nil, nil, nil, fmt.Errorf("decode applied Xray artifact: %w", err)
@@ -222,9 +225,15 @@ func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.Clien
 	clients := make(map[protocol.ClientKey]bool)
 	forwards := make(map[protocol.ForwardKey]bool)
 	for _, inbound := range config.Inbounds {
+		if strings.HasPrefix(inbound.Tag, agentcore.ProbeTagPrefix) {
+			// A probe inbound is the agent's own self-test, not a forward.
+			continue
+		}
 		if forwardText, transit := strings.CutPrefix(inbound.Tag, agentcore.TransitTagPrefix); transit {
-			// An incoming link is counted by decodeXrayLinkPresence.
-			if strings.HasPrefix(forwardText, "lnk_") {
+			// An incoming link is counted by decodeXrayLinkPresence. A front
+			// is no forward and no user: it carries connections to the target
+			// that owns them, and nothing is attributed to it.
+			if strings.HasPrefix(forwardText, "lnk_") || strings.HasPrefix(forwardText, "fnt_") {
 				continue
 			}
 			forward := protocol.ForwardKey(forwardText)
@@ -260,6 +269,19 @@ func decodeXrayPresence(artifact []byte, clientByEmail map[string]protocol.Clien
 			}
 			clients[clientKey] = true
 		}
+	}
+	// A forward behind a front has no inbound; its outbound, tagged like the
+	// forward, is what is running.
+	for _, outbound := range config.Outbounds {
+		forwardText, transit := strings.CutPrefix(outbound.Tag, agentcore.TransitTagPrefix+"fwd_")
+		if !transit {
+			continue
+		}
+		forward := protocol.ForwardKey("fwd_" + forwardText)
+		if _, err := forward.RowID(); err != nil {
+			return nil, nil, nil, fmt.Errorf("applied Xray outbound tag %q: %w", outbound.Tag, err)
+		}
+		forwards[forward] = true
 	}
 	return listeners, clients, forwards, nil
 }
@@ -444,8 +466,11 @@ func assembleLinkCounters(in, out []protocol.LinkKey, present map[protocol.LinkK
 	return result
 }
 
-// assembleForwardCounters reads each forward's inbound traffic. Xray counts
-// both directions of the relayed connection on the dokodemo-door inbound.
+// assembleForwardCounters reads each forward's traffic. Xray counts both
+// directions of the relayed connection on the dokodemo-door inbound; a forward
+// behind a front has no inbound, and the outbound that relays it carries its tag
+// (outbound statistics are switched on where one exists). A forward has one or
+// the other, so the sum is the one that exists.
 func assembleForwardCounters(forwards []protocol.ForwardKey, present map[protocol.ForwardKey]bool, stats map[string]int64, epoch uint64) []agentcore.ForwardCounters {
 	if len(forwards) == 0 {
 		return nil
@@ -455,8 +480,8 @@ func assembleForwardCounters(forwards []protocol.ForwardKey, present map[protoco
 		tag := agentcore.ForwardTag(key)
 		result = append(result, agentcore.ForwardCounters{
 			Key: key, Present: present[key],
-			UpBytes:      stats["inbound>>>"+tag+">>>traffic>>>uplink"],
-			DownBytes:    stats["inbound>>>"+tag+">>>traffic>>>downlink"],
+			UpBytes:      stats["inbound>>>"+tag+">>>traffic>>>uplink"] + stats["outbound>>>"+tag+">>>traffic>>>uplink"],
+			DownBytes:    stats["inbound>>>"+tag+">>>traffic>>>downlink"] + stats["outbound>>>"+tag+">>>traffic>>>downlink"],
 			CounterEpoch: epoch,
 		})
 	}

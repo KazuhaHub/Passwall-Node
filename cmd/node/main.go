@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -196,9 +197,13 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	// Listening comes before everything that reads its result: the compiler is
 	// given the socket only if this worked, and the capability is declared only
 	// if it did.
+	now := time.Now
+	issues := agent.OutboxIssueSink{
+		Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() },
+	}
 	audit := startAuditReceiver(parsed.DataDir, logger.Warnf)
 	runtimeOptions := coreruntime.Options{
-		Store: store, Installer: installer, Supervisor: supervisor, Warnf: logger.Warnf,
+		Store: store, Installer: installer, Supervisor: supervisor, Warnf: logger.Warnf, Issues: issues,
 		CompilerFactory: compilerFactory(parsed, singBoxAPISecret, audit),
 	}
 	if audit != nil {
@@ -226,10 +231,6 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Adapters: map[string]agentcore.Telemetry{
 			"xray": xrayTelemetry, "sing-box": singBoxTelemetry,
 		},
-	}
-	now := time.Now
-	issues := agent.OutboxIssueSink{
-		Store: store, Map: agent.DefaultIssueMapper, NowMS: func() int64 { return now().UnixMilli() },
 	}
 	// These are explicit operational guard margins, not execution TTLs or a
 	// measured hardware/SLA guarantee. Individual kinds still need execution,
@@ -288,11 +289,18 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Signer: signer, AllowInsecureHTTP: parsed.AllowInsecureHTTP,
 		UserAgent: "passwall-node/" + buildversion.String(),
 		Stats:     runtimeStats,
+		SyncGzip:  slices.Contains(staticCapabilities(false, false), protocol.CapabilitySyncGzip),
 	})
 	if err != nil {
 		return err
 	}
 	forwardCounters := &agent.ForwardCounterCache{}
+	prober, err := agent.NewProber(agent.ProberOptions{
+		Deployment: store.CoreDeployment, Status: supervisor.Status, Warnf: logger.Warnf,
+	})
+	if err != nil {
+		return err
+	}
 	observer := &agent.ObservationService{
 		Telemetry: telemetry, Store: store, Issues: issues, Status: supervisor.Status, Now: now,
 		Forwards: forwardCounters,
@@ -325,7 +333,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	hostTelemetry = hostReporter != nil
 	capabilities := staticCapabilities(hostTelemetry, audit != nil)
 	synchronizer := agent.Synchronizer{
-		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters),
+		Reports: nodeReportBuilder(parsed.AgentID, store, supervisor.Status, now, capabilities, taskWorker, coreRuntime.PolicyStatus, forwardCounters, prober.Results, coreRuntime.Engine),
 		Syncer:  syncer, Store: store, Processor: processor, Observer: observer,
 		TaskClock: taskClock, OnTaskClockError: func(err error) { logger.Warnf("task start authorization held: %v", err) },
 		LocalConverger: coreRuntime,
@@ -369,6 +377,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		{Name: "local expiry", Run: func(ctx context.Context) error {
 			return coreRuntime.RunExpiryLoop(ctx, func(err error) { logger.Errorf("%v", err) })
 		}},
+		{Name: "link probes", Run: prober.Run},
 		{Name: "task worker", Run: taskWorker.Run},
 		{Name: "control-plane sync", Run: runner.Run},
 	}
@@ -398,7 +407,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 // updater never advertised remote upgrade until it was restarted. It is a
 // function of its own so the tests build their reports through exactly this
 // wiring rather than a copy of it.
-func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, transit *agent.ForwardCounterCache) agent.ReportBuilder {
+func nodeReportBuilder(agentID string, store state.Store, status func() agentcore.Status, now func() time.Time, static []string, worker *agent.TaskWorker, policyStatus func() protocol.PolicyStatus, transit *agent.ForwardCounterCache, probes func() []protocol.ProbeResult, engine func() string) agent.ReportBuilder {
 	var forwardCounters func() []protocol.ForwardCounters
 	var linkCounters func() []protocol.LinkCounters
 	if transit != nil {
@@ -407,8 +416,24 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 	return agent.ReportBuilder{
 		AgentID: agentID, AgentVersion: buildversion.String(),
 		Store: store, CoreStatus: status, Now: now,
-		Capabilities: static, CapabilitySource: worker.Capabilities,
-		PolicyStatus: policyStatus, ForwardCounters: forwardCounters, LinkCounters: linkCounters,
+		Capabilities: static, CapabilitySource: engineCapabilities(worker.Capabilities, engine),
+		PolicyStatus: policyStatus, ForwardCounters: forwardCounters, LinkCounters: linkCounters, Probes: probes,
+	}
+}
+
+// engineCapabilities adds to every report the capabilities that only some
+// engines have. transit.sni.v1 is declared while the selected engine is Xray:
+// the panel must send Transit.Fronts only to a node that declared it, and a
+// node that switched to sing-box (which cannot front) must stop declaring it,
+// which the next report reflects because this is asked for every report.
+// Before the first convergence the engine is unknown and nothing is declared.
+func engineCapabilities(base func() []string, engine func() string) func() []string {
+	return func() []string {
+		capabilities := base()
+		if engine != nil && engine() == "xray" {
+			capabilities = append(capabilities, protocol.CapabilityTransitSNI)
+		}
+		return capabilities
 	}
 }
 
@@ -430,6 +455,20 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // nothing sends no transit counters, which the panel reads as "not measured".
 // Users are charged on their listener on both engines either way.
 //
+// transit.probe.v1 is always among them: the self-test goes through whichever
+// core runs, the end-to-end probe by a loopback inbound both compilers emit,
+// and a node with no Transit.Probe simply reports no probes.
+// transit.route.v1 is always among them: both compilers build the per-exit
+// segments of a routed listener (and honour DestinationRule.Exits), so a node
+// that declares transit.link.v1 can take routes on either engine.
+// transit.sni.v1 is NOT among them: only Xray compiles fronts, and the protocol
+// says an engine that cannot front must not declare it. It is declared per
+// report, from the engine the desired config selects (see
+// engineCapabilities), so a switch to sing-box withdraws it on the next report.
+// sync.gzip.v1 is always among them: the HTTP syncer implements the whole
+// negotiation (its first report is plain; it compresses only after the panel
+// advertises Accept-Encoding: gzip).
+//
 // audit.hits.v1 and audit.usage.v1 are among them only when the audit receiver
 // is listening, which is decided once at startup; a receiver that fails
 // afterwards takes the agent down rather than leaving the declaration untrue.
@@ -440,7 +479,7 @@ func nodeReportBuilder(agentID string, store state.Store, status func() agentcor
 // hit's egress off the outbound tag, and which hits carry it is up to the
 // policy (audit_egress), which PSP sets only for an Xray entry with egress.
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
-	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink}
+	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink, protocol.CapabilityTransitProbe, protocol.CapabilityTransitRoute, protocol.CapabilitySyncGzip}
 	if hostTelemetry {
 		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
 	}

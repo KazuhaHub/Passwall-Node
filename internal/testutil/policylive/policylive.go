@@ -11,10 +11,12 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -163,15 +165,64 @@ func (s *sink) await(prefix []byte, window time.Duration) bool {
 	}
 }
 
-// FreePort returns a TCP port that was free a moment ago.
+// The ports FreePort hands out come from 21000-29999 (20000-20999 is kept for
+// reverse-proxied services on the development host), below Linux's ephemeral
+// range (32768-60999), so a client socket the kernel picked cannot be sitting
+// on one. That range is nine blocks of 1000, and a process takes the block its
+// executable's name hashes to (one test binary per package, so packages that
+// run side by side get different blocks unless the hash collides; nine is few,
+// so a collision is possible and the port is still checked free at the moment
+// it is handed out, and reserved with a flock shared by every test binary on
+// the machine, so two of them never hand out one port). A port is checked free on TCP and on UDP, is never handed
+// out twice by one process, and the allocator never wraps: a process that
+// uses its block up fails loudly.
+const (
+	portRangeFirst = 21000
+	portBlockSize  = 1000
+	portBlocks     = 9
+)
+
+var (
+	portMu   sync.Mutex
+	portNext = -1
+)
+
+func portBlock() int {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(filepath.Base(os.Args[0])))
+	return int(hash.Sum32() % portBlocks)
+}
+
+// FreePort returns a port that is free now on TCP and UDP on 127.0.0.1, was not
+// handed out before by this process, and lies outside the ephemeral range.
 func FreePort(t *testing.T) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	portMu.Lock()
+	defer portMu.Unlock()
+	if portNext < 0 {
+		portNext = 0
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
+	for portNext < portBlockSize {
+		port := portRangeFirst + portBlock()*portBlockSize + portNext
+		portNext++
+		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		tcp, err := net.Listen("tcp", address)
+		if err != nil {
+			continue
+		}
+		udp, err := net.ListenPacket("udp", address)
+		_ = tcp.Close()
+		if err != nil {
+			continue
+		}
+		_ = udp.Close()
+		if !reserve(port) {
+			continue
+		}
+		return port
+	}
+	t.Fatalf("this process used up its %d test ports (block %d)", portBlockSize, portBlock())
+	return 0
 }
 
 // Process is a child process whose output is kept for the failure message.

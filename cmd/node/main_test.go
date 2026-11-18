@@ -177,7 +177,7 @@ func TestNodeReportBuilderAttachesThePolicyStatusItIsGiven(t *testing.T) {
 	}
 	status := protocol.PolicyStatus{State: protocol.PolicyStateApplied}
 	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker,
-		func() protocol.PolicyStatus { return status }, nil)
+		func() protocol.PolicyStatus { return status }, nil, nil, nil)
 	for _, partial := range []bool{false, true} {
 		built, err := builder.Build(t.Context(), agent.BuildOptions{Partial: partial})
 		if err != nil {
@@ -186,5 +186,98 @@ func TestNodeReportBuilderAttachesThePolicyStatusItIsGiven(t *testing.T) {
 		if built.Report.PolicyStatus == nil || built.Report.PolicyStatus.State != protocol.PolicyStateApplied {
 			t.Fatalf("partial=%v: report policy status = %+v", partial, built.Report.PolicyStatus)
 		}
+	}
+}
+
+// transit.probe.v1 is static and engine-independent: both compilers emit the
+// probe inbound, so a flickering declaration would only make the panel withdraw
+// and resend Transit.Probe.
+func TestStaticCapabilitiesAlwaysDeclareTheTransitProbe(t *testing.T) {
+	for _, hostTelemetry := range []bool{false, true} {
+		for _, listening := range []bool{false, true} {
+			if !slices.Contains(staticCapabilities(hostTelemetry, listening), protocol.CapabilityTransitProbe) {
+				t.Fatalf("host telemetry %v, audit %v: %s is not declared", hostTelemetry, listening, protocol.CapabilityTransitProbe)
+			}
+		}
+	}
+}
+
+// transit.sni.v1 follows the selected engine: declared for Xray, which compiles
+// fronts, withdrawn for an engine that cannot, and not declared before the
+// engine is known. It is asked for on every report, so a switch shows up on the
+// next one.
+func TestSNICapabilityFollowsTheSelectedEngine(t *testing.T) {
+	engine := ""
+	source := engineCapabilities(func() []string { return []string{"x"} }, func() string { return engine })
+	for _, test := range []struct {
+		engine string
+		want   bool
+	}{{"", false}, {"xray", true}, {"sing-box", false}, {"xray", true}} {
+		engine = test.engine
+		if got := slices.Contains(source(), protocol.CapabilityTransitSNI); got != test.want {
+			t.Fatalf("engine %q: declared = %v, want %v", test.engine, got, test.want)
+		}
+	}
+	if slices.Contains(staticCapabilities(true, true), protocol.CapabilityTransitSNI) {
+		t.Fatal("transit.sni.v1 is declared statically")
+	}
+	if got := engineCapabilities(func() []string { return nil }, nil)(); len(got) != 0 {
+		t.Fatalf("no engine source declared %v", got)
+	}
+}
+
+// transit.route.v1 is static too: both compilers build the segments, and
+// declaring it is what lets the panel send Routes and Exits at all.
+func TestStaticCapabilitiesAlwaysDeclareTheTransitRoute(t *testing.T) {
+	for _, hostTelemetry := range []bool{false, true} {
+		for _, listening := range []bool{false, true} {
+			if !slices.Contains(staticCapabilities(hostTelemetry, listening), protocol.CapabilityTransitRoute) {
+				t.Fatalf("host telemetry %v, audit %v: %s is not declared", hostTelemetry, listening, protocol.CapabilityTransitRoute)
+			}
+		}
+	}
+}
+
+func TestStaticCapabilitiesDeclareSyncGzip(t *testing.T) {
+	for _, hostTelemetry := range []bool{false, true} {
+		for _, audit := range []bool{false, true} {
+			if !slices.Contains(staticCapabilities(hostTelemetry, audit), protocol.CapabilitySyncGzip) {
+				t.Fatalf("host telemetry %v, audit %v: %s is not declared", hostTelemetry, audit, protocol.CapabilitySyncGzip)
+			}
+		}
+	}
+}
+
+// The wiring hands the prober's results to the report, gated by the capability.
+func TestNodeReportBuilderAttachesProbesToFullReportsOnly(t *testing.T) {
+	store, err := statesqlite.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	registry, err := agent.NewTaskRegistry(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := agent.NewTaskWorker(agent.TaskWorkerOptions{Store: store, Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probes := []protocol.ProbeResult{{Key: "lnk_1", Kind: protocol.ProbeKindTransport, Attempts: 1, RTTMinMS: 2, RTTMedianMS: 2, RTTMaxMS: 2}}
+	builder := nodeReportBuilder("agent-1", store, nil, nil, staticCapabilities(false, false), worker, nil, nil,
+		func() []protocol.ProbeResult { return probes }, nil)
+	full, err := builder.Build(t.Context(), agent.BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Report.Probes) != 1 {
+		t.Fatalf("full report probes = %+v", full.Report.Probes)
+	}
+	partial, err := builder.Build(t.Context(), agent.BuildOptions{Partial: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.Report.Probes != nil {
+		t.Fatalf("partial report carries probes: %+v", partial.Report.Probes)
 	}
 }

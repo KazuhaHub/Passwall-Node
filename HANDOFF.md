@@ -43,6 +43,43 @@ Xray 统计链路流量（出口用入站统计，入口用仅在入口开启的
 不记命中，不动。真实内核测试会把 Xray 实际发出的第一条 webhook 原文打到日志里（`t.Logf`），用来确认
 它是否带入站标签。
 
+**链路质量自测（2026-11-16，开发分支）**：能力 `transit.probe.v1`（`staticCapabilities` 静态声明，两种内核都有），
+配置流 `Transit.Probe`（间隔 30..3600 秒、单次超时 500..10000 毫秒、`link_url`、要测的转发及方法），结果经
+全量报告的 `NodeReport.Probes` 上送，部分报告不带；没有声明能力就不发（`ReportBuilder.Probes`，与计数同一套
+门），结果先单独过 `ValidateProbeResults`，不合格整体丢弃而不拖垮报告。**测的链路恰好是 `LinksOut`**。
+- **端到端（`e2e`）经过内核**：`PlanTransit` 为每条出站链路在 `127.0.0.1:31000-31999` 里确定性分配一个环回端口
+  （以链路键哈希起点线性探测，避开本次编译已知的全部绑定与核心 API 地址；起点相同的两条链路按键序先到先得，所以增删别的链路在撞起点时仍可能挪动端口）。Xray 编出
+  环回 `dokodemo-door`，sing-box 编出 `direct` 入站加 `override_address/port`，目标固定为 `link_url` 的
+  主机:端口（缺省 443/80）。入站标签 `transit-probe-<lnk>`（前缀 `core.ProbeTagPrefix`，不是 `transit-lnk_`），
+  无用户，一条路由规则**排在最前面**（先于 `transit-forwards` 与全部策略）直接指向该链路出站，所以策略不评判探测、
+  也没有 webhook（不产生审计命中）。没有空闲端口、或 `link_url` 端口非法（0/超 65535）时，相应链路不编出探测入站，e2e 记 `probe_unavailable`，**不拒绝配置**。
+  范围 31000-31999 在 Linux 默认临时端口段（32768-60999）之下，内核分配的客户端端口不会占用它。**残余风险**：
+  分配器只避开编译已知的绑定，本机无关进程若监听此范围内同一端口，核心会拒绝该入站；可用
+  `net.ipv4.ip_local_reserved_ports=31000-31999` 保留此范围。**探测入站无认证**：本机任何进程都能经它
+  以出口身份访问 `link_url` 的主机:端口（单租户节点可接受）。调度：间隔在一轮结束**之后**才开始计时，一轮最多
+  8 个并发、每个限 `timeout_ms`，全超时时约 ceil(N/8)×timeout，轮次不会叠加。e2e 只读响应头、不读也不排空响应体，直接关连接。
+  没有 `Probe`（或 `link_url` 为空）时编出的配置逐字节不变（`testdata/golden-links-no-probe.json`，两种引擎各一份，
+  由探测功能之前的版本生成）。
+- **传输（`transport`）不经内核**：agent 直接 TCP 连到 `LinkOut` 的出口地址:端口。
+- **转发（`forward`）**：`tcp` 连转发的目标；`quic` 发一个 1200 字节、未知版本的 QUIC 长包头，要求收到
+  把连接 ID 对调回显的 Version Negotiation（沉默按 `timeout` 计失败，没有第三种答案）；`tls` 连**转发自己的绑定**
+  （前置口，环回地址）发手写的 ClientHello，SNI 取 `Transit.Fronts` 顺序里第一条以该转发为目标的路由的第一个名字，
+  收到 ServerHello（记录头 0x16 + 握手类型 2）算成功。
+- **`internal/agent/prober.go`**：`Prober.Run` 按 `interval_seconds` 调度，每次尝试限 `timeout_ms`，同一轮最多 8 个
+  并发；每个（key, kind）在内存里保留最近 20 次尝试（不持久化，重启清零）。结果给最小/中位/最大 RTT（毫秒，仅成功
+  样本；偶数个取中间两个的平均）、窗口内最近一次失败的类别、最后一次成功的墙钟。对象（链路/转发/方法/链接 URL/
+  环回端口）的摘要变化时窗口重置；与它无关的配置变化不重置。错误分类：`timeout` `refused` `tls`
+  `http_status`（非 2xx/3xx）`dns` `probe_unavailable` `other`。核心没有运行当前部署（状态或摘要不符）时 e2e 不发
+  请求，直接记 `probe_unavailable`；核心接受连接后又断开（链路不通）记 `other`。e2e 是对环回端口的 HTTP(S) GET
+  （https 用 URL 主机做 SNI 并校验证书），计时到首字节。
+- **计量**：探测流量是链路自己的传输流量，不是用户的。Xray 入口的出站统计本来就覆盖；sing-box 把探测入站
+  映射成 transit 键 `lnk_<id>`（`decodeTelemetryMapping`），只记到该链路，不进任何用户或监听器，也没有在线 IP。
+- 真实内核：`internal/core/linkmatrix/probe_test.go`（入口/出口 × 两种引擎 × 两种协议）用只有出口能到的
+  `127.0.0.2` HTTP 服务，入口策略特意封掉该地址：e2e 成功；Xray 入口的审计接收端在探测期间零 POST（先用用户流量
+  证明接收端有效）；sing-box 入口链路计数增加、用户与监听器为零；停掉出口后一个窗口内两项都失败。变异：探测入站在
+  无 `Probe` 时也编出 → 两份 golden 失败；探测规则不排最前 → 编译单测与真实内核测试都失败。
+- 注意：本仓库还没有编译 `Transit.Fronts`，`tls` 探测只依赖协议数据，真正的前置口出现后才有对象可测。
+
 **托管中转·透传（2026-11-16，开发分支）**：配置流新增 `Transit.Forwards`（能力
 `transit.forward.v1`，两种内核都声明）。节点把一个端口原样转发到落地服务器，不鉴权、不解密，
 落地看到的来源是本节点。Xray 编译为 `dokodemo-door`，sing-box 编译为带 override 的 `direct`
@@ -126,6 +163,200 @@ PSP 的 `TestLive_RealNodeAgentContract` 启动真实进程跑过两轮合流验
 判定用 `protocol.ShouldSendFull`,**不要自己写一遍**。
 
 ## 3. 下一步做什么
+
+### 按目的地分流（`transit.route.v1`，protocol v0.9.0）
+
+Agent 总是声明 `transit.route.v1`（`staticCapabilities`，两个引擎都编译）。`Transit.Routes`
+让一个 listener 按目的地走不同出口；`DestinationRule.Exits` 把策略规则限定在某些出口上。
+出口 = 第一条命中的 route rule，否则 listener 的默认出口（egress 链路，否则 `local`）。
+**没有 routes 的 listener 逐字节与以前相同**（golden 不变）。
+
+每个有 routes 的 listener，在 transit 规则之后，按协议的编译契约依次输出：
+
+1. 对每条 route rule k（按顺序）：**段 k** = 所有 `exits` 为空或含出口 k 的策略规则，保持策略
+   顺序和各自动作，与 route k 取交集；然后是 route k 的 **catch-all** → 出口 k；
+2. **默认段**：`exits` 允许默认出口的规则，即今天的 egress 拆分输出，末尾是链路 catch-all。
+
+靠前的段的 catch-all 吃掉本 route 的流量，"先匹配先赢"才成立，**不要把顺序改了**。允许类
+（allow、exempt、usage catch-all）走本段出口；observe 走 dialerProxy=该链路的 freedom
+（`local` 用原来的）；block 保留黑洞，开了 `audit_egress` 时按链路拆（`psp-deny-<id>~lnk_N`）。
+route 的出口链路不在本次编译里 → 拒绝**该 listener**（config 对象错误，`PlanTransit` 里统一做，
+两个引擎共用），绝不退回 `local`。
+
+实现位置：`core/transit.go`（`TransitPlan.Routes/RouteGroups/Unrouted/DefaultExit`、
+`SegmentSuffix`、`ListenerError`）、`core/policy.go`（`PolicyPlan.ForBase/ForSegment`、`ExitsAllow`）、
+`xray/route.go`、`singbox/route.go`。
+
+- **sing-box**：用 `logical`/`and` 精确表达交集，没有近似。route 的目的地只写一次，是 inline
+  `rule_set`（`route.rule_set`，tag `psp-route-<组>-<id>`），各段引用它，体积随 route 数加规则数
+  线性增长，不是乘积。`on_demand` 下 routed listener 有自己的、只作用于其 inbound 的 `resolve`，放在
+  它们第一条读地址的规则之前；unrouted listener 的 resolve 与没有 routes 时完全一样
+  （`finishRoutes`）。routed 的规则先放在 `config.routed`，等对 unrouted listener 做完
+  `applyEgress` 之后再拼回去。
+- **sing-box 的 sniff（重要）**：sing-box 拨号用客户端请求的目的地，不能拨嗅探到的名字（Xray 可以），
+  所以需要 sniff 的策略下，route / 策略 / 拨号三者不能读不同的名字，否则客户端写个 Host 就能选出口、
+  绕过按出口限定的 block。routed listener 按"客户端请求的是什么"分开：**请求域名**的连接在 sniff
+  **之前**用请求的名字完整决定（各段 + 以 `domain_regex "."` 限定的 catch-all），到不了 sniff，Host/SNI
+  改变不了出口也改变不了哪条按出口限定的规则生效；策略里有 protocol 规则时，在各段之前对 routed inbound 上
+  请求域名的连接先做一次只嗅 BitTorrent 的 `sniff`（`"sniffer":["bittorrent"]`，只设 protocol 不设域名），
+  所以 protocol 规则仍然生效（TCP 实测；UDP/uTP 未测，harness 的 SOCKS 客户端只有 TCP）；
+  **请求地址**的连接照常过 sniff（策略读它声称的名字，策略本来就有的限制），但 route 绝不按声称的名字
+  选它：sniff 之后的 route 只剩地址/端口/网络部分（`…-ip` rule_set），没有地址的 route 直接略去。
+  Xray 拨的是嗅探到的名字，所以声称的名字就是生效的名字。实测见 `linkmatrix/route_test.go`
+  `checkSniffed`（两个引擎各自的预期不同但都自洽）。
+- **Xray**：用 `protocol.IntersectDestinations` 逐对求交。`exact=false` 时结果是超集：block 照用
+  （只会多拦）；allow/observe 副本**丢弃**（fail closed，流量落到后面的规则），并通过
+  `Artifact.Issues` 报 `route_policy_approximate`（`runtime.recordArtifactIssues` →
+  `agent.IssueSink`，key=listener，detail=`<规则> on <route>`；按 artifact digest 去重）。
+  route 自己的 ports/network 求交总是精确的。`on_demand` 下只写域名的规则对写了地址的 route 其实是
+  精确的：一条同时带 `domain` 与 `ip` 的 Xray 规则（两者 AND）就是"域名命中且解析进 route 的 CIDR"
+  （`hostnameThroughAddresses`），不再丢弃、不报 issue。**trailing-dot 守卫手工求交**
+  （`dotGuard`）：直接用 `IntersectDestinations` 会得到"整条 route 都拦"；带点主机名永远
+  不匹配 `domain:`/`full:`，只会命中包含的 `keyword:`，`on_demand` 下再加"域名正则 AND ip"
+  的单条 Xray 规则（Xray 同条规则的 domain 与 ip 是 AND）。
+- **tag**：段副本的规则 tag 后缀 `~<出口>~r<k>`（`~lnk_8~r1`、`~local~r2`，默认段 `~<出口>~r0`），
+  在规则 id 与 `a`/`b` 半之后；Xray 不允许重复 ruleTag。路由完全相同的 listener 合成一组共用
+  规则，第二组起加 `~g<n>`。`~r` 只出现在 ruleTag 上；outbound 名保持审计接收端读的形式
+  （`audit_egress` 下链路段 `psp-deny-<id>~lnk_N`，`local` 用原名 = 没有 egress），接收端不解析 `~r`。
+  `linkmatrix` 里的真核审计测试覆盖 compiler→core→接收端：X P2 → (p1, lnk_8)、Y P3 → (p2, "")。
+- **预算**：一个 routed 编译每组最多 20,000 条核心规则、配置最多 32 MiB、目的地条目（域名+CIDR，跨组
+  累加）约 1,000,000（`core.MaxRoutedRules`、`MaxRoutedConfigBytes`、`MaxRoutedEntries`）。**权威的是增量守卫
+  `core.RouteBudget`**：两个引擎在生成 route/段规则时每追加一条规则就计数（规则里**每个列表的每个元素**：
+  `core.CountEntries` 通用遍历，不按字段名，所以以后加字段也不会漏；含 source 网段、用户、exempt 用户、
+  inbound tag、嵌套规则；另加规则数），
+  一旦超限立刻中止构建，拒绝该组第一个 listener（config 对象错误，消息带组号和已达条目数）；做会一次性分配
+  大块的步骤（Xray 的求交）之前先 `Check`。`EstimateRoutedEntries` 只是构建前的快速路径，**可能低估**
+  （看不到 exempt/usage/trailing-dot、route matcher 的副本、hostname-through-address 规则），不可作为依据。
+  回归测试：`internal/core/routebudget`（各种会爆的形状，断言峰值堆 < 256 MiB、拒绝为 config 对象错误）。
+  sing-box 上策略规则的 matcher（域名/CIDR/source 网段；`auth_user` 规则集不支持，留在规则上并计数）达 16 条以上就写成一个 inline rule_set 全局只写一次（`psp-rule-<id>`），
+  各段引用；Xray 没有共享 matcher，按每段副本×route 条目的上界估算并提前拒绝。实测（一条 50,000 域名
+  的 block × 64 条纯端口 route）：sing-box 1 组 2.65 MB / 峰值堆 12 MiB / 0.16 s，3 组 2.86 MB / 14 MiB /
+  0.44 s；Xray 估算约 325 万条，直接拒绝（10 ms）。
+- **测试 harness**：`policylive.FreePort` 改为进程内分配器：端口取自 21000–29999（20000–20999 留给开发机上反代的服务；都在内核临时端口范围之下），
+  分成 9 个 1000 的块，每个测试二进制按可执行文件名哈希取一块；发放前 TCP 与 UDP 都确认空闲，同一进程
+  不重复发放、不回绕，用完即 `t.Fatal`。没有做"core 报 address already in use 就重试
+  Start"（端口写进了配置里，重试要重新编译）。
+- **作用域**：有 routed listener 时，其余规则都显式列出 inbound（unrouted 的），不会在 routed
+  listener 的段之前误判它的流量；带 `exits` 的规则对 unrouted listener 也按其默认出口生效。
+- **已知限制**：Xray 的 sniffing 检查按整份策略做，可能要求一个其规则全在够不着的段里的
+  listener 开 sniffing（偏严，不放过）；域名 route 在 Xray 靠 sniffing/请求域名匹配。
+- **测试**：`xray/route_test.go`、`singbox/route_test.go`（顺序、Exits、local、近似丢弃+issue、
+  缺链路、tag 唯一、分组、on_demand）；`core/transit_route_test.go`；`auditsink` 的 `~r` 后缀；
+  真核矩阵 `linkmatrix/route_test.go`（`TestRouteMatrix`，entry/exit 引擎两两组合：
+  目标服务回报来源地址，exit 以 127.0.0.2/3/4 区分；含 X 同时命中 r1/r2 的消费顺序、
+  `Exits` 只管对应出口、停掉出口 C 后不泄漏到本地）。跑法：设 `PSP_TEST_XRAY_26627_BIN`（或 `PSP_TEST_XRAY_BIN`）和 `PSP_TEST_SING_BOX_BIN`，`go test ./internal/core/linkmatrix -run TestRouteMatrix`。
+
+### SNI 前置（`transit.sni.v1`，protocol v0.9.0，只有 Xray）
+
+`Transit.Fronts` 让几个 TLS / REALITY 用途共用一个 TCP 端口（通常 443）：agent 自己占着端口，按
+ClientHello 的 SNI 把原始连接分给目标，**不解密**。能力 `transit.sni.v1` 在 `staticCapabilities`
+里**不声明**（协议规定不能前置的引擎不得声明）：`engineCapabilities` 每份报告都问一次
+`Runtime.Engine()`（期望配置选的引擎，最近一次收敛时记录），是 xray 才带上，所以切到 sing-box 后
+下一份报告就撤回；第一次收敛之前引擎未知，也不声明。面板必须只向声明了的节点发 Fronts；万一
+发到 sing-box，**sing-box 编译器只拒绝 front 和它前置的一切**（listener、forward、link、
+client 的挂接都从编译里去掉，`core.WithoutFronts`），这些对象各是一个 config 对象错误
+（`SNI fronts require Xray`，`Artifact.Rejected`，`ObjectError.Related`），**其余配置照常编译
+部署**；绝不会出现「被前置的 listener 自己绑在公网端口上」。`Artifact.Rejected` 是新的窄通道：编译
+不失败，但列出的对象在 `round.objectResult` 里被判 rejected，其它对象不受影响。
+
+**规划在 `core.PlanTransitFronted`**（Xray 用；`PlanTransit` 不带支持，遇到 Fronts 就拒绝）：
+
+- front 占 `Listen:Port`；每个 `FrontedListener` 的 inbound 改绑 `127.0.0.1:LoopbackPort`，
+  listener 自己的配置里仍是公网端口（订阅仍写 443）。编译器在 listener 循环里就把被前置的
+  listener **排除出公网 bind**（它们本来就共用同一个端口），规划后再 `moveFrontedListeners`。
+- 被前置的 listener 必须：已启用、TCP（`raw`/`tcp`）、TLS 或 REALITY、公网端口 = `Front.Port`；
+  否则**只拒绝这个 front 及其前置的所有对象**（一个 `ObjectError`，`Key`=front，`Related`=其余）：`xray.Compiler.Compile` 捕获
+  这种 front 错误，用 `core.WithoutFront` 把该 front 从快照里去掉再编译一次，拒绝记进 `Artifact.Rejected`，其它 front 和
+  其余配置照常部署（别的错误仍然整体失败）。
+- loopback 端口与其它所有 bind 比（含通配、含 core 自己的 API 地址），冲突同样拒绝 front。
+  探测端口段 31000–31999 也算：先占 front 的 loopback，探测再分配，所以探测会绕开它们。
+- External 默认若是本机某个网卡地址、端口等于 front 端口、且 front 监听全部地址（或正是该地址），拒绝
+  front（会回环；IPv4-mapped 先规整）。`FrontSupport.Local` 可注入地址列表（测试用）。NAT 后的公网 IP
+  不在网卡上，这里看不到，必须由面板（知道服务器被观察到的地址）检查。
+- 被前置的 listener 自己开了 `sockopt.acceptProxyProtocol`（或 raw/tcpSettings 里的）→ 拒绝 front：front 会自己
+  加一层 PROXY 头，listener 会期待两层。
+- 被前置的 forward 没有自己的 socket（`TransitPlan.FrontedForwards`，不在 `Forwards` 里）；
+  被前置的 link 仍是 inbound，但改绑 loopback。**协议没有给 link 的 loopback 端口**，所以由 agent 从
+  探测段按 link key 哈希起点分配（`TransitPlan.LinkLoopback`，同一个 key 通常拿同一个端口）。
+  **分配发生在所有其它 bind（未被前置的 forward/link）都占好之后**（`planFrontLinks`），否则会撞上它们。
+
+**Xray 输出**（`xray/front.go`）：
+
+- front = `dokodemo-door`，tag `transit-fnt_N`，`settings.address/port` = Default 的目的地，
+  `sniffing {enabled, destOverride:["tls"], routeOnly:true}`。
+- 路由规则放在**所有规则最前面**（探针规则之后、`transit-forwards` 之前）：每条 route 一条
+  `inboundTag=front + domain:full:<名>` → 该目标的 freedom；末尾一条 catch-all → Default。
+  front 的连接不受目的地策略评判（评判的是它变成的那条用户连接，进到 loopback 的 listener 之后）。
+- 各目标的 freedom 都用 `redirect` **显式写目的地**，嗅探到的名字永远不是拨号对象：
+  - listener / link：`redirect=127.0.0.1:<loopback>`，`proxyProtocol: 2`，`finalRules` 只允许
+    127.0.0.1（Xray 默认拒绝代理流量去 loopback）；对方 inbound 带 `sockopt.acceptProxyProtocol:true`，
+    所以 listener 看到的是**客户端自己的地址**（在线 IP、源 CIDR 规则都对）。
+  - forward：`redirect=<forward 的 target:port>`，**tag 就是 `transit-fwd_N`**，原样中继，不带 PROXY 头。
+  - External（只能是 Default）：`redirect=host:port`，没有 `finalRules`——它是别处的站点，解析到
+    loopback 会被 Xray 拒绝，这是想要的。
+- 出站统计只在「有被前置的 forward」或「有 LinksOut」时打开（系统策略是 artifact 的一部分，其它节点
+  digest 不变）。
+
+**遥测**：front 不是用户，也不是 forward。`decodeXrayPresence` 跳过 `transit-fnt_*`；被前置的 forward 没有
+inbound，在场判断看 `transit-fwd_N` **outbound**，计数读 `outbound>>>transit-fwd_N`（和 inbound 计数
+相加，因为只会有一个存在）。用户只在 listener 的 inbound 上记一次。front 作为 config 对象走四态收敛
+（`transitObjects`、`sqlite.validateObject` 都认 `fnt_`）。
+
+**探测**：`ProbeMethodTLS` 对被前置的 forward，prober 拨 forward 的 bind（= front 的）并发 route 的
+第一个 server name；`frontmatrix` 里用真 front 验证过，landing 停掉后探测失败。
+
+**限制（写进 README）**：只有 Xray；客户端不能把 ClientHello 拆进几条 TLS record（front 只读第一条）；
+纯 HTTP 探测要等嗅探放弃，约 1 秒才交给 Default。
+
+**测试**：`internal/core/frontmatrix`（真 Xray，各版本；PoC `frontpoc` 已删）覆盖：两个 listener 共用一个端口、
+raw 中继逐字节一致（两侧各一个 tee）、未知/无 SNI 到外部站（SNI 是解析不了的名字）、PROXY 源地址
+（在线 IP + 源 CIDR 封锁）、计数（用户只记一次、front 不是用户、forward 计数 = 中继字节）、link、
+策略不评判 front、TLS 探测、sing-box 拒绝。无 front 时逐字节相同由 golden（`golden-fronts-off.json`，
+由 front 之前的版本生成）加一次跨 768 个配置、三种编译器的差分保证。
+
+**不要**：把 front 的规则放到策略规则之后；给外部默认加 `finalRules`；让被前置的 listener 重新出现在公网 bind；
+让 sing-box 编译器「忽略」Fronts。
+
+**被丢弃对象的状态对账**（`Processor.reconcileRejections`）：一个没变、已 applied 的对象不会被问到 runtime，
+但新的部署可能把它丢了（front 被拒时它前置的 listener、切到 sing-box、重复凭据）。所以每轮 `Finalize` 成功后，
+对 `RejectionSource.Rejections()`（当前**已确认**部署的 `Artifact.Rejected`，和 idle 记录一起设置，部署失败不改）里的每个
+已知对象，把状态改成 rejected。反过来，rejected 对象在 config 或 roster **任何**一个变了的时候都重新问一次
+（`reopen`：状态机不允许同版本 rejected→applied，所以先放回 pending）：拒绝它的原因可能在别处。重启后
+`RestoreStatus` 从已确认的部署恢复所选引擎，第一份报告就能带上 `transit.sni.v1`。
+
+### 同一 listener 上的重复凭据
+
+同一 listener 上两个启用的 roster 行凭据相同，core 只当成一个用户，流量和限额会记到先到的那行。编译器
+（Xray 和 sing-box，`core.CredentialSet`）在 listener 的用户循环里：**先**校验凭据（空 UUID 报
+"UUID is required"，不算重复），再与前面的比；**后一行**（按 client key 排序）被从该 listener 去掉，作为
+**该 client 的** roster 对象错误（`Artifact.Rejected`，`DuplicateCredentialRejection`，写明重复了谁）上报，
+前一行照常服务，**其余配置照常编译部署**（只有重复的 email 仍是整体失败）。比较规则就是引擎自己的：
+Xray 的 VLESS UUID 第 6、7 字节置零再比（Xray 就是这样给用户建索引的）；sing-box 的 VLESS 和两边的 VMess 比
+完整 UUID；Trojan / Shadowsocks 比密码。不同 listener 上的相同凭据是不同用户。目前没有编译器支持
+Hysteria 2，所以不写它。
+
+### 压缩 sync（`sync.gzip.v1`，protocol v0.9.0）
+
+Agent 总是声明 `sync.gzip.v1`（`staticCapabilities`），`HTTPSyncer`（`internal/agent/transport.go`）
+实现整套协商，状态机用 `protocol.SyncCompression`，不要自己再写一遍：
+
+- 首个请求一定是明文；PSP 在 2xx 响应上带 `Accept-Encoding: gzip` 后才压缩后续请求。
+  只有 2xx 会改变状态，5xx 与网络错误不动状态；对压缩请求收到 400/415 时在同一轮内用
+  明文原样重发一次，并在 1 小时内不再压缩（冷却期内的广告包括重发那次的都忽略）。
+- 请求带 `Accept-Encoding: gzip` 才允许 PSP 压缩响应；响应是 gzip 而我们没要过则拒绝。
+- `Transport.DisableCompression = true`（克隆调用方的 transport，不改原对象），否则 Go
+  会无上限自动解压，绕过两个限制（以前遇到会 gzip 的代理，Go 先无上限解压再交给我们；现在
+  线上上限卡在压缩后的字节，解压后另有 64 MiB 上限）。响应一律走 `SyncEncodingFromHeaders` +
+  `DecodeSyncBody`（线上 16 MiB、解压后 64 MiB）；`HTTPOptions.MaxResponseBytes` 只限制线上
+  字节，超过 16 MiB 的值在构造时截到 16 MiB。非 2xx 的错误体若被代理 gzip，同样有界地解开
+  （输出上限 4 KiB 摘要）。`ObserveResponse` 只在响应体完整读取并解码成功后调用：截断或
+  非法的 2xx 不会改变压缩状态。
+- 统计口径：`last_request_bytes` / `last_response_bytes` 是线上字节（可能是压缩后的）；
+  被 400/415 打回而明文重发的一轮，记录的是那次明文重发。
+- 压缩状态有互斥锁保护，但约定只有一个 sync 循环。报告构建器的体积检查不变（明文
+  JSON ≤ 16 MiB），对端不声明时行为与之前逐字节一致。
+- 测试：`transport_gzip_test.go`（老 PSP、广告后压缩、gzip 响应、超限解压、415 重发与冷却、
+  5xx/网络错误、未请求的 gzip 响应、DisableCompression）。
 
 ### 安装/重装对接（2026-09-12）
 

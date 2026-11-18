@@ -1,0 +1,160 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "services": [
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 10086,
+      "secret": "0123456789abcdef0123456789abcdef",
+      "tag": "psp-api",
+      "type": "api"
+    }
+  ],
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 28443,
+      "tag": "psp-lst_41",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "example.com",
+            "server_port": 443
+          },
+          "private_key": "kGCecoxqa0o6F2dIRkF_7-66t9PW-FFxHDbnI1n9HUo"
+        },
+        "server_name": "example.com"
+      },
+      "type": "vless",
+      "users": [
+        {
+          "flow": "xtls-rprx-vision",
+          "name": "psp-u61@example.invalid",
+          "uuid": "0f62f495-b5ca-4509-b6cd-54a040deafd5"
+        }
+      ]
+    },
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 28444,
+      "tag": "psp-lst_42",
+      "type": "vless",
+      "users": []
+    },
+    {
+      "listen": "::",
+      "listen_port": 20001,
+      "override_address": "203.0.113.9",
+      "override_port": 443,
+      "tag": "transit-fwd_1",
+      "type": "direct"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "tag": "blocked",
+      "type": "block"
+    },
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "glwKkLUrNxQ4VbjbZG4svg==",
+      "server": "exit.example.com",
+      "server_port": 30001,
+      "tag": "transit-lnk_7",
+      "type": "shadowsocks"
+    }
+  ],
+  "route": {
+    "final": "direct",
+    "rules": [
+      {
+        "action": "route",
+        "inbound": [
+          "transit-fwd_1"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "domain": [
+          "allowed.example"
+        ],
+        "inbound": [
+          "psp-lst_41"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "domain": [
+          "allowed.example"
+        ],
+        "inbound": [
+          "psp-lst_42"
+        ],
+        "outbound": "transit-lnk_7"
+      },
+      {
+        "action": "reject",
+        "domain_regex": [
+          "\\.$"
+        ]
+      },
+      {
+        "action": "reject",
+        "domain": [
+          "blocked.example"
+        ]
+      },
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "route",
+        "domain": [
+          "allowed.example"
+        ],
+        "inbound": [
+          "psp-lst_41"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "domain": [
+          "allowed.example"
+        ],
+        "inbound": [
+          "psp-lst_42"
+        ],
+        "outbound": "transit-lnk_7"
+      },
+      {
+        "action": "reject",
+        "domain_regex": [
+          "\\.$"
+        ]
+      },
+      {
+        "action": "reject",
+        "domain": [
+          "blocked.example"
+        ]
+      },
+      {
+        "action": "route",
+        "inbound": [
+          "psp-lst_42"
+        ],
+        "outbound": "transit-lnk_7"
+      }
+    ]
+  }
+}
