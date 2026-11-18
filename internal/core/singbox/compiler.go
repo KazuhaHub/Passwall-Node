@@ -135,6 +135,8 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	seenListeners := make(map[protocol.ListenerKey]struct{}, len(listeners))
 	binds := make(map[string]protocol.ListenerKey, len(listeners))
 	served := make([]protocol.ListenerKey, 0, len(listeners))
+	// guardable are the served listeners the source guard can judge.
+	var guardable []protocol.ListenerKey
 	for _, listener := range listeners {
 		if err := ctx.Err(); err != nil {
 			return agentcore.Artifact{}, err
@@ -146,7 +148,9 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 			return agentcore.Artifact{}, compileListenerError(listener.Key, errors.New("duplicate listener key"))
 		}
 		seenListeners[listener.Key] = struct{}{}
-		inbound, enabled, bind, err := c.compileInbound(listener, clientByListener[listener.Key], &rejected)
+		clients := clientByListener[listener.Key]
+		mark := len(rejected)
+		inbound, enabled, bind, err := c.compileInbound(listener, clients, &rejected)
 		if err != nil {
 			var objectErr *agentcore.ObjectError
 			if errors.As(err, &objectErr) {
@@ -156,6 +160,25 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 		}
 		if !enabled {
 			continue
+		}
+		// Every sing-box transport carried over HTTP replaces the source with the
+		// first X-Forwarded-For value and offers no way to turn that off. Such a
+		// listener carries no deny rule, and a client whose line is an allow_from
+		// is left off it (fail closed there, reported against the client); it is
+		// compiled again without those clients, so a duplicate that only they
+		// masked is judged on its own.
+		if _, carried := inbound["transport"]; carried {
+			if kept, dropped := agentcore.SplitAllowGuarded(clients, snapshot.Now); len(dropped) > 0 {
+				rejected = rejected[:mark]
+				for _, client := range dropped {
+					rejected = append(rejected, agentcore.UnguardableClientRejection(client.Key, listener.Key, agentcore.UnguardableForwardedFor))
+				}
+				if inbound, enabled, bind, err = c.compileInbound(listener, kept, &rejected); err != nil {
+					return agentcore.Artifact{}, compileListenerError(listener.Key, err)
+				}
+			}
+		} else {
+			guardable = append(guardable, listener.Key)
 		}
 		if other, exists := binds[bind]; exists {
 			return agentcore.Artifact{}, compileListenerError(listener.Key, fmt.Errorf("bind %s conflicts with listener %s", bind, other))
@@ -203,6 +226,10 @@ func (c Compiler) Compile(ctx context.Context, snapshot agentcore.Snapshot) (age
 	}
 	applyEgress(&result, transit.Unrouted(served), transit.Egress)
 	finishRoutes(&result)
+	// The guard goes first so routeTransit, which prepends, ends up ahead of it.
+	if err := c.applyGuard(&result, snapshot, guardable); err != nil {
+		return agentcore.Artifact{}, err
+	}
 	routeTransit(&result, transitInboundTags(transit))
 	routeProbes(&result, transit.Probes)
 	encoded, err := json.MarshalIndent(result, "", "  ")

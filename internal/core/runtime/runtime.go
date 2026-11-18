@@ -46,6 +46,14 @@ type AuditRoster interface {
 	SetRoster(users map[string]protocol.SubjectKey, ruleIDs []string, egress auditsink.Egress)
 }
 
+// AuditGuard is implemented by a receiver that also attributes source guard
+// refusals. It is separate from AuditRoster so that a receiver without it keeps
+// working; the runtime hands it the plan whenever it hands the roster.
+type AuditGuard interface {
+	StageGuard(plan auditsink.GuardPlan)
+	SetGuard(plan auditsink.GuardPlan)
+}
+
 type CompilerFactory func(protocol.CoreSelection) (agentcore.Compiler, error)
 
 type Options struct {
@@ -253,6 +261,49 @@ func (r *Runtime) publishAudit(config *protocol.ConfigBody, roster *protocol.Ros
 	}
 	users, ruleIDs, egress := auditSnapshot(config, roster)
 	r.audit.SetRoster(users, ruleIDs, egress)
+	if guard, ok := r.audit.(AuditGuard); ok {
+		guard.SetGuard(r.guardPlan(config, roster))
+	}
+}
+
+// guardPlan is the source guard of a deployment as the receiver reads it: the
+// compile's own planning, run over the stored config and roster, so the rule
+// tags a webhook event carries resolve to the sets the compile wrote them for.
+//
+// The compile plans over a snapshot in which a client a local gate closed is
+// disabled and at its own clock, which the receiver cannot reproduce. It plans
+// over the raw roster with no clock instead, so no client is expired out: the
+// plan holds at least every rule the compile emitted, and since a deny tag names
+// its set combination (core.GuardDenyTag) an extra rule cannot change what the
+// others mean.
+func (r *Runtime) guardPlan(config *protocol.ConfigBody, roster *protocol.RosterBody) auditsink.GuardPlan {
+	if config == nil || roster == nil {
+		return nil
+	}
+	// A client whose guard does not validate is skipped, not allowed to empty the
+	// plan: the compile refuses that client alone, and every other rule it emitted
+	// must still resolve.
+	clients := make([]protocol.Client, 0, len(roster.Clients))
+	for _, client := range roster.Clients {
+		if client.SourceGuard != nil && protocol.ValidateClientSourceGuard(client.SourceGuard) != nil {
+			continue
+		}
+		clients = append(clients, client)
+	}
+	snapshot := agentcore.Snapshot{Listeners: config.Listeners, Clients: clients, Transit: config.Transit}
+	plan, err := agentcore.PlanSourceGuard(snapshot, agentcore.ServedListenerKeys(config.Listeners))
+	if err != nil {
+		return nil
+	}
+	out := auditsink.GuardPlan{}
+	for _, rule := range plan.Rules {
+		planned := auditsink.GuardRule{Allow: rule.Allow}
+		for _, key := range rule.Sets {
+			planned.Sets = append(planned.Sets, auditsink.GuardSet{Key: key, Prefixes: plan.Sets[key]})
+		}
+		out[rule.Tag], out[rule.OutboundTag()] = planned, planned
+	}
+	return out
 }
 
 // stageAudit hands the receiver the snapshot of a deployment about to start.
@@ -262,6 +313,9 @@ func (r *Runtime) stageAudit(config *protocol.ConfigBody, roster *protocol.Roste
 	}
 	users, ruleIDs, egress := auditSnapshot(config, roster)
 	r.audit.StageRoster(users, ruleIDs, egress)
+	if guard, ok := r.audit.(AuditGuard); ok {
+		guard.StageGuard(r.guardPlan(config, roster))
+	}
 }
 
 // auditSnapshot also carries the egress the deployment compiles: whether hits

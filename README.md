@@ -344,6 +344,89 @@ receives is.
 
 Without `Fronts` the compiled configuration is byte-identical to before.
 
+### Source guard (`transit.source_guard.v1`)
+
+Direct, plain-forward and CDN lines end on one landing listener, so the listener
+cannot tell which line a connection came through. The panel sends named source
+sets (`Transit.SourceSets`) and tags each client with a guard
+(`Client.SourceGuard`); the agent compiles them into routing rules, placed after
+the transit rule and before the destination policy, that refuse a connection
+whose source address does not fit the client's line.
+
+- **`allow_from`**: the client is accepted only from inside the set, on any of its
+  listeners. A set missing from the config refuses the client entirely (fail
+  closed). **`deny_from`**: refused from inside any listed set; missing sets are
+  ignored. The source is the address the core sees; behind a front it is the one
+  in the PROXY protocol header.
+- **Which listeners can be guarded.** The guard only ever judges the socket peer,
+  or the PROXY header Passwall's own front writes. A listener whose source can
+  come from something the client sends is not guardable, and the guard is never
+  silently absent on it:
+  - an **`allow_from`** client attached to it is **rejected on that listener**
+    (left off it, so it cannot connect there) and reported rejected against the
+    client, with the reason `source guard: listener lst_X takes its source address
+    from X-Forwarded-For; this client's line cannot be served on it` (or `accepts
+    a PROXY protocol header from its clients ...`). The rest of the configuration
+    deploys, and the client stays served on its other, guardable listeners. The
+    rejection is re-evaluated whenever the config or the roster changes and after
+    an engine switch, and lifts when the cause is gone.
+  - a **`deny_from`** client is served there and its guard is simply not applied
+    to that listener (no rule names it). The panel only allows lines whose
+    factors are equal on such a listener, so nothing is lost, and a legacy client
+    attached to several listeners does not take the non-guardable one down.
+  No guard reason fails the whole compile. Not guardable:
+  - **sing-box**: every listener with a `transport`, that is `ws`, `httpupgrade`,
+    `http`/`h2` and `grpc`. On sing-box 1.14 each of them replaces the connection's
+    source with the first `X-Forwarded-For` value, and there is no inbound option
+    to turn that off (checked with the real binary). Guardable: plain TCP (the
+    default transport and `raw`), with or without TLS or REALITY. Behind a CDN
+    (WebSocket, HTTPUpgrade) a sing-box listener therefore cannot carry a guard.
+  - **Xray**: a listener with a non-empty `trustedXForwardedFor` (Xray then takes
+    the source from the header), and a listener that already accepts a PROXY
+    protocol header (`acceptProxyProtocol` set to true), since any client could
+    forge its source with one. Xray reads configuration keys case-insensitively
+    (`TrustedXForwardedFor`, `Sockopt`, `StreamSettings` and so on are all
+    honoured), so both are matched without regard to case, anywhere in the
+    listener's stream settings (`sockopt` or any transport's settings) or its
+    inbound `settings`. Xray ignores `X-Forwarded-For` otherwise, so every other
+    transport (tcp/raw, ws, httpupgrade, grpc, xhttp) is guardable. The PROXY
+    header a Passwall front adds to the listener it fronts is its own and does
+    not count; a front already refuses a listener that sets `acceptProxyProtocol`
+    itself.
+  A panel can mirror this: offer an `allow_from` guard only to a client whose
+  listeners are all guardable.
+- **Xray** has no "not in" source condition, so an allow rule's source is the
+  complement of the set (every address outside it, as the fewest canonical
+  prefixes), one rule per allow set and one per distinct deny combination, each
+  with a blackhole outbound of its own (`psp-guard-allow-<set>`,
+  `psp-guard-deny-<hash>`). A deny rule is named by its content, the first 12 hex
+  digits of the SHA-256 of its sorted set keys joined by NUL, never by position,
+  so a tag means the same combination in every plan (the receiver reads a
+  rolling deployment's old and new events by it). An allow set that covers every
+  address emits no rule.
+- **sing-box** writes the allow rule as a logical AND of the user and inbound match
+  with an inverted `source_ip_cidr`, and rejects.
+- **Refusals are reported on Xray only.** Each guard rule carries a webhook to the
+  audit socket's `/guard` path (when the socket exists); the receiver keeps at
+  most 256 distinct (set, listener, source) entries with a count and a last-seen
+  time, evicting the oldest, and ages an entry out 24 hours after it was last
+  seen. The aggregate is attached to every full report as `source_guard_hits`
+  and is not cleared when sent. sing-box refuses connections at routing, before
+  they enter the ledger the telemetry reads, and has no rule webhook, so it
+  enforces the guard and reports no hits. Under size pressure the hits are
+  dropped after host telemetry and before the audit batch.
+- **Interface addresses.** Full reports carry `interface_addresses`: the node's
+  own global unicast addresses, minus loopback, link-local, multicast, private
+  (RFC 1918, ULA), shared (CGNAT) and documentation ranges, sorted, at most 64.
+  The panel uses them as the source set of a relay line this node is the entry of.
+- The capability is declared while the selected engine is Xray or sing-box, and a
+  node with no guarded client compiles byte-identical configuration.
+- Real-core tests (skipped when the variables are unset): `PSP_TEST_XRAY_BIN`
+  (Xray server), `PSP_TEST_SING_BOX_BIN` and `PSP_TEST_XRAY_CLIENT_BIN` (an Xray
+  used as the client); run `go test ./internal/core/xray ./internal/core/singbox
+  -run SourceGuard`. They connect from 127.0.0.1 through seven guarded and
+  unguarded clients, check the refusals, and (Xray) the `/guard` webhook.
+
 ### Compressed sync (`sync.gzip.v1`)
 
 The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with
@@ -363,6 +446,14 @@ body has been read and decoded in full. `last_request_bytes` and
 `last_response_bytes` are wire sizes (compressed when compressed); a round that
 was rejected and resent plain records the plain retry. `MaxResponseBytes` bounds
 wire bytes and is clamped to the 16 MiB protocol limit.
+
+Compression does not raise the limit on the agent's own report: it is still
+16 MiB of plain JSON, whether or not it is sent compressed. A full
+report costs about 220 bytes per client, so it reaches that limit at roughly
+73k clients on one node; past it the node can no longer send a full report and
+stops receiving roster updates and reporting traffic. Keep a node below about
+50k clients. Paged full reports, which remove this limit, are planned for 4.4
+(Passwall-Protocol issue #16).
 
 ## Design record
 
