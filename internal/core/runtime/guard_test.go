@@ -35,8 +35,8 @@ func TestGuardPlanResolvesBothTagsToTheSameRule(t *testing.T) {
 	if rule := plan["psp-guard-deny-788671d7f16c"]; rule.Allow || len(rule.Sets) != 1 || rule.Sets[0].Key != "src_b" || len(rule.Sets[0].Prefixes) != 1 {
 		t.Fatalf("deny = %+v", rule)
 	}
-	if r.guardPlan(nil, nil) != nil || r.guardPlan(&protocol.ConfigBody{}, roster) != nil {
-		t.Fatal("a deployment with no transit has a guard plan")
+	if r.guardPlan(nil, nil) != nil || r.guardPlan(&protocol.ConfigBody{}, nil) != nil {
+		t.Fatal("nothing deployed has a guard plan")
 	}
 }
 
@@ -77,6 +77,30 @@ func TestGuardPlanResolvesEveryRuleTheCompileEmitted(t *testing.T) {
 			got, ok := plan[tag]
 			if !ok || len(got.Sets) != len(rule.Sets) || got.Sets[0].Key != rule.Sets[0] {
 				t.Fatalf("%s resolves to %+v, %v; the compile wrote it for %v", tag, got, ok, rule.Sets)
+			}
+		}
+	}
+}
+
+// An allow guard whose set is missing is refused entirely by the compile, with
+// or without a transit section; the receiver must name that set so the panel
+// can warn about the line.
+func TestGuardPlanAttributesFailClosedRefusalsToTheMissingSet(t *testing.T) {
+	r := &Runtime{now: func() time.Time { return time.Unix(1, 0) }}
+	roster := &protocol.RosterBody{Clients: []protocol.Client{
+		{Key: "cli_1", Subject: "usr_1", Enabled: true, Listeners: []protocol.ListenerKey{"lst_1"},
+			Credentials: protocol.Credential{Username: "u1"}, SourceGuard: &protocol.ClientSourceGuard{AllowFrom: "src_gone"}},
+	}}
+	for name, transit := range map[string]*protocol.Transit{"no transit": nil, "transit without the set": {}} {
+		config := &protocol.ConfigBody{
+			Listeners: []protocol.Listener{{Key: "lst_1", Config: protocol.RawConfig(`{"enabled":true}`)}},
+			Transit:   transit,
+		}
+		plan := r.guardPlan(config, roster)
+		for _, tag := range []string{"guard-allow-gone", "psp-guard-allow-gone"} {
+			rule, ok := plan[tag]
+			if !ok || !rule.Allow || len(rule.Sets) != 1 || rule.Sets[0].Key != "src_gone" || len(rule.Sets[0].Prefixes) != 0 {
+				t.Fatalf("%s: %s = %+v, %v", name, tag, rule, ok)
 			}
 		}
 	}

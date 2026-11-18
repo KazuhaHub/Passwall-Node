@@ -218,3 +218,16 @@ func TestDeployedGuardPlanIsConsultedBeforeTheStagedOne(t *testing.T) {
 		t.Fatalf("hits = %+v", hits)
 	}
 }
+
+// A fail-closed refusal (an allow rule whose set the config lacks) has a set
+// key and no networks, and is attributed to that key like any allow refusal.
+func TestFailClosedRefusalIsAttributedToTheMissingSet(t *testing.T) {
+	sink := newTestSink(t, nil)
+	rule := GuardRule{Allow: true, Sets: []GuardSet{{Key: "src_gone"}}}
+	sink.SetGuard(GuardPlan{"guard-allow-gone": rule, "psp-guard-allow-gone": rule})
+	postGuard(sink, testToken, guardEventJSON("192.0.2.9:1", "psp-lst_1", "psp-guard-allow-gone", ""))
+	hits := sink.GuardHits()
+	if len(hits) != 1 || hits[0].Set != "src_gone" || hits[0].Listener != "lst_1" || hits[0].SourceIP != "192.0.2.9" {
+		t.Fatalf("hits = %+v", hits)
+	}
+}

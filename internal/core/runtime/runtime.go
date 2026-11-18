@@ -277,7 +277,7 @@ func (r *Runtime) publishAudit(config *protocol.ConfigBody, roster *protocol.Ros
 // its set combination (core.GuardDenyTag) an extra rule cannot change what the
 // others mean.
 func (r *Runtime) guardPlan(config *protocol.ConfigBody, roster *protocol.RosterBody) auditsink.GuardPlan {
-	if config == nil || roster == nil || config.Transit == nil {
+	if config == nil || roster == nil {
 		return nil
 	}
 	snapshot := agentcore.Snapshot{Listeners: config.Listeners, Clients: roster.Clients, Transit: config.Transit}
