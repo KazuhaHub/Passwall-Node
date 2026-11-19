@@ -434,8 +434,9 @@ The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with
 wire limit (decoded bodies are capped at 64 MiB). Negotiation is two-sided and never
 guessed: the first report is plain; a panel that accepts compressed requests says
 so with `Accept-Encoding: gzip` on a 2xx response, and only then does the agent
-compress. Only a 2xx response changes that state; a 5xx or a failed connection
-leaves it alone. Any non-2xx answer to a compressed
+compress. Only a 2xx response changes that state; any other answer or a failed
+connection leaves it alone, apart from the plain resend below. Any non-2xx answer
+to a compressed
 request (other than the transients 408, 429, 500, 502, 503, 504 and a CDN's
 520-530, and other than 401/407, which a plain resend would hit too) is answered
 by resending the same report once in plain, within the same round. Only if that
@@ -444,7 +445,10 @@ or 415; a WAF or proxy that passes plain POSTs may answer 403, 406, 411, 501,
 ...): the agent then stays plain for one hour, and tries gzip again on what it
 learned when the hour ends. If the plain resend fails too, nothing changes and
 the next round is compressed again, so a refusal unrelated to the coding never
-costs an hour without compression. During the hour a 2xx without the
+costs an hour without compression; one that keeps coming (an invalid report, a
+WAF blocking everything) costs two requests a round instead of one. A proxy that
+refuses gzip by dropping the connection gets no plain resend: a failed
+connection says nothing about the coding. During the hour a 2xx without the
 advertisement still switches gzip off, so a panel rolled back to one without
 gzip stops getting compressed requests. The state lives in memory: the agent
 starts plain at every start and learns gzip from its first 2xx, so a report
