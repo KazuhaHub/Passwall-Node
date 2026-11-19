@@ -305,7 +305,8 @@ func TestSyncGzipRejectionRetriesPlainOnceThenCoolsDown(t *testing.T) {
 		t.Fatalf("request encodings during cooldown = %q", got)
 	}
 	advance(protocol.SyncGzipCooldown + time.Second)
-	// First round after the cooldown is still plain and re-learns; the next is gzip.
+	// The first round after the cooldown tries gzip again on what was learned
+	// (refused here, so it falls back and cools down); the next stays plain.
 	if err := syncOnce(syncer); err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +314,7 @@ func TestSyncGzipRejectionRetriesPlainOnceThenCoolsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := panel.encodings()
-	if got[5] != "" || got[6] != "gzip" || got[7] != "" {
+	if got[5] != "gzip" || got[6] != "" || got[7] != "" {
 		t.Fatalf("request encodings after cooldown = %q", got)
 	}
 }
@@ -495,5 +496,176 @@ func TestSyncGzipStatsRecordWireBytes(t *testing.T) {
 	}
 	if obs.LastRequestBytes == nil || *obs.LastRequestBytes != uint64(wantRequest) {
 		t.Fatalf("request bytes = %v, want wire size %d", obs.LastRequestBytes, wantRequest)
+	}
+}
+
+// A WAF or proxy that passes plain POSTs (so the panel's 2xx advertises gzip)
+// but refuses Content-Encoding with some other status must not strand the agent:
+// each round is one gzip attempt then one plain retry, and only the first round
+// after the learn pays for it.
+func TestSyncGzipRefusedWithAnyNonTransientStatusFallsBackToPlain(t *testing.T) {
+	for _, refusal := range []int{
+		http.StatusBadRequest, http.StatusForbidden, http.StatusNotAcceptable,
+		http.StatusLengthRequired, http.StatusRequestEntityTooLarge, http.StatusNotImplemented,
+	} {
+		t.Run(http.StatusText(refusal), func(t *testing.T) {
+			var clockMu sync.Mutex
+			current := time.Unix(1_700_000_000, 0)
+			now := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return current }
+			advance := func(d time.Duration) { clockMu.Lock(); current = current.Add(d); clockMu.Unlock() }
+
+			panel := &gzipPanel{advertise: true, status: func(_ int, encoding string) int {
+				if encoding == "gzip" {
+					return refusal
+				}
+				return http.StatusOK
+			}}
+			syncer := newGzipSyncer(t, panel, true, now)
+			for i := 0; i < 4; i++ {
+				if err := syncOnce(syncer); err != nil {
+					t.Fatalf("round %d: %v", i+1, err)
+				}
+			}
+			// Round 2 tried gzip once and retried plain; the cooldown keeps 3 and 4 plain.
+			if got := panel.encodings(); !equalStrings(got, []string{"", "gzip", "", "", ""}) {
+				t.Fatalf("request encodings = %q", got)
+			}
+			advance(protocol.SyncGzipCooldown + time.Second)
+			for i := 0; i < 2; i++ { // gzip again on what was learned, refused, then plain
+				if err := syncOnce(syncer); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := panel.encodings(); !equalStrings(got, []string{"", "gzip", "", "", "", "gzip", "", ""}) {
+				t.Fatalf("request encodings after cooldown = %q", got)
+			}
+		})
+	}
+}
+
+// Bad credentials answer 401 to both codings. A plain resend would fail the same
+// way, so there is none: one request per round, and the coding is kept.
+func TestSyncGzipBadCredentialsDoNotDoubleTheRequestRate(t *testing.T) {
+	panel := &gzipPanel{advertise: true, status: func(call int, _ string) int {
+		if call == 0 {
+			return http.StatusOK
+		}
+		return http.StatusUnauthorized
+	}}
+	syncer := newGzipSyncer(t, panel, true, nil)
+	for i := 0; i < 4; i++ {
+		err := syncOnce(syncer)
+		if i == 0 && err != nil {
+			t.Fatal(err)
+		}
+		if i > 0 && (err == nil || !strings.Contains(err.Error(), "status 401")) {
+			t.Fatalf("round %d error = %v", i+1, err)
+		}
+	}
+	if got := panel.encodings(); !equalStrings(got, []string{"", "gzip", "gzip", "gzip"}) {
+		t.Fatalf("request encodings = %q", got)
+	}
+}
+
+// A refusal that has nothing to do with the coding fails the plain resend too:
+// no cooldown, so the next round is compressed again. For a report that fits a
+// proxy's limit only compressed, an hour of plain would be an hour of 413s.
+func TestSyncGzipFailedPlainResendKeepsTheCoding(t *testing.T) {
+	panel := &gzipPanel{advertise: true, status: func(call int, encoding string) int {
+		switch call {
+		case 0:
+			return http.StatusOK
+		case 1:
+			return http.StatusBadRequest // the panel found this report invalid
+		case 2:
+			return http.StatusRequestEntityTooLarge // plain is over the proxy's limit
+		}
+		return http.StatusOK
+	}}
+	syncer := newGzipSyncer(t, panel, true, nil)
+	if err := syncOnce(syncer); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncOnce(syncer); err == nil {
+		t.Fatal("a round refused on both codings succeeded")
+	}
+	if err := syncOnce(syncer); err != nil {
+		t.Fatal(err)
+	}
+	if got := panel.encodings(); !equalStrings(got, []string{"", "gzip", "", "gzip"}) {
+		t.Fatalf("request encodings = %q", got)
+	}
+}
+
+// 408, 429, 500, 502, 503, 504 and a CDN's 52x say the panel is slow, busy,
+// restarting or unreachable, not that it refuses the coding: no plain retry,
+// and the state is unchanged.
+func TestSyncGzipTransientStatusesDoNotFallBack(t *testing.T) {
+	for _, transient := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout, 520, 522, 530} {
+		t.Run(http.StatusText(transient), func(t *testing.T) {
+			panel := &gzipPanel{advertise: true, status: func(call int, _ string) int {
+				if call == 1 {
+					return transient
+				}
+				return http.StatusOK
+			}}
+			syncer := newGzipSyncer(t, panel, true, nil)
+			if err := syncOnce(syncer); err != nil {
+				t.Fatal(err)
+			}
+			if err := syncOnce(syncer); err == nil {
+				t.Fatal("transient status was not reported")
+			}
+			if err := syncOnce(syncer); err != nil {
+				t.Fatal(err)
+			}
+			if got := panel.encodings(); !equalStrings(got, []string{"", "gzip", "gzip"}) {
+				t.Fatalf("request encodings = %q", got)
+			}
+		})
+	}
+}
+
+// An agent whose report fits a proxy's limit only compressed: one gzip request
+// is refused and its plain resend gets 413. That failed resend proves nothing
+// about the coding, so no cooldown starts and the agent is back on gzip (and
+// through) without waiting, instead of staying plain until it restarts.
+func TestSyncGzipComesBackAfterTheCooldownWithoutAFresh2xx(t *testing.T) {
+	var clockMu sync.Mutex
+	current := time.Unix(1_700_000_000, 0)
+	now := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return current }
+	advance := func(d time.Duration) { clockMu.Lock(); current = current.Add(d); clockMu.Unlock() }
+	refuseOnce := true
+	panel := &gzipPanel{advertise: true, status: func(call int, encoding string) int {
+		switch {
+		case call == 0:
+			return http.StatusOK // plain, learns gzip
+		case encoding == "gzip" && refuseOnce:
+			refuseOnce = false
+			return http.StatusForbidden
+		case encoding == "gzip":
+			return http.StatusOK
+		}
+		return http.StatusRequestEntityTooLarge // plain is over the proxy's limit
+	}}
+	syncer := newGzipSyncer(t, panel, true, now)
+	if err := syncOnce(syncer); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncOnce(syncer); err == nil {
+		t.Fatal("a round whose gzip was refused and whose plain retry got 413 succeeded")
+	}
+	for i := 0; i < 3; i++ {
+		advance(20 * time.Minute)
+		_ = syncOnce(syncer) // plain during the cooldown: 413
+	}
+	advance(time.Minute)
+	if err := syncOnce(syncer); err != nil {
+		t.Fatalf("gzip did not come back after the cooldown: %v (encodings %q)", err, panel.encodings())
+	}
+	got := panel.encodings()
+	if got[len(got)-1] != "gzip" {
+		t.Fatalf("request encodings = %q", got)
 	}
 }
