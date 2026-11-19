@@ -430,23 +430,25 @@ whose source address does not fit the client's line.
 ### Compressed sync (`sync.gzip.v1`)
 
 The agent declares `sync.gzip.v1` and can exchange `/v1/node/sync` bodies with
-`Content-Encoding: gzip`, so a roster larger than the 16 MiB wire limit still
-fits (decoded bodies are capped at 64 MiB). Negotiation is two-sided and never
+`Content-Encoding: gzip`, so the panel can send a roster larger than the 16 MiB
+wire limit (decoded bodies are capped at 64 MiB). Negotiation is two-sided and never
 guessed: the first report is plain; a panel that accepts compressed requests says
 so with `Accept-Encoding: gzip` on a 2xx response, and only then does the agent
 compress. Only a 2xx response changes that state; a 5xx or a failed connection
 leaves it alone. Any non-2xx answer to a compressed
-request counts as a refusal of the coding, except the transients 429, 500, 502,
-503, 504 and a CDN's 520-530 (those, like a failed connection, change nothing:
-the panel is busy, restarting or unreachable): the agent resends the same report
-once in plain, within the same round, and stays plain for one hour. This covers
-a WAF or reverse proxy that lets plain POSTs through but rejects
-`Content-Encoding: gzip` with 400, 401, 403, 406, 411, 413, 415 or 501. When the
-hour ends the agent tries gzip again on what it last learned, without waiting
-for a fresh advertisement, so an agent whose report fits a proxy's limit only
-compressed is not left plain for good. If the plain retry fails the same way the
-coding was not the problem; bad credentials cost one extra request per hour,
-not a retry loop. The
+request (other than the transients 408, 429, 500, 502, 503, 504 and a CDN's
+520-530, and other than 401/407, which a plain resend would hit too) is answered
+by resending the same report once in plain, within the same round. Only if that
+plain resend succeeds was the coding refused (a panel without gzip answers 400
+or 415; a WAF or proxy that passes plain POSTs may answer 403, 406, 411, 501,
+...): the agent then stays plain for one hour, and tries gzip again on what it
+learned when the hour ends. If the plain resend fails too, nothing changes and
+the next round is compressed again, so a refusal unrelated to the coding never
+costs an hour without compression. During the hour a 2xx without the
+advertisement still switches gzip off, so a panel rolled back to one without
+gzip stops getting compressed requests. The state lives in memory: the agent
+starts plain at every start and learns gzip from its first 2xx, so a report
+that fits a proxy's body limit only compressed fails until that first 2xx. The
 agent sends `Accept-Encoding: gzip` on its own requests, so the panel may
 compress responses; the HTTP transport has `DisableCompression` set and every
 body is decoded by `protocol.DecodeSyncBody` under the protocol limits, never by

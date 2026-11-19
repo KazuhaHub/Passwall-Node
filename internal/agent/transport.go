@@ -193,12 +193,14 @@ func (s *HTTPSyncer) Sync(ctx context.Context, report protocol.NodeReport) (prot
 		return protocol.SyncResponse{}, err
 	}
 	if s.rejected(response.StatusCode, encoding) {
-		// The panel did not take the coding: repeat the same report once, plain.
+		// The path may not have taken the coding: repeat the same report once,
+		// plain. Its outcome decides whether gzip goes quiet for the cooldown.
 		_ = response.Body.Close()
 		response, err = s.send(ctx, body, "")
 		if err != nil {
 			return protocol.SyncResponse{}, err
 		}
+		s.plainRetried(response.StatusCode)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -307,6 +309,12 @@ func (s *HTTPSyncer) rejected(status int, sent string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.compression.Rejected(status, sent)
+}
+
+func (s *HTTPSyncer) plainRetried(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.compression.PlainRetried(status)
 }
 
 func (s *HTTPSyncer) observe(status int, acceptEncoding string) {
