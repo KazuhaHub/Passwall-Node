@@ -65,18 +65,40 @@ else
  gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$target" -f "tag=$target"
  wait_run release.yml "$target" "$source_sha" "$since"
 fi
-# Node acceptance is automatically dispatched by the successful publication. One
-# run holds the container and the installation acceptance on both architectures,
-# so it is accepted only when both are in it and every job passed.
+# One acceptance run holds the container and the installation acceptance on both
+# architectures, so it is accepted only when both are in it and every job passed.
+# A Release dispatched with GITHUB_TOKEN (this script, prepare-release) does not
+# trigger workflow_run, so nothing starts the acceptance on its own: when no
+# accepted run exists yet, this dispatches one from main, once, and waits for it.
+accepted_run() {
+ local runs run
+ runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow post-release-acceptance.yml --status success --limit 100 --json databaseId,displayTitle,workflowName,event,headBranch --jq ".[] | select(.displayTitle == .workflowName + \" of $target\") | select(.event == \"workflow_run\" or (.event == \"workflow_dispatch\" and .headBranch == \"main\")) | .databaseId")
+ for run in $runs; do
+  if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=100" --jq '(.jobs | map(select(.name | startswith("execute published image"))) | length >= 2) and (.jobs | map(select(.name | startswith("systemd"))) | length >= 2) and (.jobs | map(.conclusion) | all(. == "success"))' | grep -qx true; then return 0; fi
+ done
+ return 1
+}
 if [ "${REQUIRE_NODE_ACCEPTANCE:-false}" = true ]; then
  workflow=post-release-acceptance.yml
  accepted=false
+ dispatched=false
  for attempt in $(seq 1 180); do
-  runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status success --limit 100 --json databaseId,displayTitle,workflowName,event,headBranch --jq ".[] | select(.displayTitle == .workflowName + \" of $target\") | select(.event == \"workflow_run\" or (.event == \"workflow_dispatch\" and .headBranch == \"main\")) | .databaseId")
-  for run in $runs; do
-   if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=100" --jq '(.jobs | map(select(.name | startswith("execute published image"))) | length >= 2) and (.jobs | map(select(.name | startswith("systemd"))) | length >= 2) and (.jobs | map(.conclusion) | all(. == "success"))' | grep -qx true; then accepted=true; break; fi
-  done
-  if [ "$accepted" = true ]; then break; fi
+  if accepted_run; then accepted=true; break; fi
+  # Runs of this tag's acceptance that have not finished, and the ones that
+  # finished without success since this script dispatched one.
+  title="Post-release acceptance of $target"
+  open_runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --limit 100 --json displayTitle,status --jq "[.[] | select(.displayTitle == \"$title\" and .status != \"completed\")] | length")
+  if [ "$dispatched" = true ]; then
+   failed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --limit 100 --json displayTitle,status,conclusion,createdAt,event,headBranch --jq "[.[] | select(.displayTitle == \"$title\" and .event == \"workflow_dispatch\" and .headBranch == \"main\" and .status == \"completed\" and .conclusion != \"success\" and .createdAt >= \"$dispatched_at\")] | length")
+   if [ "$failed" != 0 ] && [ "$open_runs" = 0 ]; then
+    echo "$workflow failed for $target; repair/rerun it, then resume this transition" >&2; exit 1
+   fi
+  elif [ "$open_runs" = 0 ]; then
+   # A minute early, so a runner clock ahead of GitHub's cannot hide the run.
+   dispatched_at=$(date -u -d '-60 seconds' +%FT%TZ)
+   gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main -f "tag=$target"
+   dispatched=true
+  fi
   echo "waiting for $workflow acceptance of $target (attempt $attempt)"
   sleep 20
  done

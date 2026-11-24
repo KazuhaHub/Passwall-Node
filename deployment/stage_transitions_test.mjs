@@ -73,7 +73,20 @@ function sourceFixture(source='v4.1.0-beta.3') {
  if(a[0]==='run' && a[1]==='list') {
   const w=opt('--workflow');
   if(w==='test.yml') console.log('success');
-  else if(w.includes('acceptance')) console.log('222');
+  else if(w.includes('acceptance')){
+   // Runs of Post-release acceptance, filtered by the script's own jq. By default
+   // one already accepted each candidate (a tag-push Release starts it); with
+   // ACCEPTANCE=dispatch none exists until the script dispatches one, which then
+   // ends with ACCEPTANCE_RESULT (success unless set).
+   const titles=['v4.1.0','v4.1.0-rc.1'].map(t=>'Post-release acceptance of '+t);
+   const dispatched=fs.existsSync(state)&&fs.readFileSync(state,'utf8').includes('post-release-acceptance.yml');
+   const runs=process.env.ACCEPTANCE==='dispatch'
+    ? (dispatched?titles.map(t=>({databaseId:222,displayTitle:t,workflowName:'Post-release acceptance',event:'workflow_dispatch',headBranch:'main',status:'completed',conclusion:process.env.ACCEPTANCE_RESULT||'success',createdAt:'2999-01-01T00:00:00Z'})):[])
+    : titles.map(t=>({databaseId:222,displayTitle:t,workflowName:'Post-release acceptance',event:'workflow_run',headBranch:'main',status:'completed',conclusion:'success',createdAt:'2000-01-01T00:00:00Z'}));
+   const listed=a.includes('--status')?runs.filter(r=>r.conclusion===opt('--status')):runs;
+   const r=require('node:child_process').spawnSync('jq',['-r',opt('--jq')],{input:JSON.stringify(listed),encoding:'utf8'});
+   process.stdout.write(r.stdout);process.stderr.write(r.stderr);process.exit(r.status)
+  }
   else if(!a.includes('--branch')) console.log('1');
   else if(fs.existsSync(state))console.log('111');
   process.exit(0)
@@ -113,4 +126,21 @@ test('a conflicting target or failed publication cannot be promoted',()=>{
  assert.notEqual(r.status,0);assert.match(r.stderr,/failed/);assert.doesNotMatch(calls(failure),/"workflow","run","promote.yml"/)
  delete failure.env.PUBLICATION_FAILURE; r=advance(failure);assert.equal(r.status,0,r.stderr)
  assert.equal(calls(failure).split('\n').filter(l=>l.includes('"workflow","run","release.yml"')).length,1)
+})
+
+test('advance dispatches the acceptance once when no run exists, then promotes',()=>{
+ if(!nodeProduct) return
+ const f=sourceFixture();f.env.ACCEPTANCE='dispatch';shim(f,'sleep','')
+ const r=advance(f);assert.equal(r.status,0,r.stderr)
+ const log=calls(f).split('\n')
+ assert.equal(log.filter(l=>l.includes('"workflow","run","post-release-acceptance.yml"')).length,1)
+ const dispatched=log.findIndex(l=>l.includes('"workflow","run","post-release-acceptance.yml"')),promoted=log.findIndex(l=>l.includes('"workflow","run","promote.yml"'))
+ assert(dispatched>=0&&promoted>dispatched,'promotion must follow the dispatched acceptance')
+})
+test('a failed dispatched acceptance stops the advance at once, without promotion',()=>{
+ if(!nodeProduct) return
+ const f=sourceFixture();f.env.ACCEPTANCE='dispatch';f.env.ACCEPTANCE_RESULT='failure';shim(f,'sleep','')
+ const r=advance(f);assert.notEqual(r.status,0);assert.match(r.stderr,/failed for v4\.1\.0/)
+ assert.doesNotMatch(calls(f),/"workflow","run","promote.yml"/)
+ assert.equal(calls(f).split('\n').filter(l=>l.includes('"workflow","run","post-release-acceptance.yml"')).length,1)
 })
