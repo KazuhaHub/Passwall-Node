@@ -5,9 +5,11 @@ it on a developer machine, production server or self-hosted runner. It checks
 the root/GitHub-hosted environment and refuses any existing installation,
 systemd unit, installation lock or `passwall-node` account before mutation.
 
-`.github/workflows/installation-acceptance.yml` runs by itself after every
-successful Release run from a tag push, against that tag, with this tool built
-from the tagged commit. For any other published release, dispatch it with the
+The `installation` job of `.github/workflows/post-release-acceptance.yml` runs by
+itself after a successful Release run that a tag push started, against that tag,
+with this tool built from the tagged commit. A Release dispatched by
+`prepare-release.yml` or `advance-release.yml` uses the GitHub token and starts
+no such run, so dispatch the workflow by hand for those tags. For any other published release, dispatch it with the
 release's `tag` (for example `v4.0.1.5` or `release/4.0.1.2`); the version is
 derived from the tag. Both `ubuntu-24.04` and `ubuntu-24.04-arm` execute the real
 installer and the **published binary**, not a locally built agent. On a dispatch
@@ -23,10 +25,10 @@ afterwards. Two published releases are needed — `release/4.0.1.1` and
 `release/4.0.1.2` are the first pair that can do it. The run after a release
 does not take this path; it installs the new release on a fresh host.
 
-A run's title names the tag it accepted. `promote.yml` refuses to promote a
-release to stable until a run of this workflow and one of
-`container-acceptance.yml` have passed for its tag, on main's copy of each and
-on every architecture.
+A run's title names the tag it accepted. That one run also holds the published
+container acceptance, and `promote.yml` refuses to promote a release to stable
+until a run of this workflow has passed every job, on both architectures, for
+its tag, on main's copy.
 
 The fixture generates an independent temporary AgentID and credential, listens
 only on `127.0.0.1` with HTTPS beneath a PSP-shaped panel prefix, and requires the

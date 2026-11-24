@@ -65,21 +65,22 @@ else
  gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$target" -f "tag=$target"
  wait_run release.yml "$target" "$source_sha" "$since"
 fi
-# Node acceptance is automatically dispatched by the successful publication.
+# Node acceptance is automatically dispatched by the successful publication. One
+# run holds the container and the installation acceptance on both architectures,
+# so it is accepted only when both are in it and every job passed.
 if [ "${REQUIRE_NODE_ACCEPTANCE:-false}" = true ]; then
- for workflow in container-acceptance.yml installation-acceptance.yml; do
-  accepted=false
-  for attempt in $(seq 1 180); do
-   runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status success --limit 100 --json databaseId,displayTitle,workflowName,event,headBranch --jq ".[] | select(.displayTitle == .workflowName + \" of $target\") | select(.event == \"workflow_run\" or (.event == \"workflow_dispatch\" and .headBranch == \"main\")) | .databaseId")
-   for run in $runs; do
-    if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=100" --jq '[.jobs[].conclusion] | length >= 2 and all(. == "success")' | grep -qx true; then accepted=true; break; fi
-   done
-   if [ "$accepted" = true ]; then break; fi
-   echo "waiting for $workflow acceptance of $target (attempt $attempt)"
-   sleep 20
+ workflow=post-release-acceptance.yml
+ accepted=false
+ for attempt in $(seq 1 180); do
+  runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status success --limit 100 --json databaseId,displayTitle,workflowName,event,headBranch --jq ".[] | select(.displayTitle == .workflowName + \" of $target\") | select(.event == \"workflow_run\" or (.event == \"workflow_dispatch\" and .headBranch == \"main\")) | .databaseId")
+  for run in $runs; do
+   if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=100" --jq '(.jobs | map(select(.name | startswith("execute published image"))) | length >= 2) and (.jobs | map(select(.name | startswith("systemd"))) | length >= 2) and (.jobs | map(.conclusion) | all(. == "success"))' | grep -qx true; then accepted=true; break; fi
   done
-  test "$accepted" = true || { echo "$workflow has not accepted $target on both architectures; resolve it and resume" >&2; exit 1; }
+  if [ "$accepted" = true ]; then break; fi
+  echo "waiting for $workflow acceptance of $target (attempt $attempt)"
+  sleep 20
  done
+ test "$accepted" = true || { echo "$workflow has not accepted $target on both architectures; resolve it and resume" >&2; exit 1; }
 fi
 if [ "$TARGET_STAGE" = stable ]; then
  since=$(date -u +%FT%TZ)

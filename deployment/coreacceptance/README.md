@@ -1,6 +1,7 @@
 # Executable core acceptance
 
-`core-acceptance.yml` runs on native Linux amd64 and arm64 GitHub-hosted runners.
+The `real-core` job in `.github/workflows/test.yml` runs on native Linux amd64 and arm64
+GitHub-hosted runners.
 It downloads every selectable catalog Xray (**26.6.27**, **26.7.28**, and the
 restricted **26.9.9** and **26.11.9**), plus the recommended sing-box **1.14.0**,
 through the production core

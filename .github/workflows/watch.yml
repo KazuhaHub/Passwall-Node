@@ -5,14 +5,15 @@ name: Weekly watch
 # The reviewed core catalog is a claim about two upstreams that keep shipping:
 # corecatalog/catalog.json lists the Xray and sing-box releases this project has
 # reviewed, the panel offers exactly those, and nothing noticed a newer upstream
-# release — only core-acceptance.yml reads upstream at all, and it pins exact
-# versions by digest. These are network-facing binaries whose upstreams ship
+# release — only the real-core jobs in test.yml read upstream at all, and they
+# pin exact versions by digest. These are network-facing binaries whose upstreams ship
 # security fixes, so a release nobody has looked at deserves a signal.
 #
-# govulncheck in test.yml reports what the Go vulnerability database knows only
-# when a push or a PR happens to run it. An advisory published during a quiet
-# week against a dependency this daemon ships was reported at the next commit,
-# whenever that was.
+# govulncheck reports what the Go vulnerability database knows only when
+# something runs it, and Test deliberately does not (a pull request must not go
+# red on an advisory against a dependency it never touched). Releases run it
+# before a tag is allocated, and this runs it weekly: an advisory published during
+# a quiet week against a dependency this daemon ships is reported within the week.
 #
 # Neither job edits anything. Reviewing a core means acceptance evidence and a
 # tier, and a job that wrote the catalog would be asserting what it did not
@@ -113,7 +114,7 @@ jobs:
 
   govulncheck:
     name: reachable vulnerabilities on main
-    # The PR trigger exists for the catalog; test.yml already scans every PR.
+    # The PR trigger exists for the catalog; an advisory is not a PR's concern.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -127,7 +128,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # The same pin as test.yml's step; baseline_test.go keeps the two one
+      # The same pin as the release steps'; baseline_test.go keeps them one
       # decision, since Dependabot cannot see a version in a `run:` line.
       - name: Reachable vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

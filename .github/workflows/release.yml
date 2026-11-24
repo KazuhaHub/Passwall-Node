@@ -83,7 +83,7 @@ jobs:
           go-version-file: go.mod
           # NO SHARED CACHE IN A PUBLISHING RUN, in any of this workflow's jobs.
           # setup-go's entry is keyed on go.sum and written by whichever main
-          # push saves it first (test.yml, core-acceptance.yml), and a tag run
+          # push saves it first (test.yml), and a tag run
           # restores it. Go trusts what it finds there: the module cache is
           # checked against go.sum only when a module is downloaded, and a build
           # object is trusted by its action ID. So one compromised step on a
@@ -220,6 +220,16 @@ jobs:
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
           echo "images=${images}" >> "$GITHUB_OUTPUT"
 
+      # NOTHING IS BUILT OR PUBLISHED FROM A COMMIT WITH A REACHABLE ADVISORY.
+      # Test no longer scans, so that a pull request does not go red on an advisory
+      # published against a dependency it never touched; this is where the scan
+      # binds. It is the last step of the first job, which every other job needs,
+      # so it runs before the build legs and before anything is signed or pushed,
+      # whether the tag came from prepare-release.yml, advance-release.yml or a
+      # push. baseline_test.go keeps this pin and watch.yml's one decision.
+      - name: Reachable vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
@@ -343,17 +353,17 @@ jobs:
           set -euo pipefail
           # THE MAIN PUSH'S RUN, AND THE WHOLE RUN'S CONCLUSION. A pull request's
           # run tested a merge ref rather than this commit, so only the push to
-          # main is a verdict on it. And `test, vet, format` aggregates the checks
-          # and race jobs only; cross-compile, upgrade-systemd and the container
-          # are outside it, and a release needs all of them.
+          # main is a verdict on it. And it is the WHOLE run's conclusion rather
+          # than one job's: the static checks and the suite, the cross-compile, the
+          # upgrade sandbox, the container and the real cores all have to be in it.
           #
           # IT WAITS, BOUNDED, because the tag usually arrives first: v4.0.1.5's
           # release started 51s after Test on the same commit, which then took
-          # 114s. Main runs take 82-371s; the bound is 25 minutes, above the
-          # slowest Test job's own 20-minute timeout. Any other conclusion fails
+          # 114s. Main runs take 82-371s; the bound is 30 minutes, above the
+          # slowest Test job's own 25-minute timeout (the real cores). Any other conclusion fails
           # at once. A cancelled or failed run is re-run in Test first, and then
           # this workflow's failed jobs are re-run; nothing is re-tagged.
-          for _ in $(seq 1 50); do
+          for _ in $(seq 1 60); do
             verdict=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow test.yml \
               --commit "$SHA" --branch main --event push --limit 1 \
               --json status,conclusion \
@@ -374,9 +384,9 @@ jobs:
           # A push runs Test on its head commit only, so a commit that was not
           # the head of its push to main, or skipped CI, never gets a verdict.
           if [ "$verdict" = "none " ]; then
-            echo "no push to main ran Test on ${SHA:0:7} in 25 minutes; only the head commit of a push gets a run, so release a commit that was one" >&2
+            echo "no push to main ran Test on ${SHA:0:7} in 30 minutes; only the head commit of a push gets a run, so release a commit that was one" >&2
           else
-            echo "Test did not finish on ${SHA:0:7} within 25 minutes (last seen: ${verdict})" >&2
+            echo "Test did not finish on ${SHA:0:7} within 30 minutes (last seen: ${verdict})" >&2
           fi
           exit 1
 

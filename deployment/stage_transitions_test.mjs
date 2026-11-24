@@ -58,6 +58,14 @@ function sourceFixture(source='v4.1.0-beta.3') {
  if(a[0]==='api'){
   if(a[1].includes('/releases/tags/')) console.log(JSON.stringify({tag_name:process.env.SOURCE_TAG,draft:false}));
   else if(a[1].includes('/commits/main')) console.log(process.env.SOURCE_SHA);
+  else if(a[1].includes('/jobs')){
+   // The job list of one Post-release acceptance run: the published container and
+   // the installation, each on both architectures. The script's own jq reads it.
+   const names=['execute published image Linux/amd64','execute published image Linux/arm64','systemd ubuntu-24.04','systemd ubuntu-24.04-arm'];
+   const jobs=(process.env.ACCEPTANCE_JOBS==='no-image'?names.slice(2):names).map(name=>({name,conclusion:'success'}));
+   const r=require('node:child_process').spawnSync('jq',['-r',opt('--jq')],{input:JSON.stringify({jobs}),encoding:'utf8'});
+   process.stdout.write(r.stdout);process.stderr.write(r.stderr);process.exit(r.status)
+  }
   else console.log('true');process.exit(0)
  }
  if(a[0]==='workflow' && a[1]==='run'){fs.appendFileSync(state,a[2]+'\\n');process.exit(0)}
@@ -86,8 +94,17 @@ test('Beta and RC can become final only after publication/acceptance, via verifi
   const f=sourceFixture(source);const r=advance(f);assert.equal(r.status,0,r.stderr)
   assert.equal(f.git('rev-parse','v4.1.0^{commit}'),f.sha)
   const log=calls(f);assert(log.indexOf('"workflow","run","release.yml"')<log.indexOf('"workflow","run","promote.yml"'))
-  if(nodeProduct) assert(log.indexOf('installation-acceptance.yml')<log.indexOf('"workflow","run","promote.yml"'))
+  const accepted=log.indexOf('post-release-acceptance.yml'),promoted=log.indexOf('"workflow","run","promote.yml"')
+  if(nodeProduct) assert(accepted>=0&&promoted>=0&&accepted<promoted,'promotion must be dispatched after the acceptance was read')
  }
+})
+test('a final is not promoted while the acceptance run lacks a job family',()=>{
+ if(!nodeProduct) return
+ const f=sourceFixture();f.env.ACCEPTANCE_JOBS='no-image'
+ shim(f,'sleep','')
+ shim(f,'seq','console.log(1);console.log(2)')
+ const r=advance(f);assert.notEqual(r.status,0);assert.match(r.stderr,/has not accepted/)
+ assert.doesNotMatch(calls(f),/"workflow","run","promote.yml"/)
 })
 test('a conflicting target or failed publication cannot be promoted',()=>{
  const f=sourceFixture();f.git('tag','v4.1.0');f.git('push','origin','v4.1.0');let r=advance(f)

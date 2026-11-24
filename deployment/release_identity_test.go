@@ -118,7 +118,7 @@ func TestTheNodeReleaseWorkflowTriggersOnTheCurrentNamespaceOnly(t *testing.T) {
 // to any of them would work for legacy releases and address the wrong image for
 // a product one.
 func TestContainerAcceptanceDerivesTheVersionFromTheTag(t *testing.T) {
-	workflow, err := os.ReadFile("../.github/workflows/container-acceptance.yml")
+	workflow, err := os.ReadFile("../.github/workflows/post-release-acceptance.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestContainerAcceptanceDerivesTheVersionFromTheTag(t *testing.T) {
 // why its CI log showed nothing but an exit code. A workflow whose steps pass
 // values by assignment passes review and fails a runner.
 func TestTheContainerAcceptanceExportsWhatLaterStepsRead(t *testing.T) {
-	workflow, err := os.ReadFile("../.github/workflows/container-acceptance.yml")
+	workflow, err := os.ReadFile("../.github/workflows/post-release-acceptance.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestTheContainerAcceptanceExportsWhatLaterStepsRead(t *testing.T) {
 // repair. It binds itself to the tag instead, so the file under test is the one
 // on the branch.
 func TestTheContainerAcceptanceBindsItselfToTheTag(t *testing.T) {
-	workflow, err := os.ReadFile("../.github/workflows/container-acceptance.yml")
+	workflow, err := os.ReadFile("../.github/workflows/post-release-acceptance.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

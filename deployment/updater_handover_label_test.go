@@ -181,7 +181,7 @@ func TestTheContainerJobChecksTheUpdaterHandoverLabel(t *testing.T) {
 // workspace is the tag's tree by then, so a release from before the label has a
 // recipe without it and an image without it, and both agree.
 func TestPublishedContainerAcceptanceChecksTheUpdaterHandoverLabel(t *testing.T) {
-	raw, err := os.ReadFile("../.github/workflows/container-acceptance.yml")
+	raw, err := os.ReadFile("../.github/workflows/post-release-acceptance.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

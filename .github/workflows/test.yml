@@ -26,10 +26,18 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  checks:
-    name: regular tests and static checks
+  # ONE JOB FOR THE STATIC CHECKS AND THE SUITE: a second job would pay for its
+  # own checkout, toolchain and build cache again. Static checks run first, so a
+  # formatting slip fails in seconds rather than after the suite.
+  #
+  # NO govulncheck HERE. It reports what the Go vulnerability database knows
+  # today, so a PR went red on an advisory published against a dependency it never
+  # touched. It runs weekly in watch.yml and before a release tag is allocated
+  # (prepare-release.yml) and again before anything is published (release.yml).
+  test:
+    name: test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       # THE BUILD CACHE IS PER JOB, AND setup-go's IS NOT. setup-go keys its cache
@@ -37,7 +45,7 @@ jobs:
       # Go job here and in the other workflows restores one entry that whichever
       # job finished first wrote once: darwin/arm64's objects, 176 MB, frozen.
       # Everything else compiles from source: the darwin/arm64 leg builds in 5s
-      # and the other five targets take 18-32s, vet takes 35s, and the race job
+      # and the other five targets take 18-32s, vet takes 35s, and the race run
       # spends ~47s compiling before its first result. setup-go keeps
       # `cache: true` for the module cache, which that one entry does serve.
       # Its restore lands in the same directory after this one, so every entry
@@ -53,8 +61,8 @@ jobs:
       - uses: actions/cache/restore@v6
         with:
           path: ~/.cache/go-build
-          key: go-build-checks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
-          restore-keys: go-build-checks-${{ runner.os }}-${{ runner.arch }}-
+          key: go-build-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-test-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -69,8 +77,19 @@ jobs:
         run: go vet ./...
       - name: Verify pinned build toolchain
         run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
-      # THE FULL SUITE RUNS ONCE, in the race job. No file in this module is built
-      # only without -race, so a plain `go test ./...` here ran the same tests a
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      # THE STANDALONE SCRIPTS GOT `sh -n` AT MOST. actionlint shellchecks only the
+      # `run:` blocks, and install.sh is served from main to root shells. The runner
+      # image ships shellcheck. Two codes are off on purpose: SC2034, because the
+      # unused names are `read` fields and rendered template values kept by name,
+      # and SC1007, because `CDPATH= cd` is the portable idiom it warns about.
+      - name: Shellcheck the standalone shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
+      - name: Validate immutable image publishing check
+        run: node --test deployment/check_image_test.mjs deployment/stage_transitions_test.mjs
+      # THE FULL SUITE RUNS ONCE, under -race. No file in this module is built
+      # only without -race, so a plain `go test ./...` ran the same tests a
       # second time. The named PTY test below stays: it asserts that one test ran
       # and passed, which a suite-wide pass does not.
       - name: Require named Linux PTY transfer-meter test to run and pass
@@ -86,91 +105,31 @@ jobs:
             /^[[:space:]]*--- (SKIP|FAIL):/ { rejected++ }
             END { exit !(passed == 1 && rejected == 0) }
           ' "$RUNNER_TEMP/install-pty-test.log"
-      - name: Reachable vulnerability check
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
-      - name: Validate GitHub Actions workflows
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      # THE STANDALONE SCRIPTS GOT `sh -n` AT MOST. actionlint shellchecks only the
-      # `run:` blocks, and install.sh is served from main to root shells. The runner
-      # image ships shellcheck. Two codes are off on purpose: SC2034, because the
-      # unused names are `read` fields and rendered template values kept by name,
-      # and SC1007, because `CDPATH= cd` is the portable idiom it warns about.
-      - name: Shellcheck the standalone shell scripts
-        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning --exclude=SC2034,SC1007
-      - name: Validate immutable image publishing check
-        run: node --test deployment/check_image_test.mjs deployment/stage_transitions_test.mjs
-      - uses: actions/cache/save@v6
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        with:
-          path: ~/.cache/go-build
-          key: go-build-checks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
-
-  race:
-    name: race detector
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      # The build cache pair the checks job explains.
-      - uses: actions/cache/restore@v6
-        with:
-          path: ~/.cache/go-build
-          key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
-          restore-keys: go-build-race-${{ runner.os }}-${{ runner.arch }}-
-      - uses: actions/setup-go@v6
-        env:
-          GOTOOLCHAIN: auto
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Run race detector
+      - name: Run the suite under the race detector
         run: go test -race -count=1 -timeout=15m ./...
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           path: ~/.cache/go-build
-          key: go-build-race-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+          key: go-build-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
-  verify:
-    name: test, vet, format
-    if: ${{ always() }}
-    needs: [checks, race]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require every verification job to pass
-        env:
-          CHECKS_RESULT: ${{ needs.checks.result }}
-          RACE_RESULT: ${{ needs.race.result }}
-        run: |
-          test "$CHECKS_RESULT" = success
-          test "$RACE_RESULT" = success
-
+  # ONE JOB FOR ALL SIX TARGETS: each takes 5-32s to compile, which a runner, a
+  # checkout and a toolchain apiece would outweigh. The targets run in turn in one
+  # build cache, each with the build and the provenance check, and the vet for the
+  # one target per non-Linux OS.
   cross-compile:
-    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: build (cross-compile)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        # `vet` marks the one leg per non-Linux OS that also vets the module for
-        # it; see the step below.
-        include:
-          - { goos: linux,   goarch: amd64, ext: ""     }
-          - { goos: linux,   goarch: arm64, ext: ""     }
-          - { goos: darwin,  goarch: amd64, ext: ""     }
-          - { goos: darwin,  goarch: arm64, ext: "",     vet: true }
-          - { goos: windows, goarch: amd64, ext: ".exe", vet: true }
-          - { goos: windows, goarch: arm64, ext: ".exe" }
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      # The build cache pair the checks job explains, one per target: a target's
-      # objects are its own, and the leg that has them builds in about 5s.
+      # The build cache pair the test job explains. One entry holds every
+      # target's objects.
       - uses: actions/cache/restore@v6
         with:
           path: ~/.cache/go-build
-          key: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
-          restore-keys: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-
+          key: go-build-cross-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-cross-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/setup-go@v6
         # setup-go ignores the toolchain directive when its input env is local.
         # It exports local after installing the exact preferred toolchain.
@@ -179,34 +138,46 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build daemon
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: |
-          go build -trimpath -ldflags="-s -w" -o "passwall-node${{ matrix.ext }}" ./cmd/node
-          sh deployment/check-build.sh "passwall-node${{ matrix.ext }}" "$GOOS" "$GOARCH" "$GITHUB_SHA"
-      # THE DARWIN AND WINDOWS CODE WAS COMPILED AND NEVER VETTED. The checks job
-      # vets linux/amd64, and the build above compiles ./cmd/node alone, so the
+      # THE DARWIN AND WINDOWS CODE WAS COMPILED AND NEVER VETTED. The test job
+      # vets linux/amd64, and the build compiles ./cmd/node alone, so the
       # suspend-inclusive task clock on darwin, the Windows process and signal
       # handling, and every test file under another GOOS were never even
       # type-checked — the first vet for Windows failed on a syscall.Stat_t in a
-      # deployment test. One leg per OS, because the code differs by OS rather
-      # than by architecture, and it is this leg because its build cache already
-      # holds the target's objects: about 30s cold, a few seconds warm.
-      - name: Vet the module for this OS
-        if: matrix.vet
+      # deployment test. One target per OS vets (darwin/arm64, windows/amd64),
+      # because the code differs by OS rather than by architecture.
+      #
+      # THE BINARY GOES OUTSIDE THE CHECKOUT. Go stamps vcs.modified from the
+      # working tree, and check-build.sh requires it to be false: a binary left in
+      # the tree by one target would dirty the stamp of the next.
+      - name: Build and inspect every release target
+        shell: bash
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go vet ./...
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            ext=""
+            if [ "$goos" = windows ]; then ext=".exe"; fi
+            out="$RUNNER_TEMP/passwall-node-${goos}-${goarch}${ext}"
+            echo "::group::build ${target}"
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$out" ./cmd/node
+            sh deployment/check-build.sh "$out" "$goos" "$goarch" "$GITHUB_SHA"
+            echo "::endgroup::"
+            case "$target" in
+              darwin/arm64|windows/amd64)
+                echo "::group::vet ${target}"
+                GOOS="$goos" GOARCH="$goarch" go vet ./...
+                echo "::endgroup::"
+                ;;
+            esac
+          done
       - uses: actions/cache/save@v6
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           path: ~/.cache/go-build
-          key: go-build-cross-${{ matrix.goos }}-${{ matrix.goarch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+          key: go-build-cross-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
 
   upgrade-systemd:
     name: upgrade helper sandbox (${{ matrix.arch }})
@@ -220,7 +191,7 @@ jobs:
           - { runner: ubuntu-24.04-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@v7
-      # The build cache pair the checks job explains.
+      # The build cache pair the test job explains.
       - uses: actions/cache/restore@v6
         with:
           path: ~/.cache/go-build
@@ -505,3 +476,165 @@ jobs:
           test "$(docker exec passwall-node-agent awk '$2 == "/" { split($4, o, ","); print o[1] }' /proc/mounts)" = ro
           test "$(docker exec passwall-node-agent awk '$2 == "/run/passwall-node" { print $3 }' /proc/mounts)" = tmpfs
           docker exec passwall-node-agent grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/1/status
+
+  # THE OFFICIAL CORES, RUN FOR REAL, in this workflow so that both the
+  # `required` gate and the release gate, which reads this workflow's whole run,
+  # cover them.
+  real-core:
+    name: official cores and REALITY Linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+      # The build cache pair the test job explains: a key per job and
+      # architecture, restored on every event, saved only from main.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-real-core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-real-core-${{ runner.os }}-${{ runner.arch }}-
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Require native Linux and pinned Go toolchain
+        run: |
+          set -euo pipefail
+          test "$(go env GOHOSTOS)" = linux
+          test "$(go env GOHOSTARCH)" = '${{ matrix.arch }}'
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+      - name: Verify fail-closed acceptance fixture
+        run: go test -count=1 ./deployment/coreacceptance
+      - name: Download and execute exact official binary versions
+        run: |
+          set -euo pipefail
+          go run ./deployment/coreacceptance prepare \
+            --directory "$RUNNER_TEMP/core-acceptance" \
+            --env-file "$GITHUB_ENV" | tee "$RUNNER_TEMP/core-acceptance-versions.json"
+      - name: Real installer, compiled config, API wire and three-client HTTP handshake
+        run: |
+          set -euo pipefail
+          go test -json -count=1 -timeout=10m ./internal/core/install \
+            -run '^TestOfficial(Xray|SingBox)InstallIntegration$' \
+            | tee "$RUNNER_TEMP/core-acceptance-tests.json"
+          go test -json -count=1 -timeout=10m ./internal/core/xray \
+            -run '^(TestCompilerArtifactPassesPinnedXrayValidation|TestCompilerPolicyArtifactPassesPinnedXrayValidation|TestPolicyEnforcedByRealXray|TestRealXrayCountsUsageByDomainByIPAndThroughAnAllowRule|TestRealXrayCountsAnExemptAccountsUsage|TestRealXrayCountsBulkConnectionsWithNothingUnmatched)$' \
+            | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
+          go test -json -count=1 -timeout=5m ./internal/core/singbox \
+            -run '^(TestCompilerArtifactPassesPinnedSingBoxValidation|TestCompilerPolicyArtifactPassesPinnedSingBoxValidation|TestPolicyEnforcedByRealSingBox|TestDaemonAPIWireCompatibilityWithPinnedSingBox|TestRealityHandshakeMatrix)$' \
+            | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
+          go run ./deployment/coreacceptance check \
+            --results "$RUNNER_TEMP/core-acceptance-tests.json"
+      - name: Keep exact-version and test execution evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-core-linux-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/core-acceptance-versions.json
+            ${{ runner.temp }}/core-acceptance-tests.json
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/cache/save@v6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: ~/.cache/go-build
+          key: go-build-real-core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+
+  # THE HOST RUNNER IS GLIBC; THE IMAGE THAT SHIPS IS ALPINE (MUSL). The job above
+  # proves the official cores on Ubuntu, and sing-box's plain Linux build passed it
+  # while it could not start in the Docker image at all: that build is linked
+  # against glibc, and exec of it on a musl host fails with ENOENT before it prints
+  # a version. So the production installer runs here INSIDE the runtime image the
+  # Dockerfile builds, on both architectures, downloading, checking and executing
+  # the recommended Xray and sing-box exactly as a Docker-deployed node does when
+  # PSP switches its engine. PSP_TEST_EXPECT_LIBC pins what the installer must
+  # detect, so a detection that drifts back to glibc fails by name.
+  image-cores:
+    name: official cores inside the Node image Linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Require native Linux and pinned Go toolchain
+        run: |
+          set -euo pipefail
+          test "$(go env GOHOSTOS)" = linux
+          test "$(go env GOHOSTARCH)" = '${{ matrix.arch }}'
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+      - name: Build the runtime image and a static installer test binary
+        run: |
+          set -euo pipefail
+          docker build --tag passwall-node:image-cores .
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/install.test" ./internal/core/install
+      # As the image's own unprivileged user, with the root filesystem read-only
+      # and only /tmp writable, the way compose.example.yaml runs the daemon.
+      - name: Install and execute both official cores inside the image
+        run: |
+          set -euo pipefail
+          docker run --rm --pull never --user 10001:10001 --read-only --tmpfs /tmp:exec,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --entrypoint /usr/local/bin/install.test \
+            --volume "$RUNNER_TEMP/install.test:/usr/local/bin/install.test:ro" \
+            --env PSP_TEST_CORE_INSTALL=1 --env PSP_TEST_SING_BOX_INSTALL=1 --env PSP_TEST_EXPECT_LIBC=musl \
+            passwall-node:image-cores \
+            -test.run '^TestOfficial(Xray|SingBox)InstallIntegration$' -test.count=1 -test.timeout=10m -test.v=test2json \
+            | go tool test2json -p github.com/KazuhaHub/passwall-node/v4/internal/core/install \
+            | tee "$RUNNER_TEMP/image-cores-tests.json"
+          go run ./deployment/coreacceptance check --profile image \
+            --results "$RUNNER_TEMP/image-cores-tests.json"
+      - name: Keep test execution evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-cores-linux-${{ matrix.arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/image-cores-tests.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # THE ONE CHECK BRANCH PROTECTION ASKS FOR. It needs every other job in this
+  # workflow and passes only when each of them succeeded, so adding a job here
+  # needs no change to the ruleset. `if: always()` because a job with `needs`
+  # and no condition does not run when a dependency fails, and a check that never
+  # runs reads as absent rather than as failed. Nothing here is skipped on
+  # purpose, so a skipped job means an upstream one failed and does not pass.
+  # deployment/test_workflow_test.go holds the list to every other job.
+  required:
+    name: required
+    needs: [test, cross-compile, upgrade-systemd, container, real-core, image-cores]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(printf '%s\n' "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | .key')
+          test -z "$bad" || { echo "::error::not green: ${bad//$'\n'/, }"; exit 1; }
