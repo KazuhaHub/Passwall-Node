@@ -36,8 +36,7 @@ func TestTheDockerUpdaterWorkflowRunsItsProbesOnBothArchitectures(t *testing.T) 
 	}
 	job := workflowJob(t, text, "assumptions")
 	for _, required := range []string{
-		"          - { runner: ubuntu-24.04, arch: amd64 }\n",
-		"          - { runner: ubuntu-24.04-arm, arch: arm64 }\n",
+		`{"runner":"ubuntu-24.04","arch":"amd64"},{"runner":"ubuntu-24.04-arm","arch":"arm64"}`,
 		"docker compose version",
 		`PN_DOCKER_UPDATER_E2E: "1"`,
 		`CGO_ENABLED: "0"`,
@@ -132,8 +131,7 @@ func TestTheDockerUpdaterWorkflowRunsTheHandoverEndToEnd(t *testing.T) {
 		t.Error("the handover job does not need the assumptions job")
 	}
 	for _, required := range []string{
-		"          - { runner: ubuntu-24.04, arch: amd64 }\n",
-		"          - { runner: ubuntu-24.04-arm, arch: arm64 }\n",
+		`{"runner":"ubuntu-24.04","arch":"amd64"},{"runner":"ubuntu-24.04-arm","arch":"arm64"}`,
 		"docker compose version",
 		"--file Dockerfile.release",
 		`PN_DOCKER_UPDATER_E2E: "1"`,

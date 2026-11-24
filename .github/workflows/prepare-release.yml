@@ -47,6 +47,12 @@ jobs:
           test -n "$build_toolchain"
           test "$(go env GOVERSION)" = "$build_toolchain"
           test "$(go tool compile -V | awk '{ print $3 }')" = "$build_toolchain"
+      # BEFORE A TAG EXISTS, because a tag is never moved or reused: a candidate
+      # cut from a commit with a reachable advisory would burn its number and then
+      # fail in release.yml, which scans again before anything is published. Test
+      # does not scan, so that a pull request is not held by an unrelated advisory.
+      - name: Reachable vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Require tested main and allocate candidate
         env:
           GH_TOKEN: ${{ github.token }}

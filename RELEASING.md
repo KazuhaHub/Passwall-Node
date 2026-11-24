@@ -92,8 +92,14 @@ Git tags, releases, or commits are rewritten during this migration.
 - A manually pushed plain final tag also starts `Release`. Both paths require
   the tagged source to be tested on main; signing and publication stay in the
   existing publisher.
-- Wait for Published Linux installation acceptance and Published container
-  acceptance on both architectures for the final tag.
+- Wait for Post-release acceptance (the published container and the Linux
+  installation, each on both architectures) for the final tag. Releases
+  dispatched by `Prepare release` or `Advance a published candidate` start no
+  such run by themselves: dispatch `Post-release acceptance` from main with the
+  tag.
+- A final tag released before the acceptance workflows were merged into
+  `Post-release acceptance`, but promoted after, has no run of it: dispatch it
+  from main for that tag first.
 - Dispatch `Promote a release to stable` from main with the plain tag. It
   verifies acceptance, signed manifests, asset hashes and image/source identity
   before moving `stable/latest`. The `release-promotion` environment applies.

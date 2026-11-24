@@ -1,8 +1,8 @@
 # Dependency updates for passwall-node.
 #
 # This file is the only thing that keeps dependencies moving on a schedule.
-# govulncheck in test.yml reports only what the Go vulnerability database
-# already knows, and only when a push or a PR happens to run it. The panel
+# govulncheck (weekly in watch.yml, and before a release) reports only what the
+# Go vulnerability database already knows. The panel
 # learned what that leaves out: GHSA-qhrp-hfff-vphr was in neither the Go
 # database nor the GitHub Advisory Database, so every scanner reported clean
 # while the panel was affected. Routine version updates close that gap because

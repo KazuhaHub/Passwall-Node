@@ -57,9 +57,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { runner: ubuntu-24.04, arch: amd64 }
-          - { runner: ubuntu-24.04-arm, arch: arm64 }
+        # A pull request runs amd64 only: arm64 is the slower leg, and what it adds
+        # (a different runner image, the same Docker behaviour) is what main, the
+        # weekly run and a dispatch still check. The whole list is the expression,
+        # because an exclude cannot remove an entry from an include-only matrix, and
+        # a job-level if: would also skip every job that needs this one.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"ubuntu-24.04","arch":"amd64"}]' || '[{"runner":"ubuntu-24.04","arch":"amd64"},{"runner":"ubuntu-24.04-arm","arch":"arm64"}]') }}
     steps:
       # FIRST, AND LOUD. Nothing in this repository has run Compose on the arm64
       # image before, and a probe that cannot find it should say so here rather
@@ -119,9 +122,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { runner: ubuntu-24.04, arch: amd64 }
-          - { runner: ubuntu-24.04-arm, arch: arm64 }
+        # As in assumptions: amd64 only on a pull request, with no job-level if:.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"ubuntu-24.04","arch":"amd64"}]' || '[{"runner":"ubuntu-24.04","arch":"amd64"},{"runner":"ubuntu-24.04-arm","arch":"arm64"}]') }}
     steps:
       - name: Docker Engine and Compose are present
         run: |

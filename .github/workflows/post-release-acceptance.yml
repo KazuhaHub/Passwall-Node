@@ -1,34 +1,58 @@
-name: Published container acceptance
+name: Post-release acceptance
 
-# Run against a release tag after its exact public image has been published.
-# This is native image execution/identity acceptance, not proxy, credential or
-# persistent-data acceptance. It never starts the agent business loop.
+# Run against a release tag after its exact public image and packages have been
+# published, on both architectures the release ships: the published container
+# image is pulled and executed, and the published Linux package is installed on
+# a disposable host. Neither starts the agent business loop, and neither is a
+# proxy, credential or persistent-data acceptance.
 #
-# IT RUNS AFTER EVERY RELEASE, because a gate somebody has to remember lapsed.
-# HANDOFF makes two-architecture package and container acceptance a release
-# step; while this was dispatch-only, six releases in a row went out without it.
-# A Release run that completed is what starts it now: only a tag push is a
-# release, and only a successful one has pushed its image, since the image is
-# the last thing Release does. workflow_run always runs main's copy of this
-# file, which binds itself to the tag below exactly as a dispatch does. A
-# dispatch still accepts any published tag, from any branch.
+# Disposable hosts only: the installation job consumes an already public exact
+# release and mutates only new disposable GitHub-hosted VMs. Never supply real
+# PSP credentials or a host.
+#
+# IT RUNS AFTER A RELEASE THAT A TAG PUSH STARTED, because a gate somebody has
+# to remember lapsed. HANDOFF makes two-architecture package and container
+# acceptance a release step; while these were dispatch-only, six releases in a
+# row went out without the container one and v4.0.1.5 without the installation
+# one. A Release run that completed starts it: only a successful one has pushed
+# its image, since the image is the last thing Release does. workflow_run always
+# runs main's copy of this file, which binds itself to the tag below exactly as a
+# dispatch does.
+#
+# A RELEASE DISPATCHED WITH THE GITHUB TOKEN DOES NOT START IT. prepare-release.yml
+# and advance-release.yml dispatch Release that way, and GitHub fires no
+# workflow_run for a run those tokens started, so for those releases this has to
+# be dispatched by hand before promote.yml will accept the tag. A dispatch accepts
+# any published tag, from any branch, which is also how a branch's installer is
+# tried against a published binary.
+#
+# ONE WORKFLOW, ONE RUN, FOUR JOBS: promote.yml reads that run and wants every
+# job of it green.
 on:
   workflow_run:
     workflows: [Release]
     types: [completed]
   workflow_dispatch:
     inputs:
+      # THE TAG, NOT THE VERSION: a version no longer determines one address, and
+      # the version is derived from the tag by the release-tag command. No
+      # default, because the ones these inputs had named releases that were never
+      # published under that address, and a form that fills itself in accepts the
+      # wrong release.
       tag:
-        # No default: the one it had named a release from before the address
-        # changed, and a form that fills itself in accepts the wrong release.
-        description: "Published release tag, for example v4.0.1.5"
+        description: "Published release tag, for example v4.0.1.5 or release/4.0.1.2"
         required: true
+        type: string
+      upgrade_from_tag:
+        description: "Installation job only: older published release tag to install first, then upgrade to `tag`; empty skips the upgrade scenario"
+        required: false
+        default: ""
         type: string
 
 # THE TAG IS IN THE TITLE, because the title is what promote.yml finds this
 # acceptance by: a workflow_run's own ref is main, so nothing else about the run
 # names the release it accepted.
-run-name: Published container acceptance of ${{ inputs.tag || github.event.workflow_run.head_branch }}
+run-name: Post-release acceptance of ${{ inputs.tag || github.event.workflow_run.head_branch }}
 
 permissions:
   contents: read
@@ -153,3 +177,75 @@ jobs:
           declared=$(sed -n 's/^[[:space:]]*io\.kazuhahub\.passwall-node\.updater-handover="\([^"]*\)".*$/\1/p' Dockerfile.release)
           published=$(docker image inspect --format '{{ with index .Config.Labels "io.kazuhahub.passwall-node.updater-handover" }}{{ . }}{{ end }}' "${IMAGE_REPOSITORY}:${version}")
           test "$published" = "$declared"
+
+  installation:
+    name: systemd ${{ matrix.runner }}
+    # As in the container job: head_branch is the tag of a tag push.
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    env:
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+      UPGRADE_FROM_TAG: ${{ inputs.upgrade_from_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # THE RELEASED COMMIT, AFTER A RELEASE. workflow_run runs main's copy of
+          # this file with main checked out, and the tool built below renders the
+          # private installer from the checkout: main's template is not the one
+          # the tag published. Empty on a dispatch, which keeps its own ref.
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-go@v6
+        # setup-go ignores the toolchain directive when its input env is local.
+        # It exports local after installing the exact preferred toolchain.
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify exact pinned host and compiler toolchain
+        run: |
+          set -eu
+          acceptance_toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          test -n "$acceptance_toolchain"
+          test "$(go env GOVERSION)" = "$acceptance_toolchain"
+          test "$(go tool compile -V | awk '{ print $3 }')" = "$acceptance_toolchain"
+      - name: Build disposable installation acceptance tool
+        run: go build -trimpath -o "$RUNNER_TEMP/passwall-node-installation-acceptance" ./deployment/acceptance
+      - name: Derive the versions the tags name
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One derivation, the one release.yml and the container job run.
+          # It refuses an unpublishable tag and prints nothing when it does, so an
+          # empty version cannot reach the tool. The values cross a step boundary,
+          # so they go through GITHUB_ENV.
+          version=$(go run ./deployment/cmd/release-tag "$TAG")
+          test -n "$version"
+          upgrade_from=""
+          if [ -n "$UPGRADE_FROM_TAG" ]; then
+            upgrade_from=$(go run ./deployment/cmd/release-tag "$UPGRADE_FROM_TAG")
+            test -n "$upgrade_from"
+          fi
+          {
+            echo "ACCEPTANCE_VERSION=$version"
+            echo "ACCEPTANCE_UPGRADE_FROM=$upgrade_from"
+          } >> "$GITHUB_ENV"
+      - name: Install public release (upgrading first when asked), inspect isolation, rerun offline and reinstall
+        shell: bash
+        run: |
+          set +x
+          set -eu
+          # BOTH IDENTITIES ARE PASSED: the tag is the address, and a release
+          # published before the address changed can only be reached by naming the
+          # tag it is really at; the version is what the installer verifies.
+          args=(-version "$ACCEPTANCE_VERSION" -tag "$TAG")
+          [ -z "${ACCEPTANCE_UPGRADE_FROM:-}" ] || args+=(-upgrade-from "$ACCEPTANCE_UPGRADE_FROM" -upgrade-from-tag "$UPGRADE_FROM_TAG")
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            "$RUNNER_TEMP/passwall-node-installation-acceptance" "${args[@]}"
+      # No artifacts, raw journal, script, proc environment or diagnostics are
+      # uploaded: the private fixture credential is deliberately ephemeral.

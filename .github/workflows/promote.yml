@@ -126,41 +126,42 @@ jobs:
           TAG: ${{ steps.identity.outputs.tag }}
         run: |
           set -euo pipefail
+          workflow=post-release-acceptance.yml
           # HANDOFF puts two-architecture package and container acceptance
           # between a release and anything that consumes it, and stable is what
           # the public installer and `latest` hand to everyone, so it is not
-          # offered before that acceptance passed. Both acceptances run after
-          # every release by themselves, and on dispatch for older ones; a run's
-          # title is its workflow's name and the tag it accepted, because a
-          # workflow_run's own ref is main and names no release.
+          # offered before that acceptance passed. It runs after every release by
+          # itself, and on dispatch for older ones; a run's title is its
+          # workflow's name and the tag it accepted, because a workflow_run's own
+          # ref is main and names no release.
           #
-          # MAIN'S COPY, A PASSED RUN, AND EVERY LEG. A workflow_run always runs
+          # MAIN'S COPY, A PASSED RUN, AND EVERY JOB. A workflow_run always runs
           # main's copy; a dispatch counts only from main, because a branch can
           # carry a copy that checks nothing. And the run's conclusion is not
-          # read alone: its legs are, and there are at least two, amd64 and
-          # arm64, each of which passed.
-          for workflow in container-acceptance.yml installation-acceptance.yml; do
-            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
-              --status success --limit 200 \
-              --json databaseId,displayTitle,workflowName,event,headBranch \
-              --jq '.[] | select(.displayTitle == .workflowName + " of " + env.TAG)
-                | select(.event == "workflow_run" or (.event == "workflow_dispatch" and .headBranch == "main"))
-                | .databaseId')
-            accepted=""
-            for run in $runs; do
-              passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs" \
-                --jq '[.jobs[].conclusion] | length >= 2 and all(. == "success")')
-              if [ "$passed" = true ]; then
-                accepted="$run"
-                break
-              fi
-            done
-            if [ -z "$accepted" ]; then
-              echo "no run of ${workflow} from main passed on every architecture for ${TAG}; dispatch it from main with tag ${TAG}, then re-run this" >&2
-              exit 1
+          # read alone: its jobs are, and it must hold the published container on
+          # both architectures and the installation on both, each of which passed.
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+            --status success --limit 200 \
+            --json databaseId,displayTitle,workflowName,event,headBranch \
+            --jq '.[] | select(.displayTitle == .workflowName + " of " + env.TAG)
+              | select(.event == "workflow_run" or (.event == "workflow_dispatch" and .headBranch == "main"))
+              | .databaseId')
+          accepted=""
+          for run in $runs; do
+            passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs" \
+              --jq '(.jobs | map(select(.name | startswith("execute published image"))) | length >= 2)
+                and (.jobs | map(select(.name | startswith("systemd"))) | length >= 2)
+                and (.jobs | map(.conclusion) | all(. == "success"))')
+            if [ "$passed" = true ]; then
+              accepted="$run"
+              break
             fi
-            echo "${workflow}: ${TAG} accepted by run ${accepted}"
           done
+          if [ -z "$accepted" ]; then
+            echo "no run of ${workflow} from main passed on every job and architecture for ${TAG}; dispatch it from main with tag ${TAG}, then re-run this" >&2
+            exit 1
+          fi
+          echo "${workflow}: ${TAG} accepted by run ${accepted}"
 
       - name: Verify the published assets against the signed manifest
         shell: bash
