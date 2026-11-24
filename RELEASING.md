@@ -93,10 +93,10 @@ Git tags, releases, or commits are rewritten during this migration.
   the tagged source to be tested on main; signing and publication stay in the
   existing publisher.
 - Wait for Post-release acceptance (the published container and the Linux
-  installation, each on both architectures) for the final tag. Releases
-  dispatched by `Prepare release` or `Advance a published candidate` start no
-  such run by themselves: dispatch `Post-release acceptance` from main with the
-  tag.
+  installation, each on both architectures) for the final tag. `Advance a
+  published candidate` dispatches it itself and waits. A release cut by
+  `Prepare release` starts no such run: dispatch `Post-release acceptance` from
+  main with the tag.
 - A final tag released before the acceptance workflows were merged into
   `Post-release acceptance`, but promoted after, has no run of it: dispatch it
   from main for that tag first.

@@ -21,8 +21,9 @@ name: Post-release acceptance
 #
 # A RELEASE DISPATCHED WITH THE GITHUB TOKEN DOES NOT START IT. prepare-release.yml
 # and advance-release.yml dispatch Release that way, and GitHub fires no
-# workflow_run for a run those tokens started, so for those releases this has to
-# be dispatched by hand before promote.yml will accept the tag. A dispatch accepts
+# workflow_run for a run those tokens started. advance-release dispatches this
+# itself after its Release and waits for it; a release cut by prepare-release has
+# to have it dispatched by hand before promote.yml will accept the tag. A dispatch accepts
 # any published tag, from any branch, which is also how a branch's installer is
 # tried against a published binary.
 #

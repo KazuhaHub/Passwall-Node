@@ -9,7 +9,8 @@ The `installation` job of `.github/workflows/post-release-acceptance.yml` runs b
 itself after a successful Release run that a tag push started, against that tag,
 with this tool built from the tagged commit. A Release dispatched by
 `prepare-release.yml` or `advance-release.yml` uses the GitHub token and starts
-no such run, so dispatch the workflow by hand for those tags. For any other published release, dispatch it with the
+no such run: `advance-release.yml` dispatches the acceptance itself, and a tag cut
+by `prepare-release.yml` needs it dispatched by hand. For any other published release, dispatch it with the
 release's `tag` (for example `v4.0.1.5` or `release/4.0.1.2`); the version is
 derived from the tag. Both `ubuntu-24.04` and `ubuntu-24.04-arm` execute the real
 installer and the **published binary**, not a locally built agent. On a dispatch

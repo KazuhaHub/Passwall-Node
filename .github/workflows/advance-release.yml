@@ -51,5 +51,5 @@ jobs:
           SOURCE_TAG: ${{ inputs.source_tag }}
           TARGET_STAGE: ${{ inputs.target_stage }}
           STAGE_TOOL: ${{ runner.temp }}/release-stage
-          REQUIRE_NODE_trueANCE: "true"
+          REQUIRE_NODE_ACCEPTANCE: "true"
         run: bash .github/scripts/advance-release.sh
