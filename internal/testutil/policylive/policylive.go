@@ -711,6 +711,9 @@ func Run(t *testing.T, clientBinary string, options Options, start StartFunc) {
 			continue
 		}
 		t.Run(test.name, func(t *testing.T) {
+			// Cases have independent processes, ports, sinks and configs. Keep
+			// the attempts within each case in order, sharing the same sink.
+			t.Parallel()
 			s := newSink(t)
 			if test.claimed && options.Engine == "xray" {
 				probe, err := net.Listen("tcp", fmt.Sprintf("[::1]:%d", s.port()))

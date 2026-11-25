@@ -523,18 +523,7 @@ jobs:
             --env-file "$GITHUB_ENV" | tee "$RUNNER_TEMP/core-acceptance-versions.json"
       - name: Real installer, compiled config, API wire and three-client HTTP handshake
         run: |
-          set -euo pipefail
-          go test -json -count=1 -timeout=10m ./internal/core/install \
-            -run '^TestOfficial(Xray|SingBox)InstallIntegration$' \
-            | tee "$RUNNER_TEMP/core-acceptance-tests.json"
-          go test -json -count=1 -timeout=10m ./internal/core/xray \
-            -run '^(TestCompilerArtifactPassesPinnedXrayValidation|TestCompilerPolicyArtifactPassesPinnedXrayValidation|TestPolicyEnforcedByRealXray|TestRealXrayCountsUsageByDomainByIPAndThroughAnAllowRule|TestRealXrayCountsAnExemptAccountsUsage|TestRealXrayCountsBulkConnectionsWithNothingUnmatched)$' \
-            | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
-          go test -json -count=1 -timeout=5m ./internal/core/singbox \
-            -run '^(TestCompilerArtifactPassesPinnedSingBoxValidation|TestCompilerPolicyArtifactPassesPinnedSingBoxValidation|TestPolicyEnforcedByRealSingBox|TestDaemonAPIWireCompatibilityWithPinnedSingBox|TestRealityHandshakeMatrix)$' \
-            | tee -a "$RUNNER_TEMP/core-acceptance-tests.json"
-          go run ./deployment/coreacceptance check \
-            --results "$RUNNER_TEMP/core-acceptance-tests.json"
+          bash deployment/test-official-cores.sh "$RUNNER_TEMP/core-acceptance-tests.json"
       - name: Keep exact-version and test execution evidence
         if: always()
         uses: actions/upload-artifact@v7
