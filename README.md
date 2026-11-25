@@ -850,9 +850,28 @@ the service is stopped.
 ## Development and release gates
 
 ```bash
-go test ./...
-go test -race ./...
-go vet ./...
+GOWORK=off go test -race -count=1 -timeout=15m ./...
+GOWORK=off go vet ./...
+```
+
+Run the native-Linux official-core acceptance from the module root with the
+same command as CI. The preparation step downloads and verifies the pinned
+binaries. Cases use separate processes, ports and temporary directories, and
+the script checks that each required test ran and passed.
+
+```bash
+(
+  set -e
+  export GOWORK=off
+  fixture=$(mktemp -d)
+  trap 'rm -rf -- "$fixture"' EXIT
+  go run ./deployment/coreacceptance prepare \
+    --directory "$fixture/cores" --env-file "$fixture/core.env"
+  set -a
+  . "$fixture/core.env"
+  set +a
+  bash deployment/test-official-cores.sh "$fixture/tests.json"
+)
 ```
 
 CI runs the suite once, under the race detector, vets it, cross-compiles

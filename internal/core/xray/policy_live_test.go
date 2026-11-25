@@ -40,6 +40,8 @@ func TestPolicyEnforcedByRealXray(t *testing.T) {
 		}
 		ran = true
 		t.Run(server.name, func(t *testing.T) {
+			// Each version starts its own client, server, and sinks.
+			t.Parallel()
 			policylive.Run(t, client, policylive.Options{Engine: "xray", SOCKSDomainTargets: true},
 				func(t *testing.T, policy *protocol.DestinationPolicy, port int) *policylive.Process {
 					spec, err := json.Marshal(listenerSpec{

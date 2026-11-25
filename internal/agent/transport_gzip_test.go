@@ -231,7 +231,19 @@ func TestSyncGzipDecodesGzipResponse(t *testing.T) {
 
 func TestSyncGzipRejectsOversizeDecodedResponse(t *testing.T) {
 	bomb := append([]byte(`{"x":"`), bytes.Repeat([]byte("a"), int(protocol.MaxSyncDecodedBytes)+1)...)
-	compressed := gzipBytes(t, bomb)
+	// Only the response's wire and decoded sizes matter for this fixture.
+	var out bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&out, gzip.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(bomb); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	compressed := out.Bytes()
 	if int64(len(compressed)) > protocol.MaxSyncWireBytes {
 		t.Fatalf("test bomb too large on the wire: %d", len(compressed))
 	}
@@ -240,7 +252,7 @@ func TestSyncGzipRejectsOversizeDecodedResponse(t *testing.T) {
 		_, _ = w.Write(compressed)
 	}}
 	syncer := newGzipSyncer(t, panel, true, nil)
-	err := syncOnce(syncer)
+	err = syncOnce(syncer)
 	if err == nil || !strings.Contains(err.Error(), "decoded size limit") {
 		t.Fatalf("error = %v", err)
 	}
