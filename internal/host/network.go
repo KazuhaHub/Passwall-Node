@@ -2,6 +2,8 @@ package host
 
 import (
 	"errors"
+	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -291,12 +293,101 @@ func (c *collector) collectNetwork(collected *sample, bootID string) {
 		interfaces = interfaces[:protocol.MaxNetworkInterfaces]
 	}
 
+	c.attachAddresses(interfaces, collected)
+
 	network := protocol.NetworkObservation{Interfaces: interfaces}
 	network.CounterEpoch = c.counterEpoch(bootID)
 	network.DefaultIPv4Interface = c.defaultInterface("net/route", parseIPv4Routes, collected)
 	network.DefaultIPv6Interface = c.defaultInterface("net/ipv6_route", parseIPv6Routes, collected)
 	c.markUnreadableLinkSpeeds(interfaces, network.DefaultIPv4Interface, network.DefaultIPv6Interface, collected)
 	collected.observation.Network = &network
+}
+
+// attachAddresses fills each interface's address list from the link lookup.
+//
+// The sysfs table still decides which interfaces exist; the lookup only adds
+// addresses to entries it matches by index and name. A failed lookup leaves
+// every list empty and says so with the network.addresses token, because the
+// capability makes an empty list read as "this link has no address". The
+// per-observation bound is spent in ifindex order, so the cut is the same on
+// every sample of an unchanged host.
+func (c *collector) attachAddresses(interfaces []protocol.NetworkInterfaceObservation, collected *sample) {
+	if c.options.LinkAddresses == nil {
+		return
+	}
+	indexes := make([]int, 0, len(interfaces))
+	for _, networkInterface := range interfaces {
+		indexes = append(indexes, networkInterface.Index)
+	}
+	links, err := c.options.LinkAddresses(indexes)
+	if err != nil {
+		collected.markUnavailable(protocol.UnavailableNetAddresses)
+		return
+	}
+	type identity struct {
+		index int
+		name  string
+	}
+	byIdentity := make(map[identity][]netip.Prefix, len(links))
+	for _, link := range links {
+		key := identity{link.Index, link.Name}
+		byIdentity[key] = append(byIdentity[key], link.Prefixes...)
+	}
+	budget := protocol.MaxNetworkAddresses
+	for position := range interfaces {
+		prefixes := byIdentity[identity{interfaces[position].Index, interfaces[position].Name}]
+		addresses, truncated := protocol.InterfaceAddressList(prefixes, budget)
+		interfaces[position].Addresses = addresses
+		interfaces[position].AddressesTruncated = truncated
+		budget -= len(addresses)
+	}
+}
+
+// systemLinkAddresses is the production LinkAddresses: each kept interface's
+// Addrs, read through netlink in the agent's own network namespace, which is
+// the namespace /proc/net/dev describes too. Only the kept indexes are read, so
+// a host with a thousand veths costs at most MaxNetworkInterfaces lookups.
+//
+// net exposes no address flags, so an IPv6 address that is still tentative or
+// failed duplicate address detection is listed like any other.
+func systemLinkAddresses(indexes []int) ([]LinkAddresses, error) {
+	out := make([]LinkAddresses, 0, len(indexes))
+	for _, index := range indexes {
+		link, err := net.InterfaceByIndex(index)
+		if err != nil {
+			// Gone since the sysfs read: it simply gets no addresses.
+			continue
+		}
+		addrs, err := link.Addrs()
+		if err != nil {
+			return nil, err
+		}
+		entry := LinkAddresses{Index: link.Index, Name: link.Name}
+		for _, addr := range addrs {
+			network, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip, ok := netip.AddrFromSlice(network.IP)
+			if !ok {
+				continue
+			}
+			ones, bits := network.Mask.Size()
+			if bits == 0 {
+				continue
+			}
+			// net returns IPv4 addresses in their 16-byte form with a 4-byte
+			// mask; unmap them so the prefix length is the IPv4 one.
+			if bits == 32 {
+				ip = ip.Unmap()
+			}
+			if prefix := netip.PrefixFrom(ip, ones); prefix.IsValid() {
+				entry.Prefixes = append(entry.Prefixes, prefix)
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }
 
 // buildNetworkInterface reads one interface's metadata.
