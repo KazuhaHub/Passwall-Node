@@ -27,6 +27,7 @@ package host
 
 import (
 	"context"
+	"net/netip"
 	"time"
 
 	agentcore "github.com/KazuhaHub/passwall-node/v4/internal/core"
@@ -80,6 +81,22 @@ type Options struct {
 
 	// Now is the wall clock. It exists so a test can pin collected_at_ms.
 	Now func() time.Time
+
+	// LinkAddresses lists the addresses of the links with the given ifindexes
+	// (the interfaces the sample keeps), for NetworkInterfaceObservation.Addresses.
+	// New installs the system lookup when it is nil; a collector built without
+	// New and without it reports no addresses and no token.
+	LinkAddresses func(indexes []int) ([]LinkAddresses, error)
+}
+
+// LinkAddresses is one link's addresses as the system reports them. It is
+// joined to the sysfs interface table by index AND name, so an interface
+// renamed or replaced between the two reads gets no addresses rather than
+// another link's.
+type LinkAddresses struct {
+	Index    int
+	Name     string
+	Prefixes []netip.Prefix
 }
 
 func (o Options) now() time.Time {

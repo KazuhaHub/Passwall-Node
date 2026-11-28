@@ -28,6 +28,9 @@ func New(options Options) (Collector, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	if options.LinkAddresses == nil {
+		options.LinkAddresses = systemLinkAddresses
+	}
 	return newCollector(options, statFS), nil
 }
 

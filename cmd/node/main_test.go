@@ -158,6 +158,9 @@ func TestStaticCapabilitiesAlwaysDeclareTheDestinationPolicy(t *testing.T) {
 		if got := slices.Contains(capabilities, protocol.CapabilityHostTelemetry); got != hostTelemetry {
 			t.Fatalf("host telemetry %v: capabilities %v", hostTelemetry, capabilities)
 		}
+		if got := slices.Contains(capabilities, protocol.CapabilityHostInterfaceAddresses); got != hostTelemetry {
+			t.Fatalf("host telemetry %v: interface addresses declared %v", hostTelemetry, got)
+		}
 	}
 }
 

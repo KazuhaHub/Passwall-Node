@@ -419,6 +419,8 @@ whose source address does not fit the client's line.
   own global unicast addresses, minus loopback, link-local, multicast, private
   (RFC 1918, ULA), shared (CGNAT) and documentation ranges, sorted, at most 64.
   The panel uses them as the source set of a relay line this node is the entry of.
+  Host telemetry separately lists every interface's addresses, public and
+  private, under `host.interface_addresses.v1` (see below).
 - The capability is declared while the selected engine is Xray or sing-box, and a
   node with no guarded client compiles byte-identical configuration.
 - Real-core tests (skipped when the variables are unset): `PSP_TEST_XRAY_BIN`
@@ -426,6 +428,19 @@ whose source address does not fit the client's line.
   used as the client); run `go test ./internal/core/xray ./internal/core/singbox
   -run SourceGuard`. They connect from 127.0.0.1 through seven guarded and
   unguarded clients, check the refusals, and (Xray) the `/guard` webhook.
+
+### Interface addresses in host telemetry (`host.interface_addresses.v1`)
+
+Declared with `host.telemetry.v1`. Each interface in the host sample carries its
+unicast addresses with prefix length (`10.0.0.5/8`, `2001:db8::1/64`), IPv4 and
+IPv6, public and private, read with `net.Interfaces` in the agent's own network
+namespace and joined to the sysfs interface table by ifindex and name. IPv6
+link-local, loopback and multicast addresses are left out. At most 32 per
+interface and 256 per sample, spent in ifindex order; a cut list sets
+`addresses_truncated`. A failed read adds the `network.addresses` unavailable
+token and leaves the lists empty. In a container with its own network namespace
+these are the container's addresses, not the host's. Tentative or
+DAD-failed IPv6 addresses are listed like any other (no address flags are read).
 
 ### Compressed sync (`sync.gzip.v1`)
 

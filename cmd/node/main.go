@@ -497,7 +497,10 @@ func engineCapabilities(base func() []string, engine func() string) func() []str
 func staticCapabilities(hostTelemetry, auditHits bool) []string {
 	capabilities := []string{protocol.CapabilityDestinationPolicy, protocol.CapabilityDestinationGroups, protocol.CapabilityDestinationResolve, protocol.CapabilityTransitForward, protocol.CapabilityTransitLink, protocol.CapabilityTransitProbe, protocol.CapabilityTransitRoute, protocol.CapabilitySyncGzip}
 	if hostTelemetry {
-		capabilities = append(capabilities, protocol.CapabilityHostTelemetry)
+		// The Linux collector always installs the link address lookup, and a
+		// failed lookup is reported per sample with network.addresses, so the
+		// two are declared together.
+		capabilities = append(capabilities, protocol.CapabilityHostTelemetry, protocol.CapabilityHostInterfaceAddresses)
 	}
 	if auditHits {
 		capabilities = append(capabilities, protocol.CapabilityAuditHits, protocol.CapabilityAuditHitsEgress, protocol.CapabilityAuditUsage)
